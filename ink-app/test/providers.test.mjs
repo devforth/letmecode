@@ -98,6 +98,8 @@ test("CodexUsageProvider returns valid ProviderStats", async () => {
     assert.equal(stats.modelUsage.length, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5.5");
     assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso.endsWith("Z"), true);
+    assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
     assert.deepEqual(stats.secondaryLimitWindows, []);
   });
 });
@@ -204,7 +206,9 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
     assert.equal(stats.modelUsage[0].modelId, "gpt-5.5");
     assert.equal(stats.primaryLimitWindows.length, 5);
     assert.equal(stats.secondaryLimitWindows.length, 5);
-    assert.equal(stats.primaryLimitWindows[0].endTimeIso > stats.primaryLimitWindows[4].endTimeIso, true);
+    assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso > stats.primaryLimitWindows[4].endTimeUtcIso, true);
+    assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso.endsWith("Z"), true);
+    assert.equal(stats.secondaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.warnings.some((warning) => warning.includes("malformed")), true);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-9")), true);
   });

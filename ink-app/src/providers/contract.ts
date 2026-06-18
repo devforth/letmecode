@@ -21,10 +21,10 @@ export type LimitWindowRow = {
   planType: string;
   limitId: string;
   windowMinutes: number;
-  startTimeIso: string;
-  endTimeIso: string;
-  firstSeenIso: string;
-  lastSeenIso: string;
+  startTimeUtcIso: string;
+  endTimeUtcIso: string;
+  firstSeenUtcIso: string;
+  lastSeenUtcIso: string;
   minUsedPercent: number;
   maxUsedPercent: number;
   eventCount: number;

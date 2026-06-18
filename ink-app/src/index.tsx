@@ -236,8 +236,8 @@ function LimitWindowSection(props: { windows: LimitWindowRow[] }): React.JSX.Ele
         const windowLabel = formatWindowMinutes(window.windowMinutes);
         const usedLabel = `${window.minUsedPercent}%->${window.maxUsedPercent}%`;
         return (
-          <Text key={`${window.scope}-${window.planType}-${window.limitId}-${window.endTimeIso}`}>
-            {pad(window.planType, 10)} {pad(window.limitId, 10)} {pad(windowLabel, 8)} {pad(usedLabel, 12)} {pad(shortIso(window.startTimeIso), 20)} {pad(shortIso(window.endTimeIso), 20)} {formatInteger(window.eventCount)}
+          <Text key={`${window.scope}-${window.planType}-${window.limitId}-${window.endTimeUtcIso}`}>
+            {pad(window.planType, 10)} {pad(window.limitId, 10)} {pad(windowLabel, 8)} {pad(usedLabel, 12)} {pad(formatLocalDateTime(window.startTimeUtcIso), 18)} {pad(formatLocalDateTime(window.endTimeUtcIso), 18)} {formatInteger(window.eventCount)}
           </Text>
         );
       })}
@@ -286,8 +286,19 @@ function formatWindowMinutes(value: number): string {
   return `${hours.toFixed(2)}h`;
 }
 
-function shortIso(value: string): string {
-  return value.replace(".000Z", "Z").slice(0, 19) + "Z";
+function formatLocalDateTime(value: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23"
+  }).formatToParts(new Date(value));
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.month} ${lookup.day}, ${lookup.year} ${lookup.hour}:${lookup.minute}`;
 }
 
 function pad(value: string, length: number): string {

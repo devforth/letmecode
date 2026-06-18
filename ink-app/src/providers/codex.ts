@@ -291,15 +291,15 @@ function buildWindowLists(windows: Map<string, LimitWindowAggregate>): [LimitWin
       planType: window.planType,
       limitId: window.limitId,
       windowMinutes: window.windowMinutes,
-      startTimeIso: formatIsoFromSeconds(window.minStartsAt),
-      endTimeIso: formatIsoFromSeconds(window.maxResetsAt),
-      firstSeenIso: formatIsoFromMilliseconds(window.firstSeenMs),
-      lastSeenIso: formatIsoFromMilliseconds(window.lastSeenMs),
+      startTimeUtcIso: formatIsoFromSeconds(window.minStartsAt),
+      endTimeUtcIso: formatIsoFromSeconds(window.maxResetsAt),
+      firstSeenUtcIso: formatIsoFromMilliseconds(window.firstSeenMs),
+      lastSeenUtcIso: formatIsoFromMilliseconds(window.lastSeenMs),
       minUsedPercent: window.minUsedPercent,
       maxUsedPercent: window.maxUsedPercent,
       eventCount: window.eventCount
     }))
-    .sort((left, right) => right.endTimeIso.localeCompare(left.endTimeIso));
+    .sort((left, right) => right.endTimeUtcIso.localeCompare(left.endTimeUtcIso));
 
   const primary = rows.filter((row) => row.scope === "primary").slice(0, 5);
   const secondary = rows.filter((row) => row.scope === "secondary").slice(0, 5);
