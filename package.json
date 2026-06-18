@@ -1,0 +1,32 @@
+{
+  "name": "agem",
+  "version": "0.1.0",
+  "description": "Minimal npx-first CLI for agem.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.28.2",
+  "type": "commonjs",
+  "bin": "./bin/agem.js",
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "prestart": "npm run build",
+    "start": "node ./bin/agem.js",
+    "pretest": "npm run build",
+    "test": "node ./bin/agem.js"
+  },
+  "keywords": [
+    "cli",
+    "npx",
+    "typescript"
+  ],
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
