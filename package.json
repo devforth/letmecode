@@ -1,36 +1,47 @@
 {
-  "name": "agem",
+  "name": "letmecode",
   "version": "0.1.0",
-  "description": "Minimal npx-first CLI for agem.",
+  "description": "Provider-based terminal usage dashboard for LetMeCode.",
   "author": "devforth.io",
   "license": "MIT",
   "packageManager": "pnpm@10.28.2",
   "type": "commonjs",
-  "bin": "./bin/agem.js",
+  "bin": "./bin/letmecode.js",
   "files": [
     "bin",
-    "dist"
+    "dist",
+    "ink-app/dist",
+    "ink-app/package.json"
   ],
   "engines": {
-    "node": ">=14"
+    "node": ">=14.16"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true }); require('node:fs').rmSync('ink-app/dist', { recursive: true, force: true });\"",
+    "build": "npm run clean && tsc -p tsconfig.json && tsc -p ink-app/tsconfig.json",
     "prepack": "npm run build",
     "prestart": "npm run build",
-    "start": "node ./bin/agem.js",
+    "start": "node ./bin/letmecode.js",
     "pretest": "npm run build",
-    "test": "node ./bin/agem.js"
+    "smoke": "node ./bin/letmecode.js",
+    "test": "node --test ink-app/test/*.test.mjs"
   },
   "keywords": [
     "cli",
+    "ink",
     "npx",
     "typescript"
   ],
+  "dependencies": {
+    "ink": "4.4.1",
+    "react": "18.3.1"
+  },
   "devDependencies": {
+    "@types/node": "^24.0.7",
+    "@types/react": "^18.3.24",
     "typescript": "^5.8.3"
   }
 }

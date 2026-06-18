@@ -1,16 +1,18 @@
-# agem
+# letmecode
 
 Minimal `npx`-first CLI package.
 
 ## Local development
 
 ```bash
-pnpm i
+pnpm install
 pnpm start
 ```
+
+The Ink app source lives in `ink-app/`.
 
 ## Usage
 
 ```bash
-npx agem
+npx letmecode
 ```
