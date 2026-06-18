@@ -2,6 +2,7 @@
   "name": "agem",
   "version": "0.1.0",
   "description": "Minimal npx-first CLI for agem.",
+  "author": "devforth.io",
   "license": "MIT",
   "packageManager": "pnpm@10.28.2",
   "type": "commonjs",
@@ -12,6 +13,9 @@
   ],
   "engines": {
     "node": ">=14"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
