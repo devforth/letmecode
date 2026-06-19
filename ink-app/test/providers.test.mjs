@@ -266,6 +266,151 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
   });
 });
 
+test("limit window totals stop accumulating after a seen window first reaches 100 percent", async () => {
+  await withTempRoot(async (root) => {
+    await writeSession(root, "2026/06/18/saturated-window.jsonl", [
+      turnContext("gpt-5.5"),
+      tokenEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        total: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 5,
+          total_tokens: 110
+        },
+        last: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 5,
+          total_tokens: 110
+        },
+        primary: { used_percent: 99, window_minutes: 300, resets_at: 1780589753 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-18T20:01:01.000Z",
+        total: {
+          input_tokens: 220,
+          cached_input_tokens: 40,
+          output_tokens: 25,
+          reasoning_output_tokens: 8,
+          total_tokens: 245
+        },
+        last: {
+          input_tokens: 120,
+          cached_input_tokens: 20,
+          output_tokens: 15,
+          reasoning_output_tokens: 3,
+          total_tokens: 135
+        },
+        primary: { used_percent: 100, window_minutes: 300, resets_at: 1780589753 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-18T20:02:01.000Z",
+        total: {
+          input_tokens: 360,
+          cached_input_tokens: 70,
+          output_tokens: 40,
+          reasoning_output_tokens: 12,
+          total_tokens: 400
+        },
+        last: {
+          input_tokens: 140,
+          cached_input_tokens: 30,
+          output_tokens: 15,
+          reasoning_output_tokens: 4,
+          total_tokens: 155
+        },
+        primary: { used_percent: 100, window_minutes: 300, resets_at: 1780589753 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 3);
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 99);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 100);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 220);
+    assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 40);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 25);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 2);
+    assert.equal(stats.summary.totals.inputTokens, 360);
+    assert.equal(stats.summary.totals.cachedInputTokens, 70);
+    assert.equal(stats.summary.totals.outputTokens, 40);
+    assert.equal(stats.summary.totals.eventCount, 3);
+  });
+});
+
+test("limit window saturation is based on event timestamps, not parse order", async () => {
+  await withTempRoot(async (root) => {
+    await writeSession(root, "2026/06/18/out-of-order-window.jsonl", [
+      turnContext("gpt-5.5"),
+      tokenEvent({
+        timestamp: "2026-06-18T20:02:01.000Z",
+        total: {
+          input_tokens: 220,
+          cached_input_tokens: 40,
+          output_tokens: 25,
+          reasoning_output_tokens: 8,
+          total_tokens: 245
+        },
+        last: {
+          input_tokens: 120,
+          cached_input_tokens: 20,
+          output_tokens: 15,
+          reasoning_output_tokens: 3,
+          total_tokens: 135
+        },
+        primary: { used_percent: 100, window_minutes: 300, resets_at: 1780589753 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        total: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 5,
+          total_tokens: 110
+        },
+        last: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 5,
+          total_tokens: 110
+        },
+        primary: { used_percent: 99, window_minutes: 300, resets_at: 1780589753 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-18T20:03:01.000Z",
+        total: {
+          input_tokens: 360,
+          cached_input_tokens: 70,
+          output_tokens: 40,
+          reasoning_output_tokens: 12,
+          total_tokens: 400
+        },
+        last: {
+          input_tokens: 140,
+          cached_input_tokens: 30,
+          output_tokens: 15,
+          reasoning_output_tokens: 4,
+          total_tokens: 155
+        },
+        primary: { used_percent: 100, window_minutes: 300, resets_at: 1780589753 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 220);
+    assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 40);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 25);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 2);
+  });
+});
+
 test("missing sessions directory yields empty but friendly stats", async () => {
   await withTempRoot(async (root) => {
     const stats = await new CodexUsageProvider({ root }).getStats();

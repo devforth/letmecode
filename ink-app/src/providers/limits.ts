@@ -17,7 +17,11 @@ type LimitWindowAggregate = {
   lastSeenMs: number;
   minUsedPercent: number;
   maxUsedPercent: number;
-  totals: UsageTotals;
+  events: Array<{
+    eventTimeMs: number;
+    usedPercent: number;
+    totals: UsageTotals;
+  }>;
 };
 
 export type LimitWindowAggregates = Map<string, LimitWindowAggregate>;
@@ -54,8 +58,8 @@ export function applyRateLimits(
 }
 
 export function buildWindowLists(windows: LimitWindowAggregates): [LimitWindowRow[], LimitWindowRow[]] {
-  const rows = [...windows.values()]
-    .map<LimitWindowRow>((window) => ({
+  const rows = collapseNearbyWindows(
+    [...windows.values()].map<LimitWindowRow>((window) => ({
       scope: window.scope,
       planType: window.planType,
       limitId: window.limitId,
@@ -66,8 +70,13 @@ export function buildWindowLists(windows: LimitWindowAggregates): [LimitWindowRo
       lastSeenUtcIso: formatIsoFromMilliseconds(window.lastSeenMs),
       minUsedPercent: window.minUsedPercent,
       maxUsedPercent: window.maxUsedPercent,
-      totals: { ...window.totals },
-      eventCount: window.totals.eventCount
+      totals: computeWindowTotals(window.events),
+      eventCount: 0
+    }))
+  )
+    .map((row) => ({
+      ...row,
+      eventCount: row.totals.eventCount
     }))
     .sort((left, right) => right.endTimeUtcIso.localeCompare(left.endTimeUtcIso));
 
@@ -90,8 +99,71 @@ function makeWindowKey(scope: LimitWindowScope, rateLimits: Record<string, unkno
     String(rateLimits.limit_id ?? "unknown"),
     String(rateLimits.plan_type ?? "unknown"),
     numberOrZero(window.window_minutes),
-    Math.round(numberOrZero(window.resets_at) / 60)
+    numberOrZero(window.resets_at)
   ].join("|");
+}
+
+function collapseNearbyWindows(rows: LimitWindowRow[]): LimitWindowRow[] {
+  const collapsed = new Map<string, LimitWindowRow>();
+
+  for (const row of rows) {
+    const key = [
+      row.scope,
+      row.limitId,
+      row.planType,
+      row.windowMinutes,
+      Math.round(Date.parse(row.endTimeUtcIso) / 60_000)
+    ].join("|");
+    const existing = collapsed.get(key);
+    if (!existing) {
+      collapsed.set(key, {
+        ...row,
+        totals: { ...row.totals }
+      });
+      continue;
+    }
+
+    existing.startTimeUtcIso =
+      existing.startTimeUtcIso < row.startTimeUtcIso ? existing.startTimeUtcIso : row.startTimeUtcIso;
+    existing.endTimeUtcIso =
+      existing.endTimeUtcIso > row.endTimeUtcIso ? existing.endTimeUtcIso : row.endTimeUtcIso;
+    existing.firstSeenUtcIso =
+      existing.firstSeenUtcIso < row.firstSeenUtcIso ? existing.firstSeenUtcIso : row.firstSeenUtcIso;
+    existing.lastSeenUtcIso =
+      existing.lastSeenUtcIso > row.lastSeenUtcIso ? existing.lastSeenUtcIso : row.lastSeenUtcIso;
+    existing.minUsedPercent = Math.min(existing.minUsedPercent, row.minUsedPercent);
+    existing.maxUsedPercent = Math.max(existing.maxUsedPercent, row.maxUsedPercent);
+    addUsageTotals(existing.totals, row.totals);
+    existing.eventCount = existing.totals.eventCount;
+  }
+
+  return [...collapsed.values()];
+}
+
+function computeWindowTotals(
+  events: Array<{
+    eventTimeMs: number;
+    usedPercent: number;
+    totals: UsageTotals;
+  }>
+): UsageTotals {
+  // Session files are not guaranteed to be parsed in timestamp order, so
+  // saturation has to be applied after we sort the captured window events.
+  const totals = createEmptyUsageTotals();
+  let sawBelowCap = false;
+  let isExhausted = false;
+
+  for (const event of [...events].sort((left, right) => left.eventTimeMs - right.eventTimeMs)) {
+    sawBelowCap ||= event.usedPercent < 100;
+    if (!isExhausted) {
+      addUsageTotals(totals, event.totals);
+      if (sawBelowCap && event.usedPercent >= 100) {
+        isExhausted = true;
+      }
+    }
+  }
+
+  return totals;
 }
 
 function upsertWindow(
@@ -129,9 +201,8 @@ function upsertWindow(
       lastSeenMs: eventTimeMs,
       minUsedPercent: usedPercent,
       maxUsedPercent: usedPercent,
-      totals: createEmptyUsageTotals()
+      events: [{ eventTimeMs, usedPercent, totals: { ...deltaTotals } }]
     });
-    addUsageTotals(windows.get(key)!.totals, deltaTotals);
     return;
   }
 
@@ -141,5 +212,5 @@ function upsertWindow(
   existing.lastSeenMs = Math.max(existing.lastSeenMs, eventTimeMs);
   existing.minUsedPercent = Math.min(existing.minUsedPercent, usedPercent);
   existing.maxUsedPercent = Math.max(existing.maxUsedPercent, usedPercent);
-  addUsageTotals(existing.totals, deltaTotals);
+  existing.events.push({ eventTimeMs, usedPercent, totals: { ...deltaTotals } });
 }

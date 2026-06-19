@@ -226,6 +226,7 @@ function VerticalTab(props: { label: string; active: boolean }): React.JSX.Eleme
 
 function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
   const { summary } = props.stats;
+  const inputPerOutput = formatInputPerOutput(summary.totals);
   return (
     <Box flexDirection="column">
       <Text bold>{props.stats.providerLabel}</Text>
@@ -245,7 +246,13 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
         estimated credits: {formatCredits(summary.totals.estimatedCredits)} 
       </Text>
       <Text>
-        models: {summary.distinctModels.join(", ") || "none"}  plans: {summary.distinctPlanTypes.join(", ") || "none"}
+        IpO: {inputPerOutput.cached}:{inputPerOutput.nonCached}:{inputPerOutput.output}
+      </Text>
+      <Text>
+        models: {summary.distinctModels.join(", ") || "none"}
+      </Text>
+      <Text>
+        plans: {summary.distinctPlanTypes.join(", ") || "none"}
       </Text>
     </Box>
   );
