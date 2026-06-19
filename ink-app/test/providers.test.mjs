@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { ClaudeUsageProvider } from "../dist/providers/claude.js";
 import { CodexUsageProvider } from "../dist/providers/codex.js";
 import { createProviders } from "../dist/providers/index.js";
 
@@ -17,6 +18,12 @@ async function withTempRoot(run) {
 
 async function writeSession(root, relativePath, lines) {
   const target = path.join(root, ".codex", "sessions", relativePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, lines.join("\n"), "utf8");
+}
+
+async function writeClaudeSession(root, relativePath, lines) {
+  const target = path.join(root, ".claude", "projects", relativePath);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
@@ -59,11 +66,49 @@ function tokenEvent({
   });
 }
 
+function claudeAssistantEvent({
+  timestamp,
+  requestId,
+  messageId,
+  model,
+  inputTokens,
+  cacheReadInputTokens = 0,
+  cacheCreation5mInputTokens = 0,
+  cacheCreation1hInputTokens = 0,
+  outputTokens,
+  rateLimits
+}) {
+  return JSON.stringify({
+    type: "assistant",
+    sessionId: "claude-session-1",
+    requestId,
+    timestamp,
+    ...(rateLimits ? { rate_limits: rateLimits } : {}),
+    message: {
+      id: messageId,
+      model,
+      role: "assistant",
+      usage: {
+        input_tokens: inputTokens,
+        cache_read_input_tokens: cacheReadInputTokens,
+        cache_creation_input_tokens: cacheCreation5mInputTokens + cacheCreation1hInputTokens,
+        output_tokens: outputTokens,
+        cache_creation: {
+          ephemeral_5m_input_tokens: cacheCreation5mInputTokens,
+          ephemeral_1h_input_tokens: cacheCreation1hInputTokens
+        }
+      }
+    }
+  });
+}
+
 test("provider registry stays UI-generic", async () => {
   const providers = createProviders();
-  assert.equal(providers.length, 1);
+  assert.equal(providers.length, 2);
   assert.equal(providers[0].id, "codex");
+  assert.equal(providers[1].id, "claude");
   assert.equal(typeof providers[0].getStats, "function");
+  assert.equal(typeof providers[1].getStats, "function");
 });
 
 test("CodexUsageProvider returns valid ProviderStats", async () => {
@@ -230,5 +275,78 @@ test("missing sessions directory yields empty but friendly stats", async () => {
     assert.equal(stats.primaryLimitWindows.length, 0);
     assert.equal(stats.secondaryLimitWindows.length, 0);
     assert.equal(stats.warnings.some((warning) => warning.includes("No Codex session files found")), true);
+  });
+});
+
+test("ClaudeUsageProvider dedupes repeated assistant transcript entries and parses optional limit windows", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/session.jsonl", [
+      JSON.stringify({
+        type: "user",
+        sessionId: "claude-session-1",
+        timestamp: "2026-06-18T20:00:00.000Z",
+        message: { role: "user", content: "hello" }
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-1",
+        messageId: "msg-1",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheReadInputTokens: 50,
+        cacheCreation5mInputTokens: 20,
+        outputTokens: 10,
+        rateLimits: {
+          limit_id: "claude",
+          plan_type: "max",
+          primary: { used_percent: 3, window_minutes: 300, resets_at: 1780589753 }
+        }
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.100Z",
+        requestId: "req-1",
+        messageId: "msg-1",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheReadInputTokens: 50,
+        cacheCreation5mInputTokens: 20,
+        outputTokens: 10,
+        rateLimits: {
+          limit_id: "claude",
+          plan_type: "max",
+          primary: { used_percent: 3, window_minutes: 300, resets_at: 1780589753 }
+        }
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:05:01.000Z",
+        requestId: "req-2",
+        messageId: "msg-2",
+        model: "claude-opus-4-8",
+        inputTokens: 40,
+        cacheReadInputTokens: 30,
+        cacheCreation1hInputTokens: 10,
+        outputTokens: 5
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.providerId, "claude");
+    assert.equal(stats.providerLabel, "Claude");
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 2);
+    assert.equal(stats.summary.totals.inputTokens, 250);
+    assert.equal(stats.summary.totals.cachedInputTokens, 80);
+    assert.equal(stats.summary.totals.nonCachedInputTokens, 170);
+    assert.equal(stats.summary.totals.outputTokens, 15);
+    assert.equal(stats.modelUsage.length, 2);
+    assert.deepEqual(
+      stats.modelUsage.map((row) => row.modelId).sort(),
+      ["claude-opus-4-8", "claude-sonnet-4-6"]
+    );
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
+    assert.equal(stats.summary.distinctPlanTypes.includes("max"), true);
+    assert.deepEqual(stats.secondaryLimitWindows, []);
   });
 });

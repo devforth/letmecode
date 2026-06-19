@@ -29,8 +29,17 @@ const LIMIT_WINDOW_COLUMNS = {
   window: 8,
   used: 10,
   date: 17,
-  events: 8,
-  limit: 8
+  value: 10
+} as const;
+
+const MODEL_USAGE_COLUMNS = {
+  model: 17,
+  input: 12,
+  cached: 12,
+  nonCached: 12,
+  output: 11,
+  credits: 12,
+  value: 12
 } as const;
 
 function App(): React.JSX.Element {
@@ -233,7 +242,10 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
         output: {formatInteger(summary.totals.outputTokens)}  reasoning: {formatInteger(summary.totals.reasoningOutputTokens)}  total: {formatInteger(summary.totals.totalTokens)}
       </Text>
       <Text>
-        estimated credits: {formatCredits(summary.totals.estimatedCredits)}  models: {summary.distinctModels.join(", ") || "none"}  plans: {summary.distinctPlanTypes.join(", ") || "none"}
+        estimated credits: {formatCredits(summary.totals.estimatedCredits)} 
+      </Text>
+      <Text>
+        models: {summary.distinctModels.join(", ") || "none"}  plans: {summary.distinctPlanTypes.join(", ") || "none"}
       </Text>
     </Box>
   );
@@ -284,7 +296,7 @@ function LimitWindowSection(props: { windows: LimitWindowRow[]; selectedRowKey?:
   return (
     <Box flexDirection="column">
       <Text color="gray">
-        {pad("plan", LIMIT_WINDOW_COLUMNS.plan)} {pad("window", LIMIT_WINDOW_COLUMNS.window)} {pad("used", LIMIT_WINDOW_COLUMNS.used)} {pad("start", LIMIT_WINDOW_COLUMNS.date)} {pad("end", LIMIT_WINDOW_COLUMNS.date)} {pad("events", LIMIT_WINDOW_COLUMNS.events)} limit
+        {pad("plan", LIMIT_WINDOW_COLUMNS.plan)} {pad("window", LIMIT_WINDOW_COLUMNS.window)} {pad("used", LIMIT_WINDOW_COLUMNS.used)} {pad("start", LIMIT_WINDOW_COLUMNS.date)} {pad("end", LIMIT_WINDOW_COLUMNS.date)} value
       </Text>
       {props.windows.map((window) => {
         const windowLabel = formatWindowMinutes(window.windowMinutes);
@@ -296,7 +308,7 @@ function LimitWindowSection(props: { windows: LimitWindowRow[]; selectedRowKey?:
             inverse={isSelected}
             color={isSelected ? "cyan" : undefined}
           >
-            {pad(window.planType, LIMIT_WINDOW_COLUMNS.plan)} {pad(windowLabel, LIMIT_WINDOW_COLUMNS.window)} {pad(usedLabel, LIMIT_WINDOW_COLUMNS.used)} {pad(formatLocalDateTime(window.startTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatLocalDateTime(window.endTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatInteger(window.eventCount), LIMIT_WINDOW_COLUMNS.events)} {pad(window.limitId, LIMIT_WINDOW_COLUMNS.limit)}
+            {pad(window.planType, LIMIT_WINDOW_COLUMNS.plan)} {pad(windowLabel, LIMIT_WINDOW_COLUMNS.window)} {pad(usedLabel, LIMIT_WINDOW_COLUMNS.used)} {pad(formatLocalDateTime(window.startTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatLocalDateTime(window.endTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD), LIMIT_WINDOW_COLUMNS.value)}
           </Text>
         );
       })}
@@ -312,17 +324,19 @@ function UsageByModelPanel(props: { stats: ProviderStats; selectedModelId?: stri
   const totals = props.stats.summary.totals;
   return (
     <Box flexDirection="column">
-      <Text color="gray">model            input        cached       non-cached   output       credits      events</Text>
+      <Text color="gray">
+        {pad("model", MODEL_USAGE_COLUMNS.model)} {pad("input", MODEL_USAGE_COLUMNS.input)} {pad("cached", MODEL_USAGE_COLUMNS.cached)} {pad("non-cached", MODEL_USAGE_COLUMNS.nonCached)} {pad("output", MODEL_USAGE_COLUMNS.output)} {pad("credits", MODEL_USAGE_COLUMNS.credits)} value
+      </Text>
       {props.stats.modelUsage.map((row) => {
         const isSelected = props.selectedModelId === row.modelId;
         return (
           <Text key={row.modelId} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(row.modelId, 16)} {pad(formatInteger(row.totals.inputTokens), 12)} {pad(formatInteger(row.totals.cachedInputTokens), 12)} {pad(formatInteger(row.totals.nonCachedInputTokens), 12)} {pad(formatInteger(row.totals.outputTokens), 12)} {pad(formatCredits(row.totals.estimatedCredits), 12)} {pad(formatInteger(row.totals.eventCount), 8)}
+            {pad(row.modelId, MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(row.totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.cachedInputTokens), MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(row.totals.nonCachedInputTokens), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(row.totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatCredits(row.totals.estimatedCredits), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsd(row.totals.estimatedCredits * CODEX_CREDIT_COST_USD), MODEL_USAGE_COLUMNS.value)}
           </Text>
         );
       })}
       <Text color="cyan">
-        {pad("TOTAL", 16)} {pad(formatInteger(totals.inputTokens), 12)} {pad(formatInteger(totals.cachedInputTokens), 12)} {pad(formatInteger(totals.nonCachedInputTokens), 12)} {pad(formatInteger(totals.outputTokens), 12)} {pad(formatCredits(totals.estimatedCredits), 12)} {pad(formatInteger(totals.eventCount), 8)}
+        {pad("TOTAL", MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(totals.cachedInputTokens), MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(totals.nonCachedInputTokens), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatCredits(totals.estimatedCredits), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD), MODEL_USAGE_COLUMNS.value)}
       </Text>
     </Box>
   );
@@ -375,7 +389,7 @@ function UsageTotalsDetails(props: { totals: UsageTotals }): React.JSX.Element {
   return (
     <Box flexDirection="column">
       <Text>Total credits burned: {formatCredits(totals.estimatedCredits)}</Text>
-      <Text>Credits cost (@ $0.01/credit): {formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD)}</Text>
+      <Text>Credits Value (@ $0.01/credit): {formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD)}</Text>
       <Text>IpO: {inputPerOutput.cached}:{inputPerOutput.nonCached}:{inputPerOutput.output}</Text>
     </Box>
   );

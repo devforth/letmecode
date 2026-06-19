@@ -76,3 +76,23 @@ export function createEmptyUsageTotals(): UsageTotals {
     eventCount: 0
   };
 }
+
+export function addUsageTotals(target: UsageTotals, source: UsageTotals): void {
+  target.inputTokens += source.inputTokens;
+  target.cachedInputTokens += source.cachedInputTokens;
+  target.nonCachedInputTokens += source.nonCachedInputTokens;
+  target.outputTokens += source.outputTokens;
+  target.reasoningOutputTokens += source.reasoningOutputTokens;
+  target.totalTokens += source.totalTokens;
+  target.estimatedCredits += source.estimatedCredits;
+  target.eventCount += source.eventCount;
+}
+
+export function sumUsageTotals(rows: UsageTotals[]): UsageTotals {
+  const totals = createEmptyUsageTotals();
+  for (const row of rows) {
+    addUsageTotals(totals, row);
+  }
+
+  return totals;
+}
