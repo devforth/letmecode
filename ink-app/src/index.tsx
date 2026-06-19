@@ -286,10 +286,10 @@ function ContentPanel(props: {
 function LimitWindowsPanel(props: { stats: ProviderStats; selectedRowKey?: string }): React.JSX.Element {
   return (
     <Box flexDirection="column">
-      <Text bold>Primary</Text>
+      <Text bold>Primary Limit Windows</Text>
       <LimitWindowSection windows={props.stats.primaryLimitWindows} selectedRowKey={props.selectedRowKey} />
       <Box marginTop={1} />
-      <Text bold>Secondary</Text>
+      <Text bold>Secondary Limit Windows</Text>
       <LimitWindowSection windows={props.stats.secondaryLimitWindows} selectedRowKey={props.selectedRowKey} />
     </Box>
   );
