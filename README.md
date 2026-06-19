@@ -1,5 +1,7 @@
 # letmecode - Discover your detailed agent ussage Codex | Claude
 
+Ussage:
+
 ```bash
 npx -y letmecode
 ```
@@ -14,7 +16,5 @@ pnpm install
 pnpm start
 ```
 
-The Ink app source lives in `ink-app/`.
 
-## Usage
 
