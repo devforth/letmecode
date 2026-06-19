@@ -100,6 +100,10 @@ test("CodexUsageProvider returns valid ProviderStats", async () => {
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
+    assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 20);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 10);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
     assert.deepEqual(stats.secondaryLimitWindows, []);
   });
 });
@@ -209,6 +213,9 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
     assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso > stats.primaryLimitWindows[4].endTimeUtcIso, true);
     assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.secondaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
+    assert.equal(stats.primaryLimitWindows[0].eventCount, stats.primaryLimitWindows[0].totals.eventCount);
+    assert.equal(stats.secondaryLimitWindows[0].eventCount, stats.secondaryLimitWindows[0].totals.eventCount);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens > 0, true);
     assert.equal(stats.warnings.some((warning) => warning.includes("malformed")), true);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-9")), true);
   });

@@ -39,7 +39,7 @@ type LimitWindowAggregate = {
   lastSeenMs: number;
   minUsedPercent: number;
   maxUsedPercent: number;
-  eventCount: number;
+  totals: UsageTotals;
 };
 
 type ParseTotals = {
@@ -200,12 +200,17 @@ function addUsageTotals(target: UsageTotals, source: UsageTotals): void {
   target.eventCount += source.eventCount;
 }
 
-function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, usage: RawUsage): void {
+function createUsageTotalsForModel(modelId: string, usage: RawUsage): UsageTotals {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
   const deltaTotals = rawUsageToTotals(usage);
   deltaTotals.estimatedCredits = creditsFor(resolvedModelId, usage);
   deltaTotals.eventCount = 1;
+  return deltaTotals;
+}
+
+function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
+  const resolvedModelId = modelId || "unknown";
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
 }
@@ -241,7 +246,8 @@ function upsertWindow(
   scope: LimitWindowScope,
   rateLimits: Record<string, unknown>,
   window: Record<string, unknown> | null,
-  eventTimeMs: number
+  eventTimeMs: number,
+  deltaTotals: UsageTotals
 ): void {
   if (!window) {
     return;
@@ -270,8 +276,9 @@ function upsertWindow(
       lastSeenMs: eventTimeMs,
       minUsedPercent: usedPercent,
       maxUsedPercent: usedPercent,
-      eventCount: 1
+      totals: createEmptyUsageTotals()
     });
+    addUsageTotals(windows.get(key)!.totals, deltaTotals);
     return;
   }
 
@@ -281,7 +288,7 @@ function upsertWindow(
   existing.lastSeenMs = Math.max(existing.lastSeenMs, eventTimeMs);
   existing.minUsedPercent = Math.min(existing.minUsedPercent, usedPercent);
   existing.maxUsedPercent = Math.max(existing.maxUsedPercent, usedPercent);
-  existing.eventCount += 1;
+  addUsageTotals(existing.totals, deltaTotals);
 }
 
 function buildWindowLists(windows: Map<string, LimitWindowAggregate>): [LimitWindowRow[], LimitWindowRow[]] {
@@ -297,7 +304,8 @@ function buildWindowLists(windows: Map<string, LimitWindowAggregate>): [LimitWin
       lastSeenUtcIso: formatIsoFromMilliseconds(window.lastSeenMs),
       minUsedPercent: window.minUsedPercent,
       maxUsedPercent: window.maxUsedPercent,
-      eventCount: window.eventCount
+      totals: { ...window.totals },
+      eventCount: window.totals.eventCount
     }))
     .sort((left, right) => right.endTimeUtcIso.localeCompare(left.endTimeUtcIso));
 
@@ -380,9 +388,11 @@ async function parseSessionFile(
     const lastUsage = info?.last_token_usage;
     const usage = lastUsage ? normalizeRawUsage(lastUsage) : previousTotal ? subtractRawUsage(totalUsage, previousTotal) : totalUsage;
     previousTotal = totalUsage;
+    const resolvedModelId = currentModel || "unknown";
+    const deltaTotals = createUsageTotalsForModel(resolvedModelId, usage);
 
     tokenEvents += 1;
-    addModelUsage(byModel, currentModel, usage);
+    addModelUsage(byModel, resolvedModelId, deltaTotals);
 
     if (typeof rateLimits?.plan_type === "string") {
       planTypes.add(rateLimits.plan_type);
@@ -391,8 +401,8 @@ async function parseSessionFile(
     const eventTimeMs = Date.parse(String(payloadObject.timestamp ?? ""));
     const safeEventTimeMs = Number.isFinite(eventTimeMs) ? eventTimeMs : 0;
 
-    upsertWindow(windows, "primary", rateLimits ?? {}, asRecord(rateLimits?.primary), safeEventTimeMs);
-    upsertWindow(windows, "secondary", rateLimits ?? {}, asRecord(rateLimits?.secondary), safeEventTimeMs);
+    upsertWindow(windows, "primary", rateLimits ?? {}, asRecord(rateLimits?.primary), safeEventTimeMs, deltaTotals);
+    upsertWindow(windows, "secondary", rateLimits ?? {}, asRecord(rateLimits?.secondary), safeEventTimeMs, deltaTotals);
   }
 
   return { linesRead, tokenEvents, malformedLines };

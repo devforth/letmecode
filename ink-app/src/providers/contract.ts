@@ -27,6 +27,7 @@ export type LimitWindowRow = {
   lastSeenUtcIso: string;
   minUsedPercent: number;
   maxUsedPercent: number;
+  totals: UsageTotals;
   eventCount: number;
 };
 
