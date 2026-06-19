@@ -19,6 +19,12 @@ import {
   numberOrZero,
   type LimitWindowAggregates
 } from "./limits.js";
+import {
+  addDailyUsage,
+  buildDailyUsageRows,
+  createDailyUsageAggregates,
+  type DailyUsageAggregates
+} from "./daily.js";
 
 type ClaudeRate = {
   input: number;
@@ -29,18 +35,20 @@ type ClaudeRate = {
 };
 
 const RATE_CARD: Record<string, ClaudeRate> = {
-  "claude-opus-4-8": { input: 500, cacheWrite5m: 625, cacheWrite1h: 1000, cacheRead: 50, output: 2500 },
-  "claude-opus-4-7": { input: 500, cacheWrite5m: 625, cacheWrite1h: 1000, cacheRead: 50, output: 2500 },
-  "claude-opus-4-6": { input: 500, cacheWrite5m: 625, cacheWrite1h: 1000, cacheRead: 50, output: 2500 },
-  "claude-opus-4-5": { input: 500, cacheWrite5m: 625, cacheWrite1h: 1000, cacheRead: 50, output: 2500 },
-  "claude-opus-4-1": { input: 1500, cacheWrite5m: 1875, cacheWrite1h: 3000, cacheRead: 150, output: 7500 },
-  "claude-opus-4": { input: 1500, cacheWrite5m: 1875, cacheWrite1h: 3000, cacheRead: 150, output: 7500 },
-  "claude-sonnet-4-6": { input: 300, cacheWrite5m: 375, cacheWrite1h: 600, cacheRead: 30, output: 1500 },
-  "claude-sonnet-4-5": { input: 300, cacheWrite5m: 375, cacheWrite1h: 600, cacheRead: 30, output: 1500 },
-  "claude-sonnet-4": { input: 300, cacheWrite5m: 375, cacheWrite1h: 600, cacheRead: 30, output: 1500 },
-  "claude-haiku-4-5": { input: 100, cacheWrite5m: 125, cacheWrite1h: 200, cacheRead: 10, output: 500 },
-  "claude-haiku-3-5": { input: 80, cacheWrite5m: 100, cacheWrite1h: 160, cacheRead: 8, output: 400 }
+  "claude-opus-4-8": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
+  "claude-opus-4-7": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
+  "claude-opus-4-6": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
+  "claude-opus-4-5": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
+  "claude-opus-4-1": { input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5, output: 75 },
+  "claude-opus-4": { input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5, output: 75 },
+  "claude-sonnet-4-6": { input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3, output: 15 },
+  "claude-sonnet-4-5": { input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3, output: 15 },
+  "claude-sonnet-4": { input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3, output: 15 },
+  "claude-haiku-4-5": { input: 1, cacheWrite5m: 1.25, cacheWrite1h: 2, cacheRead: 0.1, output: 5 },
+  "claude-haiku-3-5": { input: 0.8, cacheWrite5m: 1, cacheWrite1h: 1.6, cacheRead: 0.08, output: 4 }
 };
+
+const USD_TO_CREDITS = 100;
 
 type ClaudeUsage = {
   inputTokens: number;
@@ -74,6 +82,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
   async getStats(): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".claude", "projects");
     const byModel = new Map<string, UsageTotals>();
+    const byDay = createDailyUsageAggregates();
     const windows = createLimitWindowAggregates();
     const planTypes = new Set<string>();
     const warnings: string[] = [];
@@ -87,7 +96,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
 
     for await (const file of walkSessionFiles(sessionsRoot)) {
       parseTotals.filesScanned += 1;
-      const fileStats = await parseSessionFile(file, byModel, windows, planTypes, seenUsageEvents);
+      const fileStats = await parseSessionFile(file, byModel, byDay, windows, planTypes, seenUsageEvents);
       parseTotals.linesRead += fileStats.linesRead;
       parseTotals.tokenEvents += fileStats.tokenEvents;
       parseTotals.malformedLines += fileStats.malformedLines;
@@ -113,6 +122,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     }
 
     const summaryTotals = sumUsageTotals(modelUsage.map((row) => row.totals));
+    const dayUsage = buildDailyUsageRows(byDay);
     const [primaryLimitWindows, secondaryLimitWindows] = buildWindowLists(windows);
 
     if (
@@ -138,6 +148,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
         rootPath: sessionsRoot
       },
       modelUsage,
+      dayUsage,
       primaryLimitWindows,
       secondaryLimitWindows,
       warnings
@@ -194,7 +205,8 @@ function creditsFor(modelId: string, usage: ClaudeUsage): number {
       (usage.cacheCreation1hInputTokens / 1_000_000) * rate.cacheWrite1h +
       (cacheWriteFallbackTokens / 1_000_000) * rate.cacheWrite5m +
       (usage.outputTokens / 1_000_000) * rate.output) *
-    inferenceMultiplier
+    inferenceMultiplier *
+    USD_TO_CREDITS
   );
 }
 
@@ -246,6 +258,7 @@ async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
 async function parseSessionFile(
   filePath: string,
   byModel: Map<string, UsageTotals>,
+  byDay: DailyUsageAggregates,
   windows: LimitWindowAggregates,
   planTypes: Set<string>,
   seenUsageEvents: Set<string>
@@ -297,7 +310,11 @@ async function parseSessionFile(
 
     const eventTimeMs = Date.parse(String(payloadObject.timestamp ?? ""));
     const safeEventTimeMs = Number.isFinite(eventTimeMs) ? eventTimeMs : 0;
-    applyRateLimits(windows, extractRateLimits(payloadObject, message), safeEventTimeMs, deltaTotals, planTypes);
+    const rateLimits = extractRateLimits(payloadObject, message);
+    const planType = typeof rateLimits?.plan_type === "string" ? rateLimits.plan_type : undefined;
+
+    addDailyUsage(byDay, eventTimeMs, modelId, planType, deltaTotals);
+    applyRateLimits(windows, rateLimits, safeEventTimeMs, deltaTotals, planTypes);
   }
 
   return { linesRead, tokenEvents, malformedLines };

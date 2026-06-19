@@ -10,6 +10,7 @@ export { ClaudeUsageProvider } from "./claude.js";
 export { CodexUsageProvider } from "./codex.js";
 export { UsageProviderBase } from "./contract.js";
 export type {
+  DailyUsageRow,
   LimitWindowRow,
   LimitWindowScope,
   ModelUsageRow,

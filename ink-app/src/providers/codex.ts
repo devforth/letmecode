@@ -19,6 +19,12 @@ import {
   numberOrZero,
   type LimitWindowAggregates
 } from "./limits.js";
+import {
+  addDailyUsage,
+  buildDailyUsageRows,
+  createDailyUsageAggregates,
+  type DailyUsageAggregates
+} from "./daily.js";
 
 type Rate = { input: number; cachedInput: number; output: number };
 
@@ -58,6 +64,7 @@ export class CodexUsageProvider extends UsageProviderBase {
   async getStats(): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".codex", "sessions");
     const byModel = new Map<string, UsageTotals>();
+    const byDay = createDailyUsageAggregates();
     const windows = createLimitWindowAggregates();
     const planTypes = new Set<string>();
     const warnings: string[] = [];
@@ -70,7 +77,7 @@ export class CodexUsageProvider extends UsageProviderBase {
 
     for await (const file of walkSessionFiles(sessionsRoot)) {
       parseTotals.filesScanned += 1;
-      const fileStats = await parseSessionFile(file, byModel, windows, planTypes);
+      const fileStats = await parseSessionFile(file, byModel, byDay, windows, planTypes);
       parseTotals.linesRead += fileStats.linesRead;
       parseTotals.tokenEvents += fileStats.tokenEvents;
       parseTotals.malformedLines += fileStats.malformedLines;
@@ -96,6 +103,7 @@ export class CodexUsageProvider extends UsageProviderBase {
     }
 
     const summaryTotals = sumUsageTotals(modelUsage.map((row) => row.totals));
+    const dayUsage = buildDailyUsageRows(byDay);
     const [primaryLimitWindows, secondaryLimitWindows] = buildWindowLists(windows);
 
     return {
@@ -112,6 +120,7 @@ export class CodexUsageProvider extends UsageProviderBase {
         rootPath: sessionsRoot
       },
       modelUsage,
+      dayUsage,
       primaryLimitWindows,
       secondaryLimitWindows,
       warnings
@@ -219,6 +228,7 @@ async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
 async function parseSessionFile(
   filePath: string,
   byModel: Map<string, UsageTotals>,
+  byDay: DailyUsageAggregates,
   windows: LimitWindowAggregates,
   planTypes: Set<string>
 ): Promise<{ linesRead: number; tokenEvents: number; malformedLines: number }> {
@@ -275,8 +285,11 @@ async function parseSessionFile(
 
     const eventTimeMs = Date.parse(String(payloadObject.timestamp ?? ""));
     const safeEventTimeMs = Number.isFinite(eventTimeMs) ? eventTimeMs : 0;
+    const rateLimits = asRecord(payload.rate_limits);
+    const planType = typeof rateLimits?.plan_type === "string" ? rateLimits.plan_type : undefined;
 
-    applyRateLimits(windows, asRecord(payload.rate_limits), safeEventTimeMs, deltaTotals, planTypes);
+    addDailyUsage(byDay, eventTimeMs, resolvedModelId, planType, deltaTotals);
+    applyRateLimits(windows, rateLimits, safeEventTimeMs, deltaTotals, planTypes);
   }
 
   return { linesRead, tokenEvents, malformedLines };

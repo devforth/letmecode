@@ -149,7 +149,71 @@ test("CodexUsageProvider returns valid ProviderStats", async () => {
     assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 20);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 10);
     assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-18");
+    assert.equal(stats.dayUsage[0].totals.inputTokens, 100);
+    assert.deepEqual(stats.dayUsage[0].distinctModels, ["gpt-5.5"]);
+    assert.deepEqual(stats.dayUsage[0].distinctPlanTypes, ["team"]);
     assert.deepEqual(stats.secondaryLimitWindows, []);
+  });
+});
+
+test("CodexUsageProvider groups usage into descending day buckets", async () => {
+  await withTempRoot(async (root) => {
+    await writeSession(root, "2026/06/18/day-buckets.jsonl", [
+      turnContext("gpt-5.5"),
+      tokenEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        total: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 5,
+          total_tokens: 110
+        },
+        last: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 5,
+          total_tokens: 110
+        },
+        primary: { used_percent: 1, window_minutes: 300, resets_at: 1780589753 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-19T08:00:01.000Z",
+        total: {
+          input_tokens: 180,
+          cached_input_tokens: 40,
+          output_tokens: 20,
+          reasoning_output_tokens: 7,
+          total_tokens: 200
+        },
+        last: {
+          input_tokens: 80,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 2,
+          total_tokens: 90
+        },
+        planType: "plus",
+        primary: { used_percent: 4, window_minutes: 300, resets_at: 1780675200 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.deepEqual(
+      stats.dayUsage.map((row) => row.dayKey),
+      ["2026-06-19", "2026-06-18"]
+    );
+    assert.equal(stats.dayUsage[0].totals.inputTokens, 80);
+    assert.equal(stats.dayUsage[0].totals.cachedInputTokens, 20);
+    assert.equal(stats.dayUsage[0].totals.outputTokens, 10);
+    assert.deepEqual(stats.dayUsage[0].distinctPlanTypes, ["plus"]);
+    assert.equal(stats.dayUsage[0].firstEventUtcIso, "2026-06-19T08:00:01Z");
+    assert.equal(stats.dayUsage[0].lastEventUtcIso, "2026-06-19T08:00:01Z");
+    assert.equal(stats.dayUsage[1].totals.inputTokens, 100);
+    assert.deepEqual(stats.dayUsage[1].distinctPlanTypes, ["team"]);
   });
 });
 
@@ -417,6 +481,7 @@ test("missing sessions directory yields empty but friendly stats", async () => {
     assert.equal(stats.summary.filesScanned, 0);
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.modelUsage.length, 0);
+    assert.equal(stats.dayUsage.length, 0);
     assert.equal(stats.primaryLimitWindows.length, 0);
     assert.equal(stats.secondaryLimitWindows.length, 0);
     assert.equal(stats.warnings.some((warning) => warning.includes("No Codex session files found")), true);
@@ -463,7 +528,7 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
         }
       }),
       claudeAssistantEvent({
-        timestamp: "2026-06-18T20:05:01.000Z",
+        timestamp: "2026-06-19T20:05:01.000Z",
         requestId: "req-2",
         messageId: "msg-2",
         model: "claude-opus-4-8",
@@ -484,6 +549,15 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
     assert.equal(stats.summary.totals.nonCachedInputTokens, 170);
     assert.equal(stats.summary.totals.outputTokens, 15);
     assert.equal(stats.modelUsage.length, 2);
+    assert.deepEqual(
+      stats.dayUsage.map((row) => row.dayKey),
+      ["2026-06-19", "2026-06-18"]
+    );
+    assert.equal(stats.dayUsage[0].totals.inputTokens, 80);
+    assert.equal(stats.dayUsage[0].totals.outputTokens, 5);
+    assert.deepEqual(stats.dayUsage[0].distinctPlanTypes, []);
+    assert.equal(stats.dayUsage[1].totals.inputTokens, 170);
+    assert.deepEqual(stats.dayUsage[1].distinctPlanTypes, ["max"]);
     assert.deepEqual(
       stats.modelUsage.map((row) => row.modelId).sort(),
       ["claude-opus-4-8", "claude-sonnet-4-6"]

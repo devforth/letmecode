@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, render } from "ink";
 import {
   createProviders,
+  type DailyUsageRow,
   type LimitWindowRow,
   type ModelUsageRow,
   type ProviderStats,
@@ -9,7 +10,7 @@ import {
   type UsageTotals
 } from "./providers/index.js";
 
-type VerticalTabId = "limit-windows" | "summary" | "usage-by-model";
+type VerticalTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 
 type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
@@ -19,10 +20,12 @@ type ProviderLoadState =
 const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
   { id: "limit-windows", label: "Limits" },
   { id: "summary", label: "Summary" },
+  { id: "day-to-day-analyses", label: "day to day" },
   { id: "usage-by-model", label: "by model" }
 ];
 
 const CODEX_CREDIT_COST_USD = 0.01;
+const VERTICAL_TAB_WIDTH = 12;
 
 const LIMIT_WINDOW_COLUMNS = {
   plan: 8,
@@ -42,6 +45,14 @@ const MODEL_USAGE_COLUMNS = {
   value: 12
 } as const;
 
+const DAY_USAGE_COLUMNS = {
+  day: 11,
+  events: 6,
+  input: 11,
+  output: 10,
+  value: 10
+} as const;
+
 function App(): React.JSX.Element {
   const { exit } = useApp();
   const providers = React.useState(() => createProviders())[0];
@@ -51,15 +62,19 @@ function App(): React.JSX.Element {
   const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
   const [selectedVerticalTabIndex, setSelectedVerticalTabIndex] = useState(0);
   const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState(0);
+  const [selectedDayRowIndex, setSelectedDayRowIndex] = useState(0);
   const [selectedModelRowIndex, setSelectedModelRowIndex] = useState(0);
 
   const selectedProvider = providerStates[selectedProviderIndex];
   const selectedVerticalTab = VERTICAL_TABS[selectedVerticalTabIndex];
   const limitRows = getLimitRows(selectedProvider);
+  const dayRows = getDayRows(selectedProvider);
   const modelRows = getModelRows(selectedProvider);
   const activeLimitRowIndex = clampSelectionIndex(selectedLimitRowIndex, limitRows.length);
+  const activeDayRowIndex = clampSelectionIndex(selectedDayRowIndex, dayRows.length);
   const activeModelRowIndex = clampSelectionIndex(selectedModelRowIndex, modelRows.length);
   const selectedLimitRow = activeLimitRowIndex >= 0 ? limitRows[activeLimitRowIndex] : undefined;
+  const selectedDayRow = activeDayRowIndex >= 0 ? dayRows[activeDayRowIndex] : undefined;
   const selectedModelRow = activeModelRowIndex >= 0 ? modelRows[activeModelRowIndex] : undefined;
 
   useEffect(() => {
@@ -118,6 +133,11 @@ function App(): React.JSX.Element {
         setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex + 1, modelRows.length));
         return;
       }
+
+      if (selectedVerticalTab.id === "day-to-day-analyses") {
+        setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex + 1, dayRows.length));
+        return;
+      }
     }
 
     if ((key.ctrl || key.shift) && key.upArrow) {
@@ -128,6 +148,11 @@ function App(): React.JSX.Element {
 
       if (selectedVerticalTab.id === "usage-by-model") {
         setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex - 1, modelRows.length));
+        return;
+      }
+
+      if (selectedVerticalTab.id === "day-to-day-analyses") {
+        setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex - 1, dayRows.length));
         return;
       }
     }
@@ -172,7 +197,7 @@ function App(): React.JSX.Element {
       </Box>
 
       <Box marginTop={1}>
-        <Box flexDirection="column" width={12} marginRight={2}>
+        <Box flexDirection="column" width={VERTICAL_TAB_WIDTH} marginRight={2}>
           {VERTICAL_TABS.map((tab, index) => (
             <VerticalTab key={tab.id} label={tab.label} active={index === selectedVerticalTabIndex} />
           ))}
@@ -182,6 +207,7 @@ function App(): React.JSX.Element {
             providerState={selectedProvider}
             tabId={selectedVerticalTab.id}
             selectedLimitRowKey={selectedLimitRow ? getLimitRowKey(selectedLimitRow) : undefined}
+            selectedDayKey={selectedDayRow?.dayKey}
             selectedModelId={selectedModelRow?.modelId}
           />
         </Box>
@@ -191,6 +217,7 @@ function App(): React.JSX.Element {
         providerState={selectedProvider}
         tabId={selectedVerticalTab.id}
         selectedLimitRow={selectedLimitRow}
+        selectedDayRow={selectedDayRow}
         selectedModelRow={selectedModelRow}
       />
 
@@ -220,7 +247,11 @@ function ProviderTab(props: { label: string; active: boolean; status: ProviderLo
 
 function VerticalTab(props: { label: string; active: boolean }): React.JSX.Element {
   return (
-    <Text inverse={props.active}>{props.active ? ` ${props.label} ` : ` ${props.label}`}</Text>
+    <Box width={VERTICAL_TAB_WIDTH}>
+      <Text wrap="truncate-end" inverse={props.active}>
+        {props.active ? ` ${props.label} ` : ` ${props.label}`}
+      </Text>
+    </Box>
   );
 }
 
@@ -262,6 +293,7 @@ function ContentPanel(props: {
   providerState: ProviderLoadState;
   tabId: VerticalTabId;
   selectedLimitRowKey?: string;
+  selectedDayKey?: string;
   selectedModelId?: string;
 }): React.JSX.Element {
   if (props.providerState.status === "loading") {
@@ -278,6 +310,10 @@ function ContentPanel(props: {
 
   if (props.tabId === "summary") {
     return <SummaryPanel stats={props.providerState.stats} />;
+  }
+
+  if (props.tabId === "day-to-day-analyses") {
+    return <DayToDayPanel stats={props.providerState.stats} selectedDayKey={props.selectedDayKey} />;
   }
 
   return <UsageByModelPanel stats={props.providerState.stats} selectedModelId={props.selectedModelId} />;
@@ -349,10 +385,33 @@ function UsageByModelPanel(props: { stats: ProviderStats; selectedModelId?: stri
   );
 }
 
+function DayToDayPanel(props: { stats: ProviderStats; selectedDayKey?: string }): React.JSX.Element {
+  if (props.stats.dayUsage.length === 0) {
+    return <Text color="gray">No day-by-day usage found.</Text>;
+  }
+
+  return (
+    <Box flexDirection="column">
+      <Text color="gray">
+        {pad("day", DAY_USAGE_COLUMNS.day)} {pad("events", DAY_USAGE_COLUMNS.events)} {pad("input", DAY_USAGE_COLUMNS.input)} {pad("output", DAY_USAGE_COLUMNS.output)} value
+      </Text>
+      {props.stats.dayUsage.map((row) => {
+        const isSelected = props.selectedDayKey === row.dayKey;
+        return (
+          <Text key={row.dayKey} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
+            {pad(formatUtcDay(row.dayKey), DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.inputTokens), DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.outputTokens), DAY_USAGE_COLUMNS.output)} {pad(formatUsd(row.totals.estimatedCredits * CODEX_CREDIT_COST_USD), DAY_USAGE_COLUMNS.value)}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
 function SelectionDetailsPanel(props: {
   providerState: ProviderLoadState;
   tabId: VerticalTabId;
   selectedLimitRow?: LimitWindowRow;
+  selectedDayRow?: DailyUsageRow;
   selectedModelRow?: ModelUsageRow;
 }): React.JSX.Element | null {
   if (props.providerState.status !== "ready") {
@@ -370,6 +429,24 @@ function SelectionDetailsPanel(props: {
         <Text>
           range: {formatLocalDateTime(row.startTimeUtcIso)} {"->"} {formatLocalDateTime(row.endTimeUtcIso)}  events: {formatInteger(row.eventCount)}
         </Text>
+        <UsageTotalsDetails totals={row.totals} />
+      </Box>
+    );
+  }
+
+  if (props.tabId === "day-to-day-analyses" && props.selectedDayRow) {
+    const row = props.selectedDayRow;
+    return (
+      <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
+        <Text color="cyan">Day details</Text>
+        <Text>
+          day: {formatUtcDay(row.dayKey)}  events: {formatInteger(row.totals.eventCount)}  models: {formatInteger(row.distinctModels.length)}  plans: {formatInteger(row.distinctPlanTypes.length)}
+        </Text>
+        <Text>range: {formatEventRange(row.firstEventUtcIso, row.lastEventUtcIso)}</Text>
+        <Text>input: {formatInteger(row.totals.inputTokens)}  cached: {formatInteger(row.totals.cachedInputTokens)}</Text>
+        <Text>non-cached: {formatInteger(row.totals.nonCachedInputTokens)}  output: {formatInteger(row.totals.outputTokens)}</Text>
+        <Text>models: {row.distinctModels.join(", ") || "none"}</Text>
+        <Text>plans: {row.distinctPlanTypes.join(", ") || "none"}</Text>
         <UsageTotalsDetails totals={row.totals} />
       </Box>
     );
@@ -446,6 +523,30 @@ function formatLocalDateTime(value: string): string {
   return `${lookup.day} ${lookup.month} ${lookup.year} ${lookup.hour}:${lookup.minute}`;
 }
 
+function formatUtcDay(value: string): string {
+  if (value === "unknown") {
+    return "unknown";
+  }
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "2-digit",
+    year: "2-digit",
+    timeZone: "UTC"
+  }).formatToParts(new Date(`${value}T00:00:00.000Z`));
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.day} ${lookup.month} ${lookup.year}`;
+}
+
+function formatEventRange(firstEventUtcIso: string | null, lastEventUtcIso: string | null): string {
+  if (!firstEventUtcIso || !lastEventUtcIso) {
+    return "unknown";
+  }
+
+  return `${formatLocalDateTime(firstEventUtcIso)} -> ${formatLocalDateTime(lastEventUtcIso)}`;
+}
+
 function pad(value: string, length: number): string {
   return value.length >= length ? value.slice(0, length) : value.padEnd(length);
 }
@@ -484,6 +585,14 @@ function getModelRows(providerState: ProviderLoadState): ModelUsageRow[] {
   }
 
   return providerState.stats.modelUsage;
+}
+
+function getDayRows(providerState: ProviderLoadState): DailyUsageRow[] {
+  if (providerState.status !== "ready") {
+    return [];
+  }
+
+  return providerState.stats.dayUsage;
 }
 
 function getLimitRowKey(row: LimitWindowRow): string {

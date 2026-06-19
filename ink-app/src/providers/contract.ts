@@ -14,6 +14,15 @@ export type ModelUsageRow = {
   totals: UsageTotals;
 };
 
+export type DailyUsageRow = {
+  dayKey: string;
+  firstEventUtcIso: string | null;
+  lastEventUtcIso: string | null;
+  distinctModels: string[];
+  distinctPlanTypes: string[];
+  totals: UsageTotals;
+};
+
 export type LimitWindowScope = "primary" | "secondary";
 
 export type LimitWindowRow = {
@@ -47,6 +56,7 @@ export type ProviderStats = {
   providerLabel: string;
   summary: ProviderSummary;
   modelUsage: ModelUsageRow[];
+  dayUsage: DailyUsageRow[];
   primaryLimitWindows: LimitWindowRow[];
   secondaryLimitWindows: LimitWindowRow[];
   warnings: string[];
