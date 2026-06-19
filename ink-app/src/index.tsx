@@ -26,7 +26,7 @@ const CODEX_CREDIT_COST_USD = 0.01;
 
 const LIMIT_WINDOW_COLUMNS = {
   plan: 8,
-  window: 6,
+  window: 8,
   used: 10,
   date: 15,
   events: 8,
