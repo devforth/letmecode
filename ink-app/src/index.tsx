@@ -28,7 +28,7 @@ const LIMIT_WINDOW_COLUMNS = {
   plan: 8,
   window: 8,
   used: 10,
-  date: 15,
+  date: 17,
   events: 8,
   limit: 8
 } as const;
