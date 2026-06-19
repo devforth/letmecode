@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, render } from "ink";
 import { createProviders, type LimitWindowRow, type ProviderStats, type UsageProviderBase } from "./providers/index.js";
 
-type VerticalTabId = "limit-windows" | "usage-by-model";
+type VerticalTabId = "limit-windows" | "summary" | "usage-by-model";
 
 type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
@@ -10,9 +10,19 @@ type ProviderLoadState =
   | { provider: UsageProviderBase; status: "error"; errorMessage: string };
 
 const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
-  { id: "limit-windows", label: "Limit windows" },
+  { id: "limit-windows", label: "Limits" },
+  { id: "summary", label: "Summary" },
   { id: "usage-by-model", label: "Usage by model" }
 ];
+
+const LIMIT_WINDOW_COLUMNS = {
+  plan: 8,
+  window: 8,
+  used: 10,
+  date: 17,
+  events: 8,
+  limit: 8
+} as const;
 
 function App(): React.JSX.Element {
   const { exit } = useApp();
@@ -109,10 +119,6 @@ function App(): React.JSX.Element {
         ))}
       </Box>
 
-      <Box marginTop={1} borderStyle="round" paddingX={1} paddingY={0} flexDirection="column">
-        <SummarySection providerState={selectedProvider} />
-      </Box>
-
       <Box marginTop={1}>
         <Box flexDirection="column" width={22} marginRight={2}>
           {VERTICAL_TABS.map((tab, index) => (
@@ -154,29 +160,11 @@ function VerticalTab(props: { label: string; active: boolean }): React.JSX.Eleme
   );
 }
 
-function SummarySection(props: { providerState: ProviderLoadState }): React.JSX.Element {
-  if (props.providerState.status === "loading") {
-    return (
-      <>
-        <Text bold>{props.providerState.provider.label}</Text>
-        <Text color="yellow">Loading stats from local sessions...</Text>
-      </>
-    );
-  }
-
-  if (props.providerState.status === "error") {
-    return (
-      <>
-        <Text bold>{props.providerState.provider.label}</Text>
-        <Text color="red">Failed to load provider stats: {props.providerState.errorMessage}</Text>
-      </>
-    );
-  }
-
-  const { summary } = props.providerState.stats;
+function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
+  const { summary } = props.stats;
   return (
-    <>
-      <Text bold>{props.providerState.stats.providerLabel}</Text>
+    <Box flexDirection="column">
+      <Text bold>{props.stats.providerLabel}</Text>
       <Text>
         root: {summary.rootLabel} ({summary.rootPath})
       </Text>
@@ -192,7 +180,7 @@ function SummarySection(props: { providerState: ProviderLoadState }): React.JSX.
       <Text>
         estimated credits: {formatCredits(summary.totals.estimatedCredits)}  models: {summary.distinctModels.join(", ") || "none"}  plans: {summary.distinctPlanTypes.join(", ") || "none"}
       </Text>
-    </>
+    </Box>
   );
 }
 
@@ -207,6 +195,10 @@ function ContentPanel(props: { providerState: ProviderLoadState; tabId: Vertical
 
   if (props.tabId === "limit-windows") {
     return <LimitWindowsPanel stats={props.providerState.stats} />;
+  }
+
+  if (props.tabId === "summary") {
+    return <SummaryPanel stats={props.providerState.stats} />;
   }
 
   return <UsageByModelPanel stats={props.providerState.stats} />;
@@ -231,13 +223,15 @@ function LimitWindowSection(props: { windows: LimitWindowRow[] }): React.JSX.Ele
 
   return (
     <Box flexDirection="column">
-      <Text color="gray">plan       limit      window    used          start                end                  events</Text>
+      <Text color="gray">
+        {pad("plan", LIMIT_WINDOW_COLUMNS.plan)} {pad("window", LIMIT_WINDOW_COLUMNS.window)} {pad("used", LIMIT_WINDOW_COLUMNS.used)} {pad("start", LIMIT_WINDOW_COLUMNS.date)} {pad("end", LIMIT_WINDOW_COLUMNS.date)} {pad("events", LIMIT_WINDOW_COLUMNS.events)} limit
+      </Text>
       {props.windows.map((window) => {
         const windowLabel = formatWindowMinutes(window.windowMinutes);
         const usedLabel = `${window.minUsedPercent}%->${window.maxUsedPercent}%`;
         return (
           <Text key={`${window.scope}-${window.planType}-${window.limitId}-${window.endTimeUtcIso}`}>
-            {pad(window.planType, 10)} {pad(window.limitId, 10)} {pad(windowLabel, 8)} {pad(usedLabel, 12)} {pad(formatLocalDateTime(window.startTimeUtcIso), 18)} {pad(formatLocalDateTime(window.endTimeUtcIso), 18)} {formatInteger(window.eventCount)}
+            {pad(window.planType, LIMIT_WINDOW_COLUMNS.plan)} {pad(windowLabel, LIMIT_WINDOW_COLUMNS.window)} {pad(usedLabel, LIMIT_WINDOW_COLUMNS.used)} {pad(formatLocalDateTime(window.startTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatLocalDateTime(window.endTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatInteger(window.eventCount), LIMIT_WINDOW_COLUMNS.events)} {pad(window.limitId, LIMIT_WINDOW_COLUMNS.limit)}
           </Text>
         );
       })}
@@ -289,7 +283,7 @@ function formatWindowMinutes(value: number): string {
 function formatLocalDateTime(value: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     month: "short",
-    day: "numeric",
+    day: "2-digit",
     year: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
@@ -298,7 +292,7 @@ function formatLocalDateTime(value: string): string {
   }).formatToParts(new Date(value));
 
   const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${lookup.month} ${lookup.day}, ${lookup.year} ${lookup.hour}:${lookup.minute}`;
+  return `${lookup.day} ${lookup.month} ${lookup.year} ${lookup.hour}:${lookup.minute}`;
 }
 
 function pad(value: string, length: number): string {
