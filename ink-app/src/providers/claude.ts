@@ -71,6 +71,23 @@ type ClaudeUsageProviderOptions = {
   root?: string;
 };
 
+type ParsedUsageEvent = {
+  usageKey: string | null;
+  usageSignature: string;
+  timestampMs: number;
+  modelId: string;
+  totals: UsageTotals;
+  rateLimits: Record<string, unknown> | null;
+};
+
+type ParsedUsageEventAccumulator = {
+  keyedEvents: Map<string, ParsedUsageEvent>;
+  unkeyedEvents: Map<string, ParsedUsageEvent>;
+  duplicateUsageKeys: number;
+  duplicateUsageKeyCollisions: number;
+  duplicateUnkeyedEvents: number;
+};
+
 export class ClaudeUsageProvider extends UsageProviderBase {
   private readonly root: string;
 
@@ -86,7 +103,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     const windows = createLimitWindowAggregates();
     const planTypes = new Set<string>();
     const warnings: string[] = [];
-    const seenUsageEvents = new Set<string>();
+    const parsedEvents = createParsedUsageEventAccumulator();
     const parseTotals: ParseTotals = {
       filesScanned: 0,
       linesRead: 0,
@@ -96,14 +113,43 @@ export class ClaudeUsageProvider extends UsageProviderBase {
 
     for await (const file of walkSessionFiles(sessionsRoot)) {
       parseTotals.filesScanned += 1;
-      const fileStats = await parseSessionFile(file, byModel, byDay, windows, planTypes, seenUsageEvents);
+      const fileStats = await parseSessionFile(file, parsedEvents);
       parseTotals.linesRead += fileStats.linesRead;
-      parseTotals.tokenEvents += fileStats.tokenEvents;
       parseTotals.malformedLines += fileStats.malformedLines;
     }
 
+    const selectedEvents = [
+      ...parsedEvents.keyedEvents.values(),
+      ...parsedEvents.unkeyedEvents.values()
+    ];
+
+    for (const event of selectedEvents) {
+      addModelUsage(byModel, event.modelId, event.totals);
+      const planType = typeof event.rateLimits?.plan_type === "string" ? event.rateLimits.plan_type : undefined;
+      const safeEventTimeMs = Number.isFinite(event.timestampMs) ? event.timestampMs : 0;
+
+      addDailyUsage(byDay, event.timestampMs, event.modelId, planType, event.totals);
+      applyRateLimits(windows, event.rateLimits, safeEventTimeMs, event.totals, planTypes);
+    }
+
+    parseTotals.tokenEvents = selectedEvents.length;
+
     if (parseTotals.malformedLines > 0) {
       warnings.push(`Skipped ${parseTotals.malformedLines} malformed JSONL line(s).`);
+    }
+
+    if (parsedEvents.duplicateUsageKeys > 0) {
+      warnings.push(`Collapsed ${parsedEvents.duplicateUsageKeys} duplicate Claude usage event(s) by request/message key.`);
+    }
+
+    if (parsedEvents.duplicateUsageKeyCollisions > 0) {
+      warnings.push(
+        `Detected ${parsedEvents.duplicateUsageKeyCollisions} Claude usage key collision(s) with different token usage; keeping the highest-cost/latest event per key.`
+      );
+    }
+
+    if (parsedEvents.duplicateUnkeyedEvents > 0) {
+      warnings.push(`Collapsed ${parsedEvents.duplicateUnkeyedEvents} duplicate unkeyed Claude usage event(s) by usage signature.`);
     }
 
     const modelUsage = [...byModel.entries()]
@@ -257,17 +303,12 @@ async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
 
 async function parseSessionFile(
   filePath: string,
-  byModel: Map<string, UsageTotals>,
-  byDay: DailyUsageAggregates,
-  windows: LimitWindowAggregates,
-  planTypes: Set<string>,
-  seenUsageEvents: Set<string>
-): Promise<{ linesRead: number; tokenEvents: number; malformedLines: number }> {
+  parsedEvents: ParsedUsageEventAccumulator
+): Promise<{ linesRead: number; malformedLines: number }> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   let linesRead = 0;
-  let tokenEvents = 0;
   let malformedLines = 0;
 
   for await (const line of lineReader) {
@@ -294,30 +335,25 @@ async function parseSessionFile(
       continue;
     }
 
-    const usageKey = buildUsageEventKey(payloadObject, message);
-    if (usageKey && seenUsageEvents.has(usageKey)) {
-      continue;
-    }
-
-    if (usageKey) {
-      seenUsageEvents.add(usageKey);
-    }
-
     const modelId = String(message?.model ?? "unknown");
-    const deltaTotals = usageToTotals(modelId, normalizeUsage(usage));
-    addModelUsage(byModel, modelId, deltaTotals);
-    tokenEvents += 1;
-
     const eventTimeMs = Date.parse(String(payloadObject.timestamp ?? ""));
-    const safeEventTimeMs = Number.isFinite(eventTimeMs) ? eventTimeMs : 0;
     const rateLimits = extractRateLimits(payloadObject, message);
-    const planType = typeof rateLimits?.plan_type === "string" ? rateLimits.plan_type : undefined;
+    const normalizedUsage = normalizeUsage(usage);
+    const usageKey = buildUsageEventKey(payloadObject, message);
+    const usageSignature = buildUsageSignature(payloadObject, modelId, normalizedUsage);
+    const parsedEvent: ParsedUsageEvent = {
+      usageKey,
+      usageSignature,
+      timestampMs: eventTimeMs,
+      modelId,
+      totals: usageToTotals(modelId, normalizedUsage),
+      rateLimits
+    };
 
-    addDailyUsage(byDay, eventTimeMs, modelId, planType, deltaTotals);
-    applyRateLimits(windows, rateLimits, safeEventTimeMs, deltaTotals, planTypes);
+    recordParsedUsageEvent(parsedEvents, parsedEvent);
   }
 
-  return { linesRead, tokenEvents, malformedLines };
+  return { linesRead, malformedLines };
 }
 
 function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string | null {
@@ -330,6 +366,78 @@ function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Rec
   }
 
   return `${sessionId}|${requestId || messageId}`;
+}
+
+function buildUsageSignature(payloadObject: Record<string, unknown>, modelId: string, usage: ClaudeUsage): string {
+  return [
+    String(payloadObject.sessionId ?? ""),
+    modelId,
+    usage.inputTokens,
+    usage.cacheCreationInputTokens,
+    usage.cacheCreation5mInputTokens,
+    usage.cacheCreation1hInputTokens,
+    usage.cacheReadInputTokens,
+    usage.outputTokens,
+    usage.inferenceGeo
+  ].join("|");
+}
+
+function createParsedUsageEventAccumulator(): ParsedUsageEventAccumulator {
+  return {
+    keyedEvents: new Map<string, ParsedUsageEvent>(),
+    unkeyedEvents: new Map<string, ParsedUsageEvent>(),
+    duplicateUsageKeys: 0,
+    duplicateUsageKeyCollisions: 0,
+    duplicateUnkeyedEvents: 0
+  };
+}
+
+function recordParsedUsageEvent(parsedEvents: ParsedUsageEventAccumulator, event: ParsedUsageEvent): void {
+  if (event.usageKey) {
+    const previous = parsedEvents.keyedEvents.get(event.usageKey);
+    if (!previous) {
+      parsedEvents.keyedEvents.set(event.usageKey, event);
+      return;
+    }
+
+    parsedEvents.duplicateUsageKeys += 1;
+    if (previous.usageSignature !== event.usageSignature) {
+      parsedEvents.duplicateUsageKeyCollisions += 1;
+    }
+
+    if (shouldReplaceUsageEvent(previous, event)) {
+      parsedEvents.keyedEvents.set(event.usageKey, event);
+    }
+
+    return;
+  }
+
+  const previous = parsedEvents.unkeyedEvents.get(event.usageSignature);
+  if (!previous) {
+    parsedEvents.unkeyedEvents.set(event.usageSignature, event);
+    return;
+  }
+
+  parsedEvents.duplicateUnkeyedEvents += 1;
+  if (shouldReplaceUsageEvent(previous, event)) {
+    parsedEvents.unkeyedEvents.set(event.usageSignature, event);
+  }
+}
+
+function shouldReplaceUsageEvent(previous: ParsedUsageEvent, next: ParsedUsageEvent): boolean {
+  if (next.totals.estimatedCredits > previous.totals.estimatedCredits) {
+    return true;
+  }
+
+  if (next.totals.estimatedCredits === previous.totals.estimatedCredits) {
+    return normalizeTimestamp(next.timestampMs) > normalizeTimestamp(previous.timestampMs);
+  }
+
+  return false;
+}
+
+function normalizeTimestamp(value: number): number {
+  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
 }
 
 function extractRateLimits(

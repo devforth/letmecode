@@ -567,5 +567,89 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
     assert.equal(stats.summary.distinctPlanTypes.includes("max"), true);
     assert.deepEqual(stats.secondaryLimitWindows, []);
+    assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), true);
+  });
+});
+
+test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of first-write-wins", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/key-collision.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-1",
+        messageId: "msg-1",
+        model: "claude-sonnet-4-6",
+        inputTokens: 40,
+        cacheReadInputTokens: 10,
+        outputTokens: 5,
+        rateLimits: {
+          limit_id: "claude",
+          plan_type: "max",
+          primary: { used_percent: 1, window_minutes: 300, resets_at: 1780589753 }
+        }
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:02.000Z",
+        requestId: "req-1",
+        messageId: "msg-1",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheReadInputTokens: 50,
+        cacheCreation5mInputTokens: 20,
+        outputTokens: 10,
+        rateLimits: {
+          limit_id: "claude",
+          plan_type: "max",
+          primary: { used_percent: 3, window_minutes: 300, resets_at: 1780589753 }
+        }
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 170);
+    assert.equal(stats.summary.totals.cachedInputTokens, 50);
+    assert.equal(stats.summary.totals.nonCachedInputTokens, 120);
+    assert.equal(stats.summary.totals.outputTokens, 10);
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("highest-cost/latest event per key")),
+      true
+    );
+  });
+});
+
+test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/unkeyed-duplicates.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        model: "claude-opus-4-8",
+        inputTokens: 40,
+        cacheReadInputTokens: 30,
+        cacheCreation1hInputTokens: 10,
+        outputTokens: 5
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:03.000Z",
+        model: "claude-opus-4-8",
+        inputTokens: 40,
+        cacheReadInputTokens: 30,
+        cacheCreation1hInputTokens: 10,
+        outputTokens: 5
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 80);
+    assert.equal(stats.summary.totals.cachedInputTokens, 30);
+    assert.equal(stats.summary.totals.nonCachedInputTokens, 50);
+    assert.equal(stats.summary.totals.outputTokens, 5);
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate unkeyed Claude usage event")),
+      true
+    );
   });
 });
