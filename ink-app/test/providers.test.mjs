@@ -567,7 +567,10 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
     assert.equal(stats.summary.distinctPlanTypes.includes("max"), true);
     assert.deepEqual(stats.secondaryLimitWindows, []);
-    assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), true);
+    assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), false);
+
+    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
+    assert.equal(verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), true);
   });
 });
 
@@ -615,6 +618,12 @@ test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of firs
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("highest-cost/latest event per key")),
+      false
+    );
+
+    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
+    assert.equal(
+      verboseStats.warnings.some((warning) => warning.includes("highest-cost/latest event per key")),
       true
     );
   });
@@ -649,6 +658,12 @@ test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", as
     assert.equal(stats.summary.totals.outputTokens, 5);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate unkeyed Claude usage event")),
+      false
+    );
+
+    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
+    assert.equal(
+      verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate unkeyed Claude usage event")),
       true
     );
   });

@@ -7,6 +7,7 @@ import {
   addUsageTotals,
   createEmptyUsageTotals,
   type ModelUsageRow,
+  type ProviderStatsOptions,
   type ProviderStats,
   sumUsageTotals,
   type UsageTotals
@@ -61,7 +62,7 @@ export class CodexUsageProvider extends UsageProviderBase {
     this.root = path.resolve(options.root ?? os.homedir());
   }
 
-  async getStats(): Promise<ProviderStats> {
+  async getStats(_options: ProviderStatsOptions = {}): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".codex", "sessions");
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();

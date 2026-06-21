@@ -8,6 +8,7 @@ import {
   createEmptyUsageTotals,
   sumUsageTotals,
   type ModelUsageRow,
+  type ProviderStatsOptions,
   type ProviderStats,
   type UsageTotals
 } from "./contract.js";
@@ -96,7 +97,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     this.root = path.resolve(options.root ?? os.homedir());
   }
 
-  async getStats(): Promise<ProviderStats> {
+  async getStats(options: ProviderStatsOptions = {}): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".claude", "projects");
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
@@ -138,17 +139,17 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       warnings.push(`Skipped ${parseTotals.malformedLines} malformed JSONL line(s).`);
     }
 
-    if (parsedEvents.duplicateUsageKeys > 0) {
+    if (options.verbose && parsedEvents.duplicateUsageKeys > 0) {
       warnings.push(`Collapsed ${parsedEvents.duplicateUsageKeys} duplicate Claude usage event(s) by request/message key.`);
     }
 
-    if (parsedEvents.duplicateUsageKeyCollisions > 0) {
+    if (options.verbose && parsedEvents.duplicateUsageKeyCollisions > 0) {
       warnings.push(
         `Detected ${parsedEvents.duplicateUsageKeyCollisions} Claude usage key collision(s) with different token usage; keeping the highest-cost/latest event per key.`
       );
     }
 
-    if (parsedEvents.duplicateUnkeyedEvents > 0) {
+    if (options.verbose && parsedEvents.duplicateUnkeyedEvents > 0) {
       warnings.push(`Collapsed ${parsedEvents.duplicateUnkeyedEvents} duplicate unkeyed Claude usage event(s) by usage signature.`);
     }
 

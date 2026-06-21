@@ -15,6 +15,7 @@ export type {
   LimitWindowScope,
   ModelUsageRow,
   ProviderStats,
+  ProviderStatsOptions,
   ProviderSummary,
   UsageTotals
 } from "./contract.js";
