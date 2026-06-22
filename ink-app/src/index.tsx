@@ -123,7 +123,7 @@ function App(): React.JSX.Element {
       return;
     }
 
-    if ((key.ctrl || key.shift) && key.downArrow) {
+    if (key.rightArrow) {
       if (selectedVerticalTab.id === "limit-windows") {
         setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + 1, limitRows.length));
         return;
@@ -140,7 +140,7 @@ function App(): React.JSX.Element {
       }
     }
 
-    if ((key.ctrl || key.shift) && key.upArrow) {
+    if (key.leftArrow) {
       if (selectedVerticalTab.id === "limit-windows") {
         setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex - 1, limitRows.length));
         return;
@@ -157,12 +157,12 @@ function App(): React.JSX.Element {
       }
     }
 
-    if ((input === "\t" && !key.shift) || key.rightArrow) {
+    if (key.tab && !key.shift || input === "]") {
       setSelectedProviderIndex((current) => (current + 1) % providerStates.length);
       return;
     }
 
-    if ((input === "\t" && key.shift) || key.leftArrow) {
+    if (key.tab && key.shift || input === "[") {
       setSelectedProviderIndex((current) => (current - 1 + providerStates.length) % providerStates.length);
       return;
     }
@@ -183,7 +183,7 @@ function App(): React.JSX.Element {
         letmecode usage dashboard
       </Text>
       <Text color="gray">
-        tab/shift+tab or left/right to switch providers, j/k or up/down for details, ctrl+up/down or shift+up/down to select a row, q to quit
+        [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, q to quit
       </Text>
       <Box marginTop={1}>
         {providerStates.map((state, index) => (
