@@ -83,10 +83,15 @@ export class CopilotUsageProvider extends UsageProviderBase {
       addParseTotals(parseTotals, fileStats);
     }
 
-    if (await isReadableFile(vscodeOtelFile)) {
+    const vscodeOtelFileExists = await isReadableFile(vscodeOtelFile);
+    if (vscodeOtelFileExists) {
       parseTotals.filesScanned += 1;
       const fileStats = await parseCopilotJsonlFile(vscodeOtelFile, "vscode", byModel, byDay, planTypes);
       addParseTotals(parseTotals, fileStats);
+    } else if (await isCopilotVsCodeLoggingEnabled(this.root, vscodeOtelFile)) {
+      warnings.push(
+        `VS Code Copilot logging is enabled, but ${vscodeOtelFile} has not been created yet. Reload VS Code and send a Copilot Chat request.`
+      );
     }
 
     if (parseTotals.malformedLines > 0) {
@@ -214,7 +219,7 @@ function extractShutdownUsageEvents(record: Record<string, unknown>, fallbackPla
     return [];
   }
 
-  const timestampMs = parseTimestamp(record.timestamp) ?? parseTimestamp(data.sessionStartTime) ?? 0;
+  const timestampMs = parseRecordTimestamp(record) ?? parseTimestamp(data.sessionStartTime) ?? Number.NaN;
   return Object.entries(modelMetrics)
     .map<CopilotUsageEvent | null>(([modelId, rawMetrics]) => {
       const metrics = asRecord(rawMetrics);
@@ -249,7 +254,7 @@ function extractShutdownUsageEvents(record: Record<string, unknown>, fallbackPla
 
 function extractOtelUsageEvents(record: Record<string, unknown>, fallbackPlanType: string): CopilotUsageEvent[] {
   const events: CopilotUsageEvent[] = [];
-  visitRecords(record, (candidate) => {
+  visitRecords(record, (candidate, inheritedTimestampMs) => {
     const attributes = normalizeAttributes(candidate.attributes);
     const usage = usageFromAttributes(attributes);
     if (!usage) {
@@ -268,7 +273,8 @@ function extractOtelUsageEvents(record: Record<string, unknown>, fallbackPlanTyp
       parseTimestamp(candidate.timeUnixNano) ??
       parseTimestamp(candidate.observedTimeUnixNano) ??
       parseTimestamp(candidate.timestamp) ??
-      0;
+      inheritedTimestampMs ??
+      Number.NaN;
 
     events.push({
       timestampMs,
@@ -281,22 +287,28 @@ function extractOtelUsageEvents(record: Record<string, unknown>, fallbackPlanTyp
   return events;
 }
 
-function visitRecords(value: unknown, visit: (record: Record<string, unknown>) => void): void {
+function visitRecords(
+  value: unknown,
+  visit: (record: Record<string, unknown>, inheritedTimestampMs: number | undefined) => void,
+  inheritedTimestampMs?: number
+): void {
   const record = asRecord(value);
   if (record) {
+    const recordTimestampMs = parseRecordTimestamp(record) ?? inheritedTimestampMs;
+
     if (record.attributes) {
-      visit(record);
+      visit(record, recordTimestampMs);
     }
 
     for (const child of Object.values(record)) {
-      visitRecords(child, visit);
+      visitRecords(child, visit, recordTimestampMs);
     }
     return;
   }
 
   if (Array.isArray(value)) {
     for (const child of value) {
-      visitRecords(child, visit);
+      visitRecords(child, visit, inheritedTimestampMs);
     }
   }
 }
@@ -437,8 +449,28 @@ function stringAttribute(attributes: Record<string, unknown>, keys: string[]): s
 }
 
 function parseTimestamp(value: unknown): number | undefined {
+  if (Array.isArray(value)) {
+    const [seconds, nanoseconds = 0] = value;
+    if (
+      typeof seconds === "number" &&
+      Number.isFinite(seconds) &&
+      typeof nanoseconds === "number" &&
+      Number.isFinite(nanoseconds)
+    ) {
+      return seconds * 1000 + Math.floor(nanoseconds / 1_000_000);
+    }
+  }
+
   if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 1_000_000_000_000_000 ? Math.floor(value / 1_000_000) : value;
+    if (value > 1_000_000_000_000_000) {
+      return Math.floor(value / 1_000_000);
+    }
+
+    if (value < 10_000_000_000) {
+      return value * 1000;
+    }
+
+    return value;
   }
 
   if (typeof value !== "string" || !value) {
@@ -448,12 +480,31 @@ function parseTimestamp(value: unknown): number | undefined {
   if (/^\d+$/.test(value)) {
     const numericValue = Number(value);
     if (Number.isFinite(numericValue)) {
-      return value.length > 13 ? Math.floor(numericValue / 1_000_000) : numericValue;
+      if (value.length > 13) {
+        return Math.floor(numericValue / 1_000_000);
+      }
+
+      return value.length <= 10 ? numericValue * 1000 : numericValue;
     }
   }
 
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseRecordTimestamp(record: Record<string, unknown>): number | undefined {
+  return (
+    parseTimestamp(record.timeUnixNano) ??
+    parseTimestamp(record.observedTimeUnixNano) ??
+    parseTimestamp(record.startTimeUnixNano) ??
+    parseTimestamp(record.endTimeUnixNano) ??
+    parseTimestamp(record.hrTime) ??
+    parseTimestamp(record.hrTimeObserved) ??
+    parseTimestamp(record.startTime) ??
+    parseTimestamp(record.endTime) ??
+    parseTimestamp(record.timestamp) ??
+    parseTimestamp(record.time)
+  );
 }
 
 async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
@@ -481,6 +532,15 @@ async function isReadableFile(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function isCopilotVsCodeLoggingEnabled(root: string, outfile: string): Promise<boolean> {
+  const settings = await readJsonSettings(getDefaultVsCodeSettingsPath(root));
+  return (
+    settings["github.copilot.chat.otel.enabled"] === true &&
+    settings["github.copilot.chat.otel.exporterType"] === "file" &&
+    settings["github.copilot.chat.otel.outfile"] === outfile
+  );
 }
 
 async function readJsonSettings(filePath: string): Promise<Record<string, unknown>> {

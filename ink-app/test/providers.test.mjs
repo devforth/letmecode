@@ -196,6 +196,62 @@ test("CopilotUsageProvider parses CLI shutdown metrics and VS Code OTEL usage", 
   });
 });
 
+test("CopilotUsageProvider inherits OTEL timestamps for nested usage attributes", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        resourceLogs: [
+          {
+            scopeLogs: [
+              {
+                logRecords: [
+                  {
+                    timeUnixNano: "1781800000000000000",
+                    body: {
+                      attributes: [
+                        { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
+                        { key: "gen_ai.usage.input_tokens", value: { intValue: "30" } },
+                        { key: "gen_ai.usage.output_tokens", value: { intValue: "7" } }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-18");
+  });
+});
+
+test("CopilotUsageProvider parses OTEL hrTime timestamps", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: [
+          { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
+          { key: "gen_ai.usage.input_tokens", value: { intValue: "50" } },
+          { key: "gen_ai.usage.output_tokens", value: { intValue: "9" } }
+        ]
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-22");
+  });
+});
+
 test("configureCopilotVsCodeLogging writes user settings for file OTEL export", async () => {
   await withTempRoot(async (root) => {
     const settingsPath = path.join(root, "Code", "User", "settings.json");
@@ -216,6 +272,25 @@ test("configureCopilotVsCodeLogging writes user settings for file OTEL export", 
 
     const unchangedResult = await configureCopilotVsCodeLogging({ root, settingsPath, outfile });
     assert.equal(unchangedResult.changed, false);
+  });
+});
+
+test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL file exists yet", async () => {
+  await withTempRoot(async (root) => {
+    const outfile = path.join(root, ".copilot", "otel", "vscode.jsonl");
+    await configureCopilotVsCodeLogging({
+      root,
+      settingsPath: path.join(root, ".config", "Code", "User", "settings.json"),
+      outfile
+    });
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("has not been created yet")),
+      true
+    );
   });
 });
 

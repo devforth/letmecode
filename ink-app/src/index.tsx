@@ -277,22 +277,26 @@ function CopilotActionsPanel(props: {
     return null;
   }
 
+  const hasNoUsage = props.providerState.status === "ready" && props.providerState.stats.summary.tokenEvents === 0;
+  const accentColor = hasNoUsage ? "red" : "cyan";
+
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
-      <Text color="cyan">Copilot setup</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={accentColor} paddingX={1} flexDirection="column">
+      <Text color={accentColor}>Copilot setup</Text>
       <Box>
         {COPILOT_ACTIONS.map((action, index) => (
           <Box key={action.id} marginRight={1}>
             <Text
               inverse={index === (props.selectedActionIndex ?? 0)}
-              color={action.enabled ? undefined : "gray"}
+              bold={hasNoUsage && action.id === "vscode"}
+              color={action.enabled ? (hasNoUsage && action.id === "vscode" ? accentColor : undefined) : "gray"}
             >
               {`${index + 1} ${action.label}`}
             </Text>
           </Box>
         ))}
       </Box>
-      <Text color="gray">Press 1 or h/l to select an action, enter to run selected.</Text>
+      <Text color={hasNoUsage ? accentColor : "gray"}>Press 1 or h/l to select an action, enter to run selected.</Text>
       {props.actionMessage ? <Text>{props.actionMessage}</Text> : null}
     </Box>
   );
