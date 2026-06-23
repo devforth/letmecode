@@ -176,15 +176,17 @@ export async function configureCopilotVsCodeLogging(
 ): Promise<CopilotVsCodeLoggingResult> {
   const root = path.resolve(options.root ?? os.homedir());
   const outfile = getCopilotOtelPath(root);
+  const vscodeOutfile = toVsCodeOutfilePath(outfile);
   const settingsPath = options.settingsPath ?? getDefaultVsCodeSettingsPath(root);
   const settingsText = await readTextFileOrEmpty(settingsPath);
   const { text: nextSettingsText, changed } = updateJsoncSettings(settingsText, {
     ...VSCODE_OTEL_SETTINGS,
-    "github.copilot.chat.otel.outfile": outfile
+    "github.copilot.chat.otel.outfile": vscodeOutfile
   });
 
   await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.promises.mkdir(path.dirname(outfile), { recursive: true });
+  await fs.promises.open(outfile, "a").then((file) => file.close());
   if (changed) {
     await fs.promises.writeFile(settingsPath, nextSettingsText, "utf8");
   }
@@ -194,6 +196,10 @@ export async function configureCopilotVsCodeLogging(
 
 function getCopilotOtelPath(root: string): string {
   return path.join(root, ".copilot", "otel", "vscode.jsonl");
+}
+
+function toVsCodeOutfilePath(filePath: string): string {
+  return process.platform === "win32" ? filePath.replace(/\\/g, "/") : filePath;
 }
 
 async function parseCopilotJsonlFile(
@@ -400,11 +406,17 @@ async function isReadableFile(filePath: string): Promise<boolean> {
 
 async function isCopilotVsCodeLoggingEnabled(root: string, outfile: string): Promise<boolean> {
   const settings = await readJsonSettings(getDefaultVsCodeSettingsPath(root));
+  const configuredOutfile = settings["github.copilot.chat.otel.outfile"];
   return (
     settings["github.copilot.chat.otel.enabled"] === true &&
     settings["github.copilot.chat.otel.exporterType"] === "file" &&
-    settings["github.copilot.chat.otel.outfile"] === outfile
+    typeof configuredOutfile === "string" &&
+    normalizeComparablePath(configuredOutfile) === normalizeComparablePath(toVsCodeOutfilePath(outfile))
   );
+}
+
+function normalizeComparablePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/");
 }
 
 async function readJsonSettings(filePath: string): Promise<Record<string, unknown>> {

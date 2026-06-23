@@ -45,6 +45,15 @@ async function writeCopilotOtel(root, lines) {
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
 
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function turnContext(model, cwd = "/tmp/project") {
   return JSON.stringify({
     timestamp: "2026-06-18T20:00:00.000Z",
@@ -563,6 +572,7 @@ test("configureCopilotVsCodeLogging writes user settings for file OTEL export", 
 
     assert.equal(result.changed, true);
     assert.equal(result.outfile, outfile);
+    assert.equal(await fileExists(outfile), true);
     assert.equal(rawSettings.includes("// Keep this comment"), true);
     assert.equal(settings["example.url"], "https://example.com/path//inside-string");
     assert.equal(settings["editor.tabSize"], 2);
@@ -579,10 +589,21 @@ test("configureCopilotVsCodeLogging writes user settings for file OTEL export", 
 test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL file exists yet", async () => {
   await withTempRoot(async (root) => {
     const outfile = path.join(root, ".copilot", "otel", "vscode.jsonl");
-    await configureCopilotVsCodeLogging({
-      root,
-      settingsPath: path.join(root, ".config", "Code", "User", "settings.json")
-    });
+    const settingsPath = path.join(root, ".config", "Code", "User", "settings.json");
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify(
+        {
+          "github.copilot.chat.otel.enabled": true,
+          "github.copilot.chat.otel.exporterType": "file",
+          "github.copilot.chat.otel.outfile": outfile
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
 
     const stats = await new CopilotUsageProvider({ root }).getStats();
 
