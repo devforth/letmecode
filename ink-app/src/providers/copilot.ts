@@ -507,7 +507,3 @@ function updateJsoncSettings(raw: string, values: Record<string, unknown>): { te
 
   return { text, changed };
 }
-
-function getDefaultVsCodeSettingsPath(root: string): string {
-  return path.join(getVsCodeUserRoots(root)[0], "settings.json");
-}
