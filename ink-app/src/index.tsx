@@ -310,16 +310,21 @@ function runCopilotAction(
   setCopilotActionMessage("Updating VS Code settings...");
   void configureCopilotVsCodeLogging()
     .then((result) => {
-      setCopilotActionMessage(
-        result.changed
-          ? `VS Code logging enabled: ${result.outfile}`
-          : `VS Code logging already enabled: ${result.outfile}`
-      );
+      setCopilotActionMessage(formatCopilotLoggingResult(result));
     })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       setCopilotActionMessage(`Failed to update VS Code settings: ${message}`);
     });
+}
+
+function formatCopilotLoggingResult(result: Awaited<ReturnType<typeof configureCopilotVsCodeLogging>>): string {
+  const status = result.changed ? "VS Code logging enabled" : "VS Code logging already enabled";
+  return [
+    `${status}: ${result.outfile}`,
+    `Settings written to: ${result.settingsPath}`,
+    'Open "Preferences: Open User Settings (JSON)" in VS Code and verify that this is the active file.'
+  ].join("\n");
 }
 
 function ProviderTab(props: { label: string; active: boolean; status: ProviderLoadState["status"] }): React.JSX.Element {
