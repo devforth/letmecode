@@ -572,7 +572,8 @@ test("configureCopilotVsCodeLogging writes user settings for file OTEL export", 
 
     assert.equal(result.changed, true);
     assert.equal(result.outfile, outfile);
-    assert.equal(await fileExists(outfile), true);
+    assert.equal(result.settingsPath, settingsPath);
+    assert.equal(await fileExists(outfile), false);
     assert.equal(rawSettings.includes("// Keep this comment"), true);
     assert.equal(settings["example.url"], "https://example.com/path//inside-string");
     assert.equal(settings["editor.tabSize"], 2);
@@ -583,6 +584,24 @@ test("configureCopilotVsCodeLogging writes user settings for file OTEL export", 
 
     const unchangedResult = await configureCopilotVsCodeLogging({ root, settingsPath });
     assert.equal(unchangedResult.changed, false);
+  });
+});
+
+test("configureCopilotVsCodeLogging falls back to Insiders when Stable user settings root is missing", async () => {
+  await withTempRoot(async (root) => {
+    const insidersSettingsPath = path.join(root, ".config", "Code - Insiders", "User", "settings.json");
+    await fs.mkdir(path.dirname(insidersSettingsPath), { recursive: true });
+
+    const result = await configureCopilotVsCodeLogging({ root });
+
+    assert.equal(result.settingsPath, insidersSettingsPath);
+    assert.equal(await fileExists(path.join(root, ".config", "Code", "User", "settings.json")), false);
+
+    const settings = parseJsonc(await fs.readFile(insidersSettingsPath, "utf8"));
+    assert.equal(settings["github.copilot.chat.otel.enabled"], true);
+    assert.equal(settings["github.copilot.chat.otel.exporterType"], "file");
+    assert.equal(settings["github.copilot.chat.otel.outfile"], path.join(root, ".copilot", "otel", "vscode.jsonl"));
+    assert.equal(settings["github.copilot.chat.otel.captureContent"], false);
   });
 });
 

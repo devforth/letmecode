@@ -176,19 +176,17 @@ export async function configureCopilotVsCodeLogging(
 ): Promise<CopilotVsCodeLoggingResult> {
   const root = path.resolve(options.root ?? os.homedir());
   const outfile = getCopilotOtelPath(root);
-  const vscodeOutfile = toVsCodeOutfilePath(outfile);
-  const settingsPath = options.settingsPath ?? getDefaultVsCodeSettingsPath(root);
+  const settingsPath = options.settingsPath ?? (await getVsCodeSettingsPath(root));
   const settingsText = await readTextFileOrEmpty(settingsPath);
-  const { text: nextSettingsText, changed } = updateJsoncSettings(settingsText, {
+  const { text, changed } = updateJsoncSettings(settingsText, {
     ...VSCODE_OTEL_SETTINGS,
-    "github.copilot.chat.otel.outfile": vscodeOutfile
+    "github.copilot.chat.otel.outfile": toVsCodeOutfilePath(outfile)
   });
 
   await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.promises.mkdir(path.dirname(outfile), { recursive: true });
-  await fs.promises.open(outfile, "a").then((file) => file.close());
   if (changed) {
-    await fs.promises.writeFile(settingsPath, nextSettingsText, "utf8");
+    await fs.promises.writeFile(settingsPath, text, "utf8");
   }
 
   return { settingsPath, outfile, changed };
@@ -200,6 +198,35 @@ function getCopilotOtelPath(root: string): string {
 
 function toVsCodeOutfilePath(filePath: string): string {
   return process.platform === "win32" ? filePath.replace(/\\/g, "/") : filePath;
+}
+
+async function getVsCodeSettingsPath(root: string): Promise<string> {
+  const userRoots = getVsCodeUserRoots(root);
+  for (const userRoot of userRoots) {
+    if (await isDirectory(userRoot)) {
+      return path.join(userRoot, "settings.json");
+    }
+  }
+
+  return path.join(userRoots[0], "settings.json");
+}
+
+function getVsCodeUserRoots(root: string): string[] {
+  if (process.platform === "darwin") {
+    const applicationSupport = path.join(root, "Library", "Application Support");
+    return [
+      path.join(applicationSupport, "Code", "User"),
+      path.join(applicationSupport, "Code - Insiders", "User")
+    ];
+  }
+
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? path.join(root, "AppData", "Roaming");
+    return [path.join(appData, "Code", "User"), path.join(appData, "Code - Insiders", "User")];
+  }
+
+  const configRoot = path.join(root, ".config");
+  return [path.join(configRoot, "Code", "User"), path.join(configRoot, "Code - Insiders", "User")];
 }
 
 async function parseCopilotJsonlFile(
@@ -404,8 +431,17 @@ async function isReadableFile(filePath: string): Promise<boolean> {
   }
 }
 
+async function isDirectory(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function isCopilotVsCodeLoggingEnabled(root: string, outfile: string): Promise<boolean> {
-  const settings = await readJsonSettings(getDefaultVsCodeSettingsPath(root));
+  const settings = await readJsonSettings(await getVsCodeSettingsPath(root));
   const configuredOutfile = settings["github.copilot.chat.otel.outfile"];
   return (
     settings["github.copilot.chat.otel.enabled"] === true &&
@@ -416,7 +452,8 @@ async function isCopilotVsCodeLoggingEnabled(root: string, outfile: string): Pro
 }
 
 function normalizeComparablePath(filePath: string): string {
-  return filePath.replace(/\\/g, "/");
+  const normalized = path.resolve(filePath).replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 async function readJsonSettings(filePath: string): Promise<Record<string, unknown>> {
@@ -472,13 +509,5 @@ function updateJsoncSettings(raw: string, values: Record<string, unknown>): { te
 }
 
 function getDefaultVsCodeSettingsPath(root: string): string {
-  if (process.platform === "darwin") {
-    return path.join(root, "Library", "Application Support", "Code", "User", "settings.json");
-  }
-
-  if (process.platform === "win32") {
-    return path.join(process.env.APPDATA ?? path.join(root, "AppData", "Roaming"), "Code", "User", "settings.json");
-  }
-
-  return path.join(root, ".config", "Code", "User", "settings.json");
+  return path.join(getVsCodeUserRoots(root)[0], "settings.json");
 }

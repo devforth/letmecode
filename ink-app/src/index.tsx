@@ -347,7 +347,12 @@ function formatCopilotLoggingResult(result: Awaited<ReturnType<typeof configureC
   return [
     `${status}: ${result.outfile}`,
     `Settings written to: ${result.settingsPath}`,
-    'Open "Preferences: Open User Settings (JSON)" in VS Code and verify that this is the active file.'
+    'Open "Preferences: Open User Settings (JSON)" in VS Code and verify that this is the active file.',
+    "Expected settings:",
+    '"github.copilot.chat.otel.enabled": true',
+    '"github.copilot.chat.otel.exporterType": "file"',
+    '"github.copilot.chat.otel.captureContent": false',
+    `"github.copilot.chat.otel.outfile": "${result.outfile}"`
   ].join("\n");
 }
 
