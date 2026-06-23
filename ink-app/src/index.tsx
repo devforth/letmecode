@@ -67,7 +67,8 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const [providerStates, setProviderStates] = useState<ProviderLoadState[]>(
     providers.map((provider) => ({ provider, status: "loading" }))
   );
-  const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
+  const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id ?? "");
+  const [hasUserSelectedProvider, setHasUserSelectedProvider] = useState(false);
   const [selectedVerticalTabIndex, setSelectedVerticalTabIndex] = useState(0);
   const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState(0);
   const [selectedDayRowIndex, setSelectedDayRowIndex] = useState(0);
@@ -75,7 +76,12 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const [selectedCopilotActionIndex, setSelectedCopilotActionIndex] = useState(0);
   const [copilotActionMessage, setCopilotActionMessage] = useState<string | undefined>();
 
-  const selectedProvider = providerStates[selectedProviderIndex];
+  const sortedProviderStates = React.useMemo(() => sortProviderStatesByUsage(providerStates), [providerStates]);
+  const selectedProviderIndex = Math.max(
+    0,
+    sortedProviderStates.findIndex((state) => state.provider.id === selectedProviderId)
+  );
+  const selectedProvider = sortedProviderStates[selectedProviderIndex];
   const selectedVerticalTab = VERTICAL_TABS[selectedVerticalTabIndex];
   const limitRows = getLimitRows(selectedProvider);
   const dayRows = getDayRows(selectedProvider);
@@ -126,6 +132,19 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       cancelled = true;
     };
   }, [props.statsOptions, providers]);
+
+  useEffect(() => {
+    if (hasUserSelectedProvider || providerStates.some((state) => state.status === "loading")) {
+      return;
+    }
+
+    const topProvider = sortedProviderStates[0];
+    if (providerUsageScore(topProvider) <= 0) {
+      return;
+    }
+
+    setSelectedProviderId(topProvider.provider.id);
+  }, [hasUserSelectedProvider, providerStates, sortedProviderStates]);
 
   useInput((input, key) => {
     if (input === "q" || key.escape) {
@@ -188,12 +207,17 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if ((key.tab && !key.shift) || input === "]") {
-      setSelectedProviderIndex((current) => (current + 1) % providerStates.length);
+      setSelectedProviderId(sortedProviderStates[(selectedProviderIndex + 1) % sortedProviderStates.length].provider.id);
+      setHasUserSelectedProvider(true);
       return;
     }
 
     if ((key.tab && key.shift) || input === "[") {
-      setSelectedProviderIndex((current) => (current - 1 + providerStates.length) % providerStates.length);
+      setSelectedProviderId(
+        sortedProviderStates[(selectedProviderIndex - 1 + sortedProviderStates.length) % sortedProviderStates.length]
+          .provider.id
+      );
+      setHasUserSelectedProvider(true);
       return;
     }
 
@@ -216,11 +240,11 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, enter for actions, q to quit
       </Text>
       <Box marginTop={1}>
-        {providerStates.map((state, index) => (
+        {sortedProviderStates.map((state) => (
           <ProviderTab
             key={state.provider.id}
             label={state.provider.label}
-            active={index === selectedProviderIndex}
+            active={state.provider.id === selectedProvider.provider.id}
             status={state.status}
           />
         ))}
@@ -693,6 +717,26 @@ function clampSelectionIndex(value: number, rowCount: number): number {
   }
 
   return Math.max(0, Math.min(value, rowCount - 1));
+}
+
+function sortProviderStatesByUsage(states: ProviderLoadState[]): ProviderLoadState[] {
+  return states
+    .map((state, index) => ({ state, index }))
+    .sort(
+      (left, right) =>
+        providerUsageScore(right.state) - providerUsageScore(left.state) ||
+        left.index - right.index
+    )
+    .map((entry) => entry.state);
+}
+
+function providerUsageScore(state: ProviderLoadState): number {
+  if (state.status !== "ready") {
+    return 0;
+  }
+
+  const totals = state.stats.summary.totals;
+  return totals.inputTokens + totals.cachedInputTokens + totals.outputTokens;
 }
 
 function getLimitRows(providerState: ProviderLoadState): LimitWindowRow[] {
