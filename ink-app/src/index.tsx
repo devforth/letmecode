@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, render } from "ink";
 import {
+  configureCopilotVsCodeLogging,
   createProviders,
   type DailyUsageRow,
   type LimitWindowRow,
@@ -17,6 +18,8 @@ type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
   | { provider: UsageProviderBase; status: "ready"; stats: ProviderStats }
   | { provider: UsageProviderBase; status: "error"; errorMessage: string };
+
+type CopilotActionId = "vscode";
 
 const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
   { id: "limit-windows", label: "Limits" },
@@ -54,6 +57,10 @@ const DAY_USAGE_COLUMNS = {
   value: 10
 } as const;
 
+const COPILOT_ACTIONS: Array<{ id: CopilotActionId; label: string; enabled: boolean }> = [
+  { id: "vscode", label: "Start logging VS Code", enabled: true }
+];
+
 function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const { exit } = useApp();
   const providers = React.useState(() => createProviders())[0];
@@ -65,6 +72,8 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState(0);
   const [selectedDayRowIndex, setSelectedDayRowIndex] = useState(0);
   const [selectedModelRowIndex, setSelectedModelRowIndex] = useState(0);
+  const [selectedCopilotActionIndex, setSelectedCopilotActionIndex] = useState(0);
+  const [copilotActionMessage, setCopilotActionMessage] = useState<string | undefined>();
 
   const selectedProvider = providerStates[selectedProviderIndex];
   const selectedVerticalTab = VERTICAL_TABS[selectedVerticalTabIndex];
@@ -124,7 +133,27 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       return;
     }
 
-    if ((key.ctrl || key.shift) && key.downArrow) {
+    if (selectedProvider.provider.id === "copilot" && input >= "1" && input <= String(COPILOT_ACTIONS.length)) {
+      setSelectedCopilotActionIndex(Number(input) - 1);
+      return;
+    }
+
+    if (selectedProvider.provider.id === "copilot" && key.return) {
+      runCopilotAction(COPILOT_ACTIONS[selectedCopilotActionIndex].id, setCopilotActionMessage);
+      return;
+    }
+
+    if (selectedProvider.provider.id === "copilot" && input === "l") {
+      setSelectedCopilotActionIndex((current) => (current + 1) % COPILOT_ACTIONS.length);
+      return;
+    }
+
+    if (selectedProvider.provider.id === "copilot" && input === "h") {
+      setSelectedCopilotActionIndex((current) => (current - 1 + COPILOT_ACTIONS.length) % COPILOT_ACTIONS.length);
+      return;
+    }
+
+    if (key.rightArrow) {
       if (selectedVerticalTab.id === "limit-windows") {
         setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + 1, limitRows.length));
         return;
@@ -141,7 +170,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       }
     }
 
-    if ((key.ctrl || key.shift) && key.upArrow) {
+    if (key.leftArrow) {
       if (selectedVerticalTab.id === "limit-windows") {
         setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex - 1, limitRows.length));
         return;
@@ -158,12 +187,12 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       }
     }
 
-    if ((input === "\t" && !key.shift) || key.rightArrow) {
+    if ((key.tab && !key.shift) || input === "]") {
       setSelectedProviderIndex((current) => (current + 1) % providerStates.length);
       return;
     }
 
-    if ((input === "\t" && key.shift) || key.leftArrow) {
+    if ((key.tab && key.shift) || input === "[") {
       setSelectedProviderIndex((current) => (current - 1 + providerStates.length) % providerStates.length);
       return;
     }
@@ -184,7 +213,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         letmecode usage dashboard
       </Text>
       <Text color="gray">
-        tab/shift+tab or left/right to switch providers, j/k or up/down for details, ctrl+up/down or shift+up/down to select a row, q to quit
+        [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, enter for actions, q to quit
       </Text>
       <Box marginTop={1}>
         {providerStates.map((state, index) => (
@@ -222,6 +251,12 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         selectedModelRow={selectedModelRow}
       />
 
+      <CopilotActionsPanel
+        providerState={selectedProvider}
+        actionMessage={copilotActionMessage}
+        selectedActionIndex={selectedCopilotActionIndex}
+      />
+
       {selectedProvider.status === "ready" && selectedProvider.stats.warnings.length > 0 ? (
         <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
           <Text color="yellow">Warnings</Text>
@@ -232,6 +267,59 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       ) : null}
     </Box>
   );
+}
+
+function CopilotActionsPanel(props: {
+  providerState: ProviderLoadState;
+  actionMessage?: string;
+  selectedActionIndex?: number;
+}): React.JSX.Element | null {
+  if (props.providerState.provider.id !== "copilot") {
+    return null;
+  }
+
+  const hasNoUsage = props.providerState.status === "ready" && props.providerState.stats.summary.tokenEvents === 0;
+  const accentColor = hasNoUsage ? "red" : "cyan";
+
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={accentColor} paddingX={1} flexDirection="column">
+      <Text color={accentColor}>Copilot setup</Text>
+      <Box>
+        {COPILOT_ACTIONS.map((action, index) => (
+          <Box key={action.id} marginRight={1}>
+            <Text
+              inverse={index === (props.selectedActionIndex ?? 0)}
+              bold={hasNoUsage && action.id === "vscode"}
+              color={action.enabled ? (hasNoUsage && action.id === "vscode" ? accentColor : undefined) : "gray"}
+            >
+              {`${index + 1} ${action.label}`}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+      <Text color={hasNoUsage ? accentColor : "gray"}>Press 1 or h/l to select an action, enter to run selected.</Text>
+      {props.actionMessage ? <Text>{props.actionMessage}</Text> : null}
+    </Box>
+  );
+}
+
+function runCopilotAction(
+  actionId: CopilotActionId,
+  setCopilotActionMessage: React.Dispatch<React.SetStateAction<string | undefined>>
+): void {
+  setCopilotActionMessage("Updating VS Code settings...");
+  void configureCopilotVsCodeLogging()
+    .then((result) => {
+      setCopilotActionMessage(
+        result.changed
+          ? `VS Code logging enabled: ${result.outfile}`
+          : `VS Code logging already enabled: ${result.outfile}`
+      );
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setCopilotActionMessage(`Failed to update VS Code settings: ${message}`);
+    });
 }
 
 function ProviderTab(props: { label: string; active: boolean; status: ProviderLoadState["status"] }): React.JSX.Element {

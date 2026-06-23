@@ -5,6 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { ClaudeUsageProvider } from "../dist/providers/claude.js";
 import { CodexUsageProvider } from "../dist/providers/codex.js";
+import {
+  CopilotUsageProvider,
+  configureCopilotVsCodeLogging
+} from "../dist/providers/copilot.js";
 import { createProviders } from "../dist/providers/index.js";
 
 async function withTempRoot(run) {
@@ -24,6 +28,18 @@ async function writeSession(root, relativePath, lines) {
 
 async function writeClaudeSession(root, relativePath, lines) {
   const target = path.join(root, ".claude", "projects", relativePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, lines.join("\n"), "utf8");
+}
+
+async function writeCopilotSession(root, relativePath, lines) {
+  const target = path.join(root, ".copilot", "session-state", relativePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, lines.join("\n"), "utf8");
+}
+
+async function writeCopilotOtel(root, lines) {
+  const target = path.join(root, ".copilot", "otel", "vscode.jsonl");
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
@@ -104,11 +120,178 @@ function claudeAssistantEvent({
 
 test("provider registry stays UI-generic", async () => {
   const providers = createProviders();
-  assert.equal(providers.length, 2);
+  assert.equal(providers.length, 3);
   assert.equal(providers[0].id, "codex");
   assert.equal(providers[1].id, "claude");
+  assert.equal(providers[2].id, "copilot");
   assert.equal(typeof providers[0].getStats, "function");
   assert.equal(typeof providers[1].getStats, "function");
+  assert.equal(typeof providers[2].getStats, "function");
+});
+
+test("CopilotUsageProvider parses CLI shutdown metrics and VS Code OTEL usage", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotSession(root, "cli-session/events.jsonl", [
+      JSON.stringify({
+        type: "session.shutdown",
+        timestamp: "2026-06-18T20:00:00.000Z",
+        data: {
+          modelMetrics: {
+            "gpt-5-mini": {
+              requests: { count: 2, cost: 0.25 },
+              usage: {
+                inputTokens: 100,
+                cacheReadTokens: 40,
+                outputTokens: 10,
+                reasoningTokens: 3
+              }
+            }
+          }
+        }
+      })
+    ]);
+
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        resourceLogs: [
+          {
+            scopeLogs: [
+              {
+                logRecords: [
+                  {
+                    timeUnixNano: "1781800000000000000",
+                    attributes: [
+                      { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
+                      { key: "gen_ai.usage.input_tokens", value: { intValue: "30" } },
+                      { key: "gen_ai.usage.cached_input_tokens", value: { intValue: "5" } },
+                      { key: "gen_ai.usage.output_tokens", value: { intValue: "7" } },
+                      { key: "gen_ai.usage.premium_requests", value: { doubleValue: 0.1 } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+    assert.equal(stats.providerId, "copilot");
+    assert.equal(stats.providerLabel, "Copilot");
+    assert.equal(stats.summary.filesScanned, 2);
+    assert.equal(stats.summary.tokenEvents, 2);
+    assert.equal(stats.summary.totals.inputTokens, 130);
+    assert.equal(stats.summary.totals.cachedInputTokens, 45);
+    assert.equal(stats.summary.totals.nonCachedInputTokens, 85);
+    assert.equal(stats.summary.totals.outputTokens, 17);
+    assert.equal(stats.summary.totals.reasoningOutputTokens, 3);
+    assert.equal(stats.summary.totals.estimatedCredits, 0.35);
+    assert.deepEqual(stats.summary.distinctPlanTypes, ["cli", "vscode"]);
+    assert.deepEqual(
+      stats.modelUsage.map((row) => row.modelId).sort(),
+      ["gpt-4.1", "gpt-5-mini"]
+    );
+    assert.equal(stats.dayUsage.length > 0, true);
+  });
+});
+
+test("CopilotUsageProvider inherits OTEL timestamps for nested usage attributes", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        resourceLogs: [
+          {
+            scopeLogs: [
+              {
+                logRecords: [
+                  {
+                    timeUnixNano: "1781800000000000000",
+                    body: {
+                      attributes: [
+                        { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
+                        { key: "gen_ai.usage.input_tokens", value: { intValue: "30" } },
+                        { key: "gen_ai.usage.output_tokens", value: { intValue: "7" } }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-18");
+  });
+});
+
+test("CopilotUsageProvider parses OTEL hrTime timestamps", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: [
+          { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
+          { key: "gen_ai.usage.input_tokens", value: { intValue: "50" } },
+          { key: "gen_ai.usage.output_tokens", value: { intValue: "9" } }
+        ]
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-22");
+  });
+});
+
+test("configureCopilotVsCodeLogging writes user settings for file OTEL export", async () => {
+  await withTempRoot(async (root) => {
+    const settingsPath = path.join(root, "Code", "User", "settings.json");
+    const outfile = path.join(root, ".copilot", "otel", "vscode.jsonl");
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({ "editor.tabSize": 2 }, null, 2), "utf8");
+
+    const result = await configureCopilotVsCodeLogging({ root, settingsPath, outfile });
+    const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+
+    assert.equal(result.changed, true);
+    assert.equal(result.outfile, outfile);
+    assert.equal(settings["editor.tabSize"], 2);
+    assert.equal(settings["github.copilot.chat.otel.enabled"], true);
+    assert.equal(settings["github.copilot.chat.otel.exporterType"], "file");
+    assert.equal(settings["github.copilot.chat.otel.outfile"], outfile);
+    assert.equal(settings["github.copilot.chat.otel.captureContent"], false);
+
+    const unchangedResult = await configureCopilotVsCodeLogging({ root, settingsPath, outfile });
+    assert.equal(unchangedResult.changed, false);
+  });
+});
+
+test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL file exists yet", async () => {
+  await withTempRoot(async (root) => {
+    const outfile = path.join(root, ".copilot", "otel", "vscode.jsonl");
+    await configureCopilotVsCodeLogging({
+      root,
+      settingsPath: path.join(root, ".config", "Code", "User", "settings.json"),
+      outfile
+    });
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("has not been created yet")),
+      true
+    );
+  });
 });
 
 test("CodexUsageProvider returns valid ProviderStats", async () => {
