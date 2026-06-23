@@ -356,13 +356,13 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
         files: {formatInteger(summary.filesScanned)}  lines: {formatInteger(summary.linesRead)}  token events: {formatInteger(summary.tokenEvents)}
       </Text>
       <Text>
-        input: {formatInteger(summary.totals.inputTokens)}  cached: {formatInteger(summary.totals.cachedInputTokens)}  non-cached: {formatInteger(summary.totals.nonCachedInputTokens)}
+        input: {formatInteger(summary.totals.inputTokens)}  cached: {formatCacheTokens(summary.totals, "cached")}  non-cached: {formatCacheTokens(summary.totals, "non-cached")}
       </Text>
       <Text>
         output: {formatInteger(summary.totals.outputTokens)}  reasoning: {formatInteger(summary.totals.reasoningOutputTokens)}  total: {formatInteger(summary.totals.totalTokens)}
       </Text>
       <Text>
-        estimated credits: {formatCredits(summary.totals.estimatedCredits)} 
+        estimated credits: {formatUsageCredits(summary.totals)} 
       </Text>
       <Text>
         IpO: {inputPerOutput.cached}:{inputPerOutput.nonCached}:{inputPerOutput.output}
@@ -462,12 +462,12 @@ function UsageByModelPanel(props: { stats: ProviderStats; selectedModelId?: stri
         const isSelected = props.selectedModelId === row.modelId;
         return (
           <Text key={row.modelId} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(row.modelId, MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(row.totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.cachedInputTokens), MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(row.totals.nonCachedInputTokens), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(row.totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatCredits(row.totals.estimatedCredits), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsd(row.totals.estimatedCredits * CODEX_CREDIT_COST_USD), MODEL_USAGE_COLUMNS.value)}
+            {pad(row.modelId, MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(row.totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatCacheTokens(row.totals, "cached"), MODEL_USAGE_COLUMNS.cached)} {pad(formatCacheTokens(row.totals, "non-cached"), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(row.totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(row.totals), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(row.totals), MODEL_USAGE_COLUMNS.value)}
           </Text>
         );
       })}
       <Text color="cyan">
-        {pad("TOTAL", MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(totals.cachedInputTokens), MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(totals.nonCachedInputTokens), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatCredits(totals.estimatedCredits), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD), MODEL_USAGE_COLUMNS.value)}
+        {pad("TOTAL", MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatCacheTokens(totals, "cached"), MODEL_USAGE_COLUMNS.cached)} {pad(formatCacheTokens(totals, "non-cached"), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(totals), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(totals), MODEL_USAGE_COLUMNS.value)}
       </Text>
     </Box>
   );
@@ -487,7 +487,7 @@ function DayToDayPanel(props: { stats: ProviderStats; selectedDayKey?: string })
         const isSelected = props.selectedDayKey === row.dayKey;
         return (
           <Text key={row.dayKey} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(formatUtcDay(row.dayKey), DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.inputTokens), DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.outputTokens), DAY_USAGE_COLUMNS.output)} {pad(formatUsd(row.totals.estimatedCredits * CODEX_CREDIT_COST_USD), DAY_USAGE_COLUMNS.value)}
+            {pad(formatUtcDay(row.dayKey), DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.inputTokens), DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.outputTokens), DAY_USAGE_COLUMNS.output)} {pad(formatUsageUsd(row.totals), DAY_USAGE_COLUMNS.value)}
           </Text>
         );
       })}
@@ -531,8 +531,8 @@ function SelectionDetailsPanel(props: {
           day: {formatUtcDay(row.dayKey)}  events: {formatInteger(row.totals.eventCount)}  models: {formatInteger(row.distinctModels.length)}  plans: {formatInteger(row.distinctPlanTypes.length)}
         </Text>
         <Text>range: {formatEventRange(row.firstEventUtcIso, row.lastEventUtcIso)}</Text>
-        <Text>input: {formatInteger(row.totals.inputTokens)}  cached: {formatInteger(row.totals.cachedInputTokens)}</Text>
-        <Text>non-cached: {formatInteger(row.totals.nonCachedInputTokens)}  output: {formatInteger(row.totals.outputTokens)}</Text>
+        <Text>input: {formatInteger(row.totals.inputTokens)}  cached: {formatCacheTokens(row.totals, "cached")}</Text>
+        <Text>non-cached: {formatCacheTokens(row.totals, "non-cached")}  output: {formatInteger(row.totals.outputTokens)}</Text>
         <Text>models: {row.distinctModels.join(", ") || "none"}</Text>
         <Text>plans: {row.distinctPlanTypes.join(", ") || "none"}</Text>
         <UsageTotalsDetails totals={row.totals} />
@@ -560,8 +560,8 @@ function UsageTotalsDetails(props: { totals: UsageTotals }): React.JSX.Element {
   const inputPerOutput = formatInputPerOutput(totals);
   return (
     <Box flexDirection="column">
-      <Text>Total credits burned: {formatCredits(totals.estimatedCredits)}</Text>
-      <Text>Credits Value (@ $0.01/credit): {formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD)}</Text>
+      <Text>Total credits burned: {formatUsageCredits(totals)}</Text>
+      <Text>Credits Value (@ $0.01/credit): {formatUsageUsd(totals)}</Text>
       <Text>IpO: {inputPerOutput.cached}:{inputPerOutput.nonCached}:{inputPerOutput.output}</Text>
     </Box>
   );
@@ -572,13 +572,39 @@ function formatInteger(value: number): string {
 }
 
 function formatCredits(value: number): string {
+  if (value > 0 && value < 0.01) {
+    return "<0.01";
+  }
+
   return value.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
 }
 
+function formatUsageCredits(totals: UsageTotals): string {
+  return totals.estimatedCreditsStatus === "unavailable" ? "unknown" : formatCredits(totals.estimatedCredits);
+}
+
+function formatUsageUsd(totals: UsageTotals): string {
+  return totals.estimatedCreditsStatus === "unavailable"
+    ? "unknown"
+    : formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD);
+}
+
+function formatCacheTokens(totals: UsageTotals, kind: "cached" | "non-cached"): string {
+  if (totals.cacheStatus === "unavailable") {
+    return "unknown";
+  }
+
+  return formatInteger(kind === "cached" ? totals.cachedInputTokens : totals.nonCachedInputTokens);
+}
+
 function formatUsd(value: number): string {
+  if (value > 0 && value < 0.0001) {
+    return "<$0.0001";
+  }
+
   return value.toLocaleString("en-US", {
     currency: "USD",
     style: "currency",
@@ -640,6 +666,10 @@ function pad(value: string, length: number): string {
 }
 
 function formatInputPerOutput(totals: UsageTotals): { cached: string; nonCached: string; output: string } {
+  if (totals.cacheStatus === "unavailable") {
+    return { cached: "unknown", nonCached: "unknown", output: "1" };
+  }
+
   if (totals.outputTokens <= 0) {
     return { cached: "0", nonCached: "0", output: "0" };
   }

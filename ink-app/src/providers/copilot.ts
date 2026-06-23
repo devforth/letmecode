@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { applyEdits, modify, parse } from "jsonc-parser";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -17,7 +18,7 @@ import {
   createDailyUsageAggregates,
   type DailyUsageAggregates
 } from "./daily.js";
-import { asRecord, numberOrZero } from "./limits.js";
+import { asRecord } from "./limits.js";
 
 const VSCODE_OTEL_SETTINGS = {
   "github.copilot.chat.otel.enabled": true,
@@ -25,12 +26,46 @@ const VSCODE_OTEL_SETTINGS = {
   "github.copilot.chat.otel.captureContent": false
 } as const;
 
+type Rate = { input: number; cachedInput: number; cacheWrite?: number; output: number };
+
+type LongContextRate = Rate & { thresholdInputTokens: number };
+
+const RATE_CARD: Record<string, Rate> = {
+  "gpt-5-mini": { input: 25, cachedInput: 2.5, output: 200 },
+  "gpt-5.3-codex": { input: 175, cachedInput: 17.5, output: 1400 },
+  "gpt-5.4": { input: 250, cachedInput: 25, output: 1500 },
+  "gpt-5.4-mini": { input: 75, cachedInput: 7.5, output: 450 },
+  "gpt-5.4-nano": { input: 20, cachedInput: 2, output: 125 },
+  "gpt-5.5": { input: 500, cachedInput: 50, output: 3000 },
+  "claude-haiku-4-5": { input: 100, cachedInput: 10, cacheWrite: 125, output: 500 },
+  "claude-sonnet-4-5": { input: 300, cachedInput: 30, cacheWrite: 375, output: 1500 },
+  "claude-sonnet-4-6": { input: 300, cachedInput: 30, cacheWrite: 375, output: 1500 },
+  "claude-opus-4-5": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
+  "claude-opus-4-6": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
+  "claude-opus-4-7": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
+  "claude-opus-4-8": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
+  "claude-fable-5": { input: 1000, cachedInput: 100, cacheWrite: 1250, output: 5000 },
+  "gemini-2.5-pro": { input: 125, cachedInput: 12.5, output: 1000 },
+  "gemini-3-flash": { input: 50, cachedInput: 5, output: 300 },
+  "gemini-3.1-pro": { input: 200, cachedInput: 20, output: 1200 },
+  "gemini-3.5-flash": { input: 150, cachedInput: 15, output: 900 },
+  "mai-code-1-flash": { input: 75, cachedInput: 7.5, output: 450 },
+  "raptor-mini": { input: 25, cachedInput: 2.5, output: 200 }
+};
+
+const LONG_CONTEXT_RATE_CARD: Record<string, LongContextRate> = {
+  "gpt-5.4": { thresholdInputTokens: 272_000, input: 500, cachedInput: 50, output: 2250 },
+  "gpt-5.5": { thresholdInputTokens: 272_000, input: 1000, cachedInput: 100, output: 4500 },
+  "gemini-3.1-pro": { thresholdInputTokens: 200_000, input: 400, cachedInput: 40, output: 1800 }
+};
+
+const NON_BILLABLE_MODEL_PREFIXES = ["copilot-nes", "copilot-suggestion"] as const;
+
 type CopilotUsageProviderOptions = {
   root?: string;
 };
 
 type ParseTotals = {
-  filesScanned: number;
   linesRead: number;
   tokenEvents: number;
   malformedLines: number;
@@ -39,14 +74,20 @@ type ParseTotals = {
 type CopilotUsageEvent = {
   timestampMs: number;
   modelId: string;
-  planType: string;
   totals: UsageTotals;
+};
+
+type CopilotRawUsage = {
+  inputTokens: number;
+  cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  outputTokens: number;
+  reasoningOutputTokens?: number;
 };
 
 export type CopilotVsCodeLoggingOptions = {
   root?: string;
   settingsPath?: string;
-  outfile?: string;
 };
 
 export type CopilotVsCodeLoggingResult = {
@@ -64,30 +105,22 @@ export class CopilotUsageProvider extends UsageProviderBase {
   }
 
   async getStats(): Promise<ProviderStats> {
-    const sessionStateRoot = path.join(this.root, ".copilot", "session-state");
-    const vscodeOtelFile = path.join(this.root, ".copilot", "otel", "vscode.jsonl");
+    const vscodeOtelFile = getCopilotOtelPath(this.root);
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
-    const planTypes = new Set<string>();
     const warnings: string[] = [];
     const parseTotals: ParseTotals = {
-      filesScanned: 0,
       linesRead: 0,
       tokenEvents: 0,
       malformedLines: 0
     };
 
-    for await (const file of walkSessionFiles(sessionStateRoot)) {
-      parseTotals.filesScanned += 1;
-      const fileStats = await parseCopilotJsonlFile(file, "cli", byModel, byDay, planTypes);
-      addParseTotals(parseTotals, fileStats);
-    }
-
     const vscodeOtelFileExists = await isReadableFile(vscodeOtelFile);
     if (vscodeOtelFileExists) {
-      parseTotals.filesScanned += 1;
-      const fileStats = await parseCopilotJsonlFile(vscodeOtelFile, "vscode", byModel, byDay, planTypes);
-      addParseTotals(parseTotals, fileStats);
+      const fileStats = await parseCopilotJsonlFile(vscodeOtelFile, byModel, byDay);
+      parseTotals.linesRead += fileStats.linesRead;
+      parseTotals.tokenEvents += fileStats.tokenEvents;
+      parseTotals.malformedLines += fileStats.malformedLines;
     } else if (await isCopilotVsCodeLoggingEnabled(this.root, vscodeOtelFile)) {
       warnings.push(
         `VS Code Copilot logging is enabled, but ${vscodeOtelFile} has not been created yet. Reload VS Code and send a Copilot Chat request.`
@@ -98,8 +131,9 @@ export class CopilotUsageProvider extends UsageProviderBase {
       warnings.push(`Skipped ${parseTotals.malformedLines} malformed Copilot JSONL line(s).`);
     }
 
-    if (parseTotals.filesScanned === 0) {
-      warnings.push(`No Copilot usage files found under ${sessionStateRoot} or ${vscodeOtelFile}.`);
+    const filesScanned = vscodeOtelFileExists ? 1 : 0;
+    if (filesScanned === 0) {
+      warnings.push(`No Copilot VS Code OTEL usage file found at ${vscodeOtelFile}.`);
     } else if (parseTotals.tokenEvents === 0) {
       warnings.push("No Copilot token usage events found. For VS Code, run Start logging VS Code and reload VS Code.");
     }
@@ -107,19 +141,26 @@ export class CopilotUsageProvider extends UsageProviderBase {
     const modelUsage = [...byModel.entries()]
       .map<ModelUsageRow>(([modelId, totals]) => ({ modelId, totals }))
       .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
+    const summaryTotals = sumUsageTotals(modelUsage.map((row) => row.totals));
+
+    if (summaryTotals.cacheStatus === "unavailable") {
+      warnings.push(
+        "Copilot cache token attributes are unavailable for some events; cached/non-cached tokens and estimated credits are shown as unknown."
+      );
+    }
 
     return {
       providerId: this.id,
       providerLabel: this.label,
       summary: {
-        filesScanned: parseTotals.filesScanned,
+        filesScanned,
         linesRead: parseTotals.linesRead,
         tokenEvents: parseTotals.tokenEvents,
-        totals: sumUsageTotals(modelUsage.map((row) => row.totals)),
+        totals: summaryTotals,
         distinctModels: modelUsage.map((row) => row.modelId),
-        distinctPlanTypes: [...planTypes].sort(),
-        rootLabel: "~/.copilot",
-        rootPath: path.join(this.root, ".copilot")
+        distinctPlanTypes: [],
+        rootLabel: "~/.copilot/otel/vscode.jsonl",
+        rootPath: vscodeOtelFile
       },
       modelUsage,
       dayUsage: buildDailyUsageRows(byDay),
@@ -134,40 +175,35 @@ export async function configureCopilotVsCodeLogging(
   options: CopilotVsCodeLoggingOptions = {}
 ): Promise<CopilotVsCodeLoggingResult> {
   const root = path.resolve(options.root ?? os.homedir());
-  const outfile = options.outfile ?? path.join(root, ".copilot", "otel", "vscode.jsonl");
+  const outfile = getCopilotOtelPath(root);
   const settingsPath = options.settingsPath ?? getDefaultVsCodeSettingsPath(root);
-  const settings = await readJsonSettings(settingsPath);
-  const nextSettings = {
-    ...settings,
+  const settingsText = await readTextFileOrEmpty(settingsPath);
+  const { text: nextSettingsText, changed } = updateJsoncSettings(settingsText, {
     ...VSCODE_OTEL_SETTINGS,
     "github.copilot.chat.otel.outfile": outfile
-  };
-  const changed = JSON.stringify(settings) !== JSON.stringify(nextSettings);
+  });
 
   await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.promises.mkdir(path.dirname(outfile), { recursive: true });
-  await fs.promises.writeFile(settingsPath, `${JSON.stringify(nextSettings, null, 4)}\n`, "utf8");
+  if (changed) {
+    await fs.promises.writeFile(settingsPath, nextSettingsText, "utf8");
+  }
 
   return { settingsPath, outfile, changed };
 }
 
-function addParseTotals(target: ParseTotals, source: ParseTotals): void {
-  target.linesRead += source.linesRead;
-  target.tokenEvents += source.tokenEvents;
-  target.malformedLines += source.malformedLines;
+function getCopilotOtelPath(root: string): string {
+  return path.join(root, ".copilot", "otel", "vscode.jsonl");
 }
 
 async function parseCopilotJsonlFile(
   filePath: string,
-  fallbackPlanType: string,
   byModel: Map<string, UsageTotals>,
-  byDay: DailyUsageAggregates,
-  planTypes: Set<string>
+  byDay: DailyUsageAggregates
 ): Promise<ParseTotals> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
   const parseTotals: ParseTotals = {
-    filesScanned: 0,
     linesRead: 0,
     tokenEvents: 0,
     malformedLines: 0
@@ -187,198 +223,127 @@ async function parseCopilotJsonlFile(
       continue;
     }
 
-    const events = extractCopilotUsageEvents(payload, fallbackPlanType);
-    for (const event of events) {
+    const event = extractCopilotUsageEvent(payload);
+    if (event) {
       parseTotals.tokenEvents += 1;
       addModelUsage(byModel, event.modelId, event.totals);
-      planTypes.add(event.planType);
-      addDailyUsage(byDay, event.timestampMs, event.modelId, event.planType, event.totals);
+      addDailyUsage(byDay, event.timestampMs, event.modelId, undefined, event.totals);
     }
   }
 
   return parseTotals;
 }
 
-function extractCopilotUsageEvents(payload: unknown, fallbackPlanType: string): CopilotUsageEvent[] {
+function extractCopilotUsageEvent(payload: unknown): CopilotUsageEvent | null {
   const record = asRecord(payload);
   if (!record) {
-    return [];
-  }
-
-  if (record.type === "session.shutdown") {
-    return extractShutdownUsageEvents(record, fallbackPlanType);
-  }
-
-  return extractOtelUsageEvents(record, fallbackPlanType);
-}
-
-function extractShutdownUsageEvents(record: Record<string, unknown>, fallbackPlanType: string): CopilotUsageEvent[] {
-  const data = asRecord(record.data);
-  const modelMetrics = asRecord(data?.modelMetrics);
-  if (!data || !modelMetrics) {
-    return [];
-  }
-
-  const timestampMs = parseRecordTimestamp(record) ?? parseTimestamp(data.sessionStartTime) ?? Number.NaN;
-  return Object.entries(modelMetrics)
-    .map<CopilotUsageEvent | null>(([modelId, rawMetrics]) => {
-      const metrics = asRecord(rawMetrics);
-      const usage = asRecord(metrics?.usage);
-      if (!metrics || !usage) {
-        return null;
-      }
-
-      const inputTokens = numberOrZero(usage.inputTokens);
-      const cachedInputTokens = Math.min(inputTokens, numberOrZero(usage.cacheReadTokens));
-      const outputTokens = numberOrZero(usage.outputTokens);
-      const reasoningOutputTokens = numberOrZero(usage.reasoningTokens);
-      if (inputTokens <= 0 && outputTokens <= 0 && reasoningOutputTokens <= 0) {
-        return null;
-      }
-
-      return {
-        timestampMs,
-        modelId: modelId || String(data.currentModel ?? "unknown"),
-        planType: fallbackPlanType,
-        totals: createUsageTotals({
-          inputTokens,
-          cachedInputTokens,
-          outputTokens,
-          reasoningOutputTokens,
-          estimatedCredits: numberOrZero(asRecord(metrics.requests)?.cost)
-        })
-      };
-    })
-    .filter((event): event is CopilotUsageEvent => event !== null);
-}
-
-function extractOtelUsageEvents(record: Record<string, unknown>, fallbackPlanType: string): CopilotUsageEvent[] {
-  const events: CopilotUsageEvent[] = [];
-  visitRecords(record, (candidate, inheritedTimestampMs) => {
-    const attributes = normalizeAttributes(candidate.attributes);
-    const usage = usageFromAttributes(attributes);
-    if (!usage) {
-      return;
-    }
-
-    const modelId =
-      stringAttribute(attributes, [
-        "gen_ai.response.model",
-        "gen_ai.request.model",
-        "model",
-        "model_id",
-        "chat.model"
-      ]) ?? "unknown";
-    const timestampMs =
-      parseTimestamp(candidate.timeUnixNano) ??
-      parseTimestamp(candidate.observedTimeUnixNano) ??
-      parseTimestamp(candidate.timestamp) ??
-      inheritedTimestampMs ??
-      Number.NaN;
-
-    events.push({
-      timestampMs,
-      modelId,
-      planType: fallbackPlanType,
-      totals: usage
-    });
-  });
-
-  return events;
-}
-
-function visitRecords(
-  value: unknown,
-  visit: (record: Record<string, unknown>, inheritedTimestampMs: number | undefined) => void,
-  inheritedTimestampMs?: number
-): void {
-  const record = asRecord(value);
-  if (record) {
-    const recordTimestampMs = parseRecordTimestamp(record) ?? inheritedTimestampMs;
-
-    if (record.attributes) {
-      visit(record, recordTimestampMs);
-    }
-
-    for (const child of Object.values(record)) {
-      visitRecords(child, visit, recordTimestampMs);
-    }
-    return;
-  }
-
-  if (Array.isArray(value)) {
-    for (const child of value) {
-      visitRecords(child, visit, inheritedTimestampMs);
-    }
-  }
-}
-
-function usageFromAttributes(attributes: Record<string, unknown>): UsageTotals | null {
-  const inputTokens = numberAttribute(attributes, [
-    "gen_ai.usage.input_tokens",
-    "gen_ai.usage.prompt_tokens",
-    "input_tokens",
-    "inputTokens",
-    "prompt_tokens"
-  ]);
-  const outputTokens = numberAttribute(attributes, [
-    "gen_ai.usage.output_tokens",
-    "gen_ai.usage.completion_tokens",
-    "output_tokens",
-    "outputTokens",
-    "completion_tokens"
-  ]);
-  const reasoningOutputTokens = numberAttribute(attributes, [
-    "gen_ai.usage.reasoning_tokens",
-    "reasoning_tokens",
-    "reasoningTokens"
-  ]);
-  const cachedInputTokens = Math.min(
-    inputTokens,
-    numberAttribute(attributes, [
-      "gen_ai.usage.cached_input_tokens",
-      "gen_ai.usage.cache_read_input_tokens",
-      "cached_input_tokens",
-      "cache_read_tokens",
-      "cachedInputTokens"
-    ])
-  );
-
-  if (inputTokens <= 0 && outputTokens <= 0 && reasoningOutputTokens <= 0) {
     return null;
   }
 
-  return createUsageTotals({
-    inputTokens,
-    cachedInputTokens,
-    outputTokens,
-    reasoningOutputTokens,
-    estimatedCredits: numberAttribute(attributes, [
-      "gen_ai.usage.premium_requests",
-      "premium_requests",
-      "request_cost",
-      "cost"
-    ])
-  });
+  const attributes = asRecord(record.attributes);
+  if (!attributes || !isCopilotChatSpan(attributes)) {
+    return null;
+  }
+
+  const usage = usageFromAttributes(attributes);
+  if (!usage) {
+    return null;
+  }
+
+  const modelId = stringAttribute(attributes, "gen_ai.response.model") ?? "unknown";
+  const timestampMs = hrTimeToMs(record.hrTime) ?? Number.NaN;
+
+  return {
+    timestampMs,
+    modelId,
+    totals: createUsageTotals(modelId, usage)
+  };
 }
 
-function createUsageTotals(usage: {
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  estimatedCredits: number;
-}): UsageTotals {
+function usageFromAttributes(attributes: Record<string, unknown>): CopilotRawUsage | null {
+  const inputTokens = numberAttribute(attributes, "gen_ai.usage.input_tokens") ?? 0;
+  const outputTokens = numberAttribute(attributes, "gen_ai.usage.output_tokens") ?? 0;
+  const reasoningOutputTokens = numberAttribute(attributes, "gen_ai.usage.reasoning.output_tokens");
+  const cachedInputTokens = numberAttribute(attributes, "gen_ai.usage.cache_read.input_tokens");
+  const cacheCreationInputTokens = numberAttribute(attributes, "gen_ai.usage.cache_creation.input_tokens");
+
+  if (inputTokens <= 0 && outputTokens <= 0 && (reasoningOutputTokens ?? 0) <= 0) {
+    return null;
+  }
+
+  return {
+    inputTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens,
+    outputTokens,
+    reasoningOutputTokens
+  };
+}
+
+function isCopilotChatSpan(attributes: Record<string, unknown>): boolean {
+  return stringAttribute(attributes, "gen_ai.operation.name") === "chat";
+}
+
+function createUsageTotals(modelId: string, usage: CopilotRawUsage): UsageTotals {
+  const hasCacheInfo = usage.cachedInputTokens !== undefined || usage.cacheCreationInputTokens !== undefined;
+  const hasKnownCreditPricing = isNonBillableModel(modelId) || (hasCacheInfo && rateForModel(modelId, usage.inputTokens) !== undefined);
+  const cachedInputTokens = hasCacheInfo ? Math.min(usage.cachedInputTokens ?? 0, usage.inputTokens) : 0;
   return {
     inputTokens: usage.inputTokens,
-    cachedInputTokens: usage.cachedInputTokens,
-    nonCachedInputTokens: Math.max(0, usage.inputTokens - usage.cachedInputTokens),
+    cachedInputTokens,
+    nonCachedInputTokens: hasCacheInfo ? Math.max(0, usage.inputTokens - cachedInputTokens) : 0,
     outputTokens: usage.outputTokens,
-    reasoningOutputTokens: usage.reasoningOutputTokens,
+    reasoningOutputTokens: Math.min(usage.reasoningOutputTokens ?? 0, usage.outputTokens),
     totalTokens: usage.inputTokens + usage.outputTokens,
-    estimatedCredits: usage.estimatedCredits,
-    eventCount: 1
+    estimatedCredits: creditsFor(modelId, usage),
+    eventCount: 1,
+    cacheStatus: hasCacheInfo ? "known" : "unavailable",
+    estimatedCreditsStatus: hasKnownCreditPricing ? "known" : "unavailable"
   };
+}
+
+function creditsFor(modelId: string, usage: CopilotRawUsage): number {
+  if (isNonBillableModel(modelId)) {
+    return 0;
+  }
+
+  const rate = rateForModel(modelId, usage.inputTokens);
+  if (!rate) {
+    return 0;
+  }
+
+  if (usage.cachedInputTokens === undefined && usage.cacheCreationInputTokens === undefined) {
+    return 0;
+  }
+
+  const cacheRead = Math.min(usage.cachedInputTokens ?? 0, usage.inputTokens);
+  const cacheWrite = Math.min(usage.cacheCreationInputTokens ?? 0, Math.max(0, usage.inputTokens - cacheRead));
+  const regularInput = Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
+  return (
+    (regularInput / 1_000_000) * rate.input +
+    (cacheRead / 1_000_000) * rate.cachedInput +
+    (cacheWrite / 1_000_000) * (rate.cacheWrite ?? rate.input) +
+    (usage.outputTokens / 1_000_000) * rate.output
+  );
+}
+
+function rateForModel(modelId: string, inputTokens: number): Rate | undefined {
+  const candidates = Object.keys(RATE_CARD).sort((left, right) => right.length - left.length);
+  const model = candidates.find((candidate) => modelId === candidate || modelId.startsWith(`${candidate}-`));
+  if (!model) {
+    return undefined;
+  }
+
+  const longContextRate = LONG_CONTEXT_RATE_CARD[model];
+  if (longContextRate && inputTokens > longContextRate.thresholdInputTokens) {
+    return longContextRate;
+  }
+
+  return RATE_CARD[model];
+}
+
+function isNonBillableModel(modelId: string): boolean {
+  return NON_BILLABLE_MODEL_PREFIXES.some((prefix) => modelId === prefix || modelId.startsWith(`${prefix}-`));
 }
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
@@ -388,141 +353,40 @@ function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, delta
   byModel.set(resolvedModelId, totals);
 }
 
-function normalizeAttributes(value: unknown): Record<string, unknown> {
-  if (Array.isArray(value)) {
-    return Object.fromEntries(
-      value
-        .map((entry) => {
-          const record = asRecord(entry);
-          const key = typeof record?.key === "string" ? record.key : undefined;
-          return key && record ? [key, unwrapOtelValue(record.value)] : undefined;
-        })
-        .filter((entry): entry is [string, unknown] => Array.isArray(entry))
-    );
-  }
-
-  return asRecord(value) ?? {};
-}
-
-function unwrapOtelValue(value: unknown): unknown {
-  const record = asRecord(value);
-  if (!record) {
+function numberAttribute(attributes: Record<string, unknown>, key: string): number | undefined {
+  const value = attributes[key];
+  if (typeof value === "number" && Number.isFinite(value)) {
     return value;
-  }
-
-  for (const key of ["stringValue", "intValue", "doubleValue", "boolValue"]) {
-    if (key in record) {
-      return record[key];
-    }
-  }
-
-  return value;
-}
-
-function numberAttribute(attributes: Record<string, unknown>, keys: string[]): number {
-  for (const key of keys) {
-    const value = attributes[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-
-    if (typeof value === "string") {
-      const parsed = Number(value);
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-  }
-
-  return 0;
-}
-
-function stringAttribute(attributes: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = attributes[key];
-    if (typeof value === "string" && value) {
-      return value;
-    }
   }
 
   return undefined;
 }
 
-function parseTimestamp(value: unknown): number | undefined {
-  if (Array.isArray(value)) {
-    const [seconds, nanoseconds = 0] = value;
-    if (
-      typeof seconds === "number" &&
-      Number.isFinite(seconds) &&
-      typeof nanoseconds === "number" &&
-      Number.isFinite(nanoseconds)
-    ) {
-      return seconds * 1000 + Math.floor(nanoseconds / 1_000_000);
-    }
-  }
-
-  if (typeof value === "number" && Number.isFinite(value)) {
-    if (value > 1_000_000_000_000_000) {
-      return Math.floor(value / 1_000_000);
-    }
-
-    if (value < 10_000_000_000) {
-      return value * 1000;
-    }
-
+function stringAttribute(attributes: Record<string, unknown>, key: string): string | undefined {
+  const value = attributes[key];
+  if (typeof value === "string" && value) {
     return value;
   }
 
-  if (typeof value !== "string" || !value) {
+  return undefined;
+}
+
+function hrTimeToMs(value: unknown): number | undefined {
+  if (!Array.isArray(value)) {
     return undefined;
   }
 
-  if (/^\d+$/.test(value)) {
-    const numericValue = Number(value);
-    if (Number.isFinite(numericValue)) {
-      if (value.length > 13) {
-        return Math.floor(numericValue / 1_000_000);
-      }
-
-      return value.length <= 10 ? numericValue * 1000 : numericValue;
-    }
+  const [seconds, nanoseconds] = value;
+  if (
+    typeof seconds !== "number" ||
+    !Number.isFinite(seconds) ||
+    typeof nanoseconds !== "number" ||
+    !Number.isFinite(nanoseconds)
+  ) {
+    return undefined;
   }
 
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function parseRecordTimestamp(record: Record<string, unknown>): number | undefined {
-  return (
-    parseTimestamp(record.timeUnixNano) ??
-    parseTimestamp(record.observedTimeUnixNano) ??
-    parseTimestamp(record.startTimeUnixNano) ??
-    parseTimestamp(record.endTimeUnixNano) ??
-    parseTimestamp(record.hrTime) ??
-    parseTimestamp(record.hrTimeObserved) ??
-    parseTimestamp(record.startTime) ??
-    parseTimestamp(record.endTime) ??
-    parseTimestamp(record.timestamp) ??
-    parseTimestamp(record.time)
-  );
-}
-
-async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
-  let entries: fs.Dirent[];
-  try {
-    entries = await fs.promises.readdir(directory, { withFileTypes: true });
-  } catch {
-    return;
-  }
-
-  for (const entry of entries) {
-    const fullPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      yield* walkSessionFiles(fullPath);
-    } else if (entry.isFile() && entry.name === "events.jsonl") {
-      yield fullPath;
-    }
-  }
+  return seconds * 1000 + nanoseconds / 1_000_000;
 }
 
 async function isReadableFile(filePath: string): Promise<boolean> {
@@ -544,29 +408,55 @@ async function isCopilotVsCodeLoggingEnabled(root: string, outfile: string): Pro
 }
 
 async function readJsonSettings(filePath: string): Promise<Record<string, unknown>> {
-  let raw = "";
+  return parseJsoncSettings(await readTextFileOrEmpty(filePath));
+}
+
+async function readTextFileOrEmpty(filePath: string): Promise<string> {
   try {
-    raw = await fs.promises.readFile(filePath, "utf8");
+    return await fs.promises.readFile(filePath, "utf8");
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return {};
+      return "";
     }
     throw error;
   }
+}
 
+function parseJsoncSettings(raw: string): Record<string, unknown> {
   if (!raw.trim()) {
     return {};
   }
 
-  const parsed = JSON.parse(stripJsonComments(raw)) as unknown;
+  const parsed = parse(raw) as unknown;
   return asRecord(parsed) ?? {};
 }
 
-function stripJsonComments(value: string): string {
-  return value
-    .replace(/^\s*\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/,\s*([}\]])/g, "$1");
+function updateJsoncSettings(raw: string, values: Record<string, unknown>): { text: string; changed: boolean } {
+  let text = raw.trim() ? raw : "{\n}";
+  let changed = false;
+  for (const [key, value] of Object.entries(values)) {
+    if (parseJsoncSettings(text)[key] === value) {
+      continue;
+    }
+
+    const edits = modify(text, [key], value, {
+      formattingOptions: {
+        eol: "\n",
+        insertSpaces: true,
+        tabSize: 4
+      }
+    });
+    if (edits.length > 0) {
+      text = applyEdits(text, edits);
+      changed = true;
+    }
+  }
+
+  if (changed && !text.endsWith("\n")) {
+    text += "\n";
+  }
+
+  return { text, changed };
 }
 
 function getDefaultVsCodeSettingsPath(root: string): string {
