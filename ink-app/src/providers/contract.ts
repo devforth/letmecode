@@ -7,6 +7,8 @@ export type UsageTotals = {
   totalTokens: number;
   estimatedCredits: number;
   eventCount: number;
+  cacheStatus?: "known" | "unavailable";
+  estimatedCreditsStatus?: "known" | "unavailable";
 };
 
 export type ModelUsageRow = {
@@ -100,6 +102,12 @@ export function addUsageTotals(target: UsageTotals, source: UsageTotals): void {
   target.totalTokens += source.totalTokens;
   target.estimatedCredits += source.estimatedCredits;
   target.eventCount += source.eventCount;
+  if (source.cacheStatus === "unavailable") {
+    target.cacheStatus = "unavailable";
+  }
+  if (source.estimatedCreditsStatus === "unavailable") {
+    target.estimatedCreditsStatus = "unavailable";
+  }
 }
 
 export function sumUsageTotals(rows: UsageTotals[]): UsageTotals {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import { parse as parseJsonc } from "jsonc-parser";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -129,7 +130,7 @@ test("provider registry stays UI-generic", async () => {
   assert.equal(typeof providers[2].getStats, "function");
 });
 
-test("CopilotUsageProvider parses CLI shutdown metrics and VS Code OTEL usage", async () => {
+test("CopilotUsageProvider parses only VS Code OTEL usage and ignores old session-state metrics", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotSession(root, "cli-session/events.jsonl", [
       JSON.stringify({
@@ -153,50 +154,38 @@ test("CopilotUsageProvider parses CLI shutdown metrics and VS Code OTEL usage", 
 
     await writeCopilotOtel(root, [
       JSON.stringify({
-        resourceLogs: [
-          {
-            scopeLogs: [
-              {
-                logRecords: [
-                  {
-                    timeUnixNano: "1781800000000000000",
-                    attributes: [
-                      { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
-                      { key: "gen_ai.usage.input_tokens", value: { intValue: "30" } },
-                      { key: "gen_ai.usage.cached_input_tokens", value: { intValue: "5" } },
-                      { key: "gen_ai.usage.output_tokens", value: { intValue: "7" } },
-                      { key: "gen_ai.usage.premium_requests", value: { doubleValue: 0.1 } }
-                    ]
-                  }
-                ]
-              }
-            ]
-          }
-        ]
+        hrTime: [1781800000, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-4.1",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 30,
+          "gen_ai.usage.cache_read.input_tokens": 5,
+          "gen_ai.usage.output_tokens": 7
+        }
       })
     ]);
 
     const stats = await new CopilotUsageProvider({ root }).getStats();
     assert.equal(stats.providerId, "copilot");
     assert.equal(stats.providerLabel, "Copilot");
-    assert.equal(stats.summary.filesScanned, 2);
-    assert.equal(stats.summary.tokenEvents, 2);
-    assert.equal(stats.summary.totals.inputTokens, 130);
-    assert.equal(stats.summary.totals.cachedInputTokens, 45);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 85);
-    assert.equal(stats.summary.totals.outputTokens, 17);
-    assert.equal(stats.summary.totals.reasoningOutputTokens, 3);
-    assert.equal(stats.summary.totals.estimatedCredits, 0.35);
-    assert.deepEqual(stats.summary.distinctPlanTypes, ["cli", "vscode"]);
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 30);
+    assert.equal(stats.summary.totals.cachedInputTokens, 5);
+    assert.equal(stats.summary.totals.nonCachedInputTokens, 25);
+    assert.equal(stats.summary.totals.outputTokens, 7);
+    assert.equal(stats.summary.totals.reasoningOutputTokens, 0);
+    assert.equal(stats.summary.totals.estimatedCredits, 0);
+    assert.deepEqual(stats.summary.distinctPlanTypes, []);
     assert.deepEqual(
       stats.modelUsage.map((row) => row.modelId).sort(),
-      ["gpt-4.1", "gpt-5-mini"]
+      ["gpt-4.1"]
     );
     assert.equal(stats.dayUsage.length > 0, true);
   });
 });
 
-test("CopilotUsageProvider inherits OTEL timestamps for nested usage attributes", async () => {
+test("CopilotUsageProvider ignores generic OTLP log envelopes", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
@@ -208,11 +197,13 @@ test("CopilotUsageProvider inherits OTEL timestamps for nested usage attributes"
                   {
                     timeUnixNano: "1781800000000000000",
                     body: {
-                      attributes: [
-                        { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
-                        { key: "gen_ai.usage.input_tokens", value: { intValue: "30" } },
-                        { key: "gen_ai.usage.output_tokens", value: { intValue: "7" } }
-                      ]
+                      attributes: {
+                        "gen_ai.response.model": "gpt-4.1",
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.usage.input_tokens": 30,
+                        "gen_ai.usage.cache_read.input_tokens": 5,
+                        "gen_ai.usage.output_tokens": 7
+                      }
                     }
                   }
                 ]
@@ -225,22 +216,61 @@ test("CopilotUsageProvider inherits OTEL timestamps for nested usage attributes"
 
     const stats = await new CopilotUsageProvider({ root }).getStats();
 
-    assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.dayUsage.length, 1);
-    assert.equal(stats.dayUsage[0].dayKey, "2026-06-18");
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(stats.summary.totals.cachedInputTokens, 0);
+    assert.equal(stats.dayUsage.length, 0);
   });
 });
 
-test("CopilotUsageProvider parses OTEL hrTime timestamps", async () => {
+test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano timestamps", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
-        hrTime: [1782130578, 148000000],
-        attributes: [
-          { key: "gen_ai.response.model", value: { stringValue: "gpt-4.1" } },
-          { key: "gen_ai.usage.input_tokens", value: { intValue: "50" } },
-          { key: "gen_ai.usage.output_tokens", value: { intValue: "9" } }
+        resourceSpans: [
+          {
+            scopeSpans: [
+              {
+                spans: [
+                  {},
+                  {
+                    startTimeUnixNano: "1782130578148000000",
+                    attributes: [
+                      { key: "gen_ai.response.model", value: { stringValue: "gpt-5-mini" } },
+                      { key: "gen_ai.operation.name", value: { stringValue: "chat" } },
+                      { key: "gen_ai.usage.input_tokens", value: { intValue: "100000" } },
+                      { key: "gen_ai.usage.input_tokens.cached", value: { intValue: "40000" } },
+                      { key: "gen_ai.usage.output_tokens", value: { intValue: "1000" } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
         ]
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(stats.summary.totals.inputTokens, 0);
+    assert.equal(stats.summary.totals.cachedInputTokens, 0);
+    assert.equal(stats.dayUsage.length, 0);
+  });
+});
+
+test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        startTime: [1782130578, 148000000],
+        hrTime: [1782206354, 661000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-4.1",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 50,
+          "gen_ai.usage.output_tokens": 9
+        }
       })
     ]);
 
@@ -248,7 +278,264 @@ test("CopilotUsageProvider parses OTEL hrTime timestamps", async () => {
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
-    assert.equal(stats.dayUsage[0].dayKey, "2026-06-22");
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-23");
+  });
+});
+
+test("CopilotUsageProvider parses file exporter hrTime timestamps", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782206354, 661000000],
+        hrTimeObserved: [1782206354, 661000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-4.1",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 50,
+          "gen_ai.usage.output_tokens": 9
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].dayKey, "2026-06-23");
+  });
+});
+
+test("CopilotUsageProvider estimates credits when Copilot telemetry omits premium request cost", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5.4-2026-03-01",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 84275,
+          "gen_ai.usage.output_tokens": 328
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.modelUsage[0].modelId, "gpt-5.4-2026-03-01");
+    assert.equal(stats.modelUsage[0].totals.estimatedCredits, 0);
+    assert.equal(stats.modelUsage[0].totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(stats.modelUsage[0].totals.cacheStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("cache token attributes are unavailable")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider estimates credits for GPT-5 mini OTEL usage", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 100000,
+          "gen_ai.usage.cache_read.input_tokens": 40000,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.modelUsage[0].modelId, "gpt-5-mini");
+    assert.ok(Math.abs(stats.modelUsage[0].totals.estimatedCredits - 1.8) < 0.0000001);
+  });
+});
+
+test("CopilotUsageProvider reads dotted cache attributes and Claude cache-write usage", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "claude-haiku-4-5-20251001",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 100000,
+          "gen_ai.usage.cache_read.input_tokens": 20000,
+          "gen_ai.usage.cache_creation.input_tokens": 10000,
+          "gen_ai.usage.output_tokens": 1000,
+          "gen_ai.usage.reasoning.output_tokens": 1500
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 100000);
+    assert.equal(stats.summary.totals.cachedInputTokens, 20000);
+    assert.equal(stats.summary.totals.nonCachedInputTokens, 80000);
+    assert.equal(stats.summary.totals.outputTokens, 1000);
+    assert.equal(stats.summary.totals.reasoningOutputTokens, 1000);
+    assert.equal(stats.summary.totals.totalTokens, 101000);
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 8.95) < 0.0000001);
+  });
+});
+
+test("CopilotUsageProvider leaves GPT-4o mini credits unknown and estimates Claude Haiku Copilot models", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 20527,
+          "gen_ai.usage.output_tokens": 283
+        }
+      }),
+      JSON.stringify({
+        hrTime: [1782130580, 148000000],
+        attributes: {
+          "gen_ai.response.model": "claude-haiku-4-5-20251001",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 261123,
+          "gen_ai.usage.output_tokens": 874
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+
+    assert.equal(byModel.get("gpt-4o-mini-2024-07-18")?.estimatedCredits, 0);
+    assert.equal(byModel.get("gpt-4o-mini-2024-07-18")?.estimatedCreditsStatus, "unavailable");
+    assert.equal(byModel.get("claude-haiku-4-5-20251001")?.estimatedCredits, 0);
+    assert.equal(byModel.get("claude-haiku-4-5-20251001")?.estimatedCreditsStatus, "unavailable");
+  });
+});
+
+test("CopilotUsageProvider treats Copilot NES and suggestion models as non-billable", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "copilot-nes",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 1000,
+          "gen_ai.usage.output_tokens": 20
+        }
+      }),
+      JSON.stringify({
+        hrTime: [1782130580, 148000000],
+        attributes: {
+          "gen_ai.response.model": "copilot-suggestion-2026-01-01",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 2000,
+          "gen_ai.usage.output_tokens": 30
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+
+    assert.equal(stats.summary.totals.inputTokens, 3000);
+    assert.equal(stats.summary.totals.outputTokens, 50);
+    assert.equal(stats.summary.totals.estimatedCredits, 0);
+    assert.equal(byModel.get("copilot-nes")?.estimatedCredits, 0);
+    assert.equal(byModel.get("copilot-suggestion-2026-01-01")?.estimatedCredits, 0);
+  });
+});
+
+test("CopilotUsageProvider applies long-context rates for large GPT-5.4 and GPT-5.5 chat calls", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5.4-2026-03-01",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 272001,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      }),
+      JSON.stringify({
+        hrTime: [1782130580, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5.5-2026-06-01",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 272001,
+          "gen_ai.usage.cache_read.input_tokens": 72001,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+
+    assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCredits, 0);
+    assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCreditsStatus, "unavailable");
+    assert.ok(Math.abs((byModel.get("gpt-5.5-2026-06-01")?.estimatedCredits ?? 0) - 211.7001) < 0.0000001);
+  });
+});
+
+test("CopilotUsageProvider applies model-specific long-context thresholds", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gemini-3.1-pro",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 200001,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.totals.estimatedCredits, 0);
+    assert.equal(stats.summary.totals.estimatedCreditsStatus, "unavailable");
+  });
+});
+
+test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agent aggregate usage", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5.4-2026-03-01",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 84275,
+          "gen_ai.usage.output_tokens": 328
+        }
+      }),
+      JSON.stringify({
+        hrTime: [1782130578, 154000000],
+        attributes: {
+          "event.name": "copilot_chat.agent.turn",
+          "gen_ai.operation.name": "invoke_agent",
+          "turn.index": 0,
+          "gen_ai.usage.input_tokens": 84275,
+          "gen_ai.usage.output_tokens": 328
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({ root }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 84275);
+    assert.deepEqual(stats.modelUsage.map((row) => row.modelId), ["gpt-5.4-2026-03-01"]);
   });
 });
 
@@ -257,20 +544,34 @@ test("configureCopilotVsCodeLogging writes user settings for file OTEL export", 
     const settingsPath = path.join(root, "Code", "User", "settings.json");
     const outfile = path.join(root, ".copilot", "otel", "vscode.jsonl");
     await fs.mkdir(path.dirname(settingsPath), { recursive: true });
-    await fs.writeFile(settingsPath, JSON.stringify({ "editor.tabSize": 2 }, null, 2), "utf8");
+    await fs.writeFile(
+      settingsPath,
+      [
+        "{",
+        "    // Keep this comment",
+        '    "editor.tabSize": 2,',
+        '    "example.url": "https://example.com/path//inside-string"',
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
 
-    const result = await configureCopilotVsCodeLogging({ root, settingsPath, outfile });
-    const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const result = await configureCopilotVsCodeLogging({ root, settingsPath });
+    const rawSettings = await fs.readFile(settingsPath, "utf8");
+    const settings = parseJsonc(rawSettings);
 
     assert.equal(result.changed, true);
     assert.equal(result.outfile, outfile);
+    assert.equal(rawSettings.includes("// Keep this comment"), true);
+    assert.equal(settings["example.url"], "https://example.com/path//inside-string");
     assert.equal(settings["editor.tabSize"], 2);
     assert.equal(settings["github.copilot.chat.otel.enabled"], true);
     assert.equal(settings["github.copilot.chat.otel.exporterType"], "file");
     assert.equal(settings["github.copilot.chat.otel.outfile"], outfile);
     assert.equal(settings["github.copilot.chat.otel.captureContent"], false);
 
-    const unchangedResult = await configureCopilotVsCodeLogging({ root, settingsPath, outfile });
+    const unchangedResult = await configureCopilotVsCodeLogging({ root, settingsPath });
     assert.equal(unchangedResult.changed, false);
   });
 });
@@ -280,8 +581,7 @@ test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL fil
     const outfile = path.join(root, ".copilot", "otel", "vscode.jsonl");
     await configureCopilotVsCodeLogging({
       root,
-      settingsPath: path.join(root, ".config", "Code", "User", "settings.json"),
-      outfile
+      settingsPath: path.join(root, ".config", "Code", "User", "settings.json")
     });
 
     const stats = await new CopilotUsageProvider({ root }).getStats();
