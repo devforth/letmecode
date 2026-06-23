@@ -64,6 +64,10 @@ export type ProviderStats = {
   warnings: string[];
 };
 
+export type ProviderStatsOptions = {
+  verbose?: boolean;
+};
+
 export abstract class UsageProviderBase {
   public readonly id: string;
   public readonly label: string;
@@ -73,7 +77,7 @@ export abstract class UsageProviderBase {
     this.label = label;
   }
 
-  abstract getStats(): Promise<ProviderStats>;
+  abstract getStats(options?: ProviderStatsOptions): Promise<ProviderStats>;
 }
 
 export function createEmptyUsageTotals(): UsageTotals {

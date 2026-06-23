@@ -6,6 +6,7 @@ import {
   type DailyUsageRow,
   type LimitWindowRow,
   type ModelUsageRow,
+  type ProviderStatsOptions,
   type ProviderStats,
   type UsageProviderBase,
   type UsageTotals
@@ -60,7 +61,7 @@ const COPILOT_ACTIONS: Array<{ id: CopilotActionId; label: string; enabled: bool
   { id: "vscode", label: "Start logging VS Code", enabled: true }
 ];
 
-function App(): React.JSX.Element {
+function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const { exit } = useApp();
   const providers = React.useState(() => createProviders())[0];
   const [providerStates, setProviderStates] = useState<ProviderLoadState[]>(
@@ -91,7 +92,7 @@ function App(): React.JSX.Element {
 
     for (const provider of providers) {
       void provider
-        .getStats()
+        .getStats(props.statsOptions)
         .then((stats) => {
           if (cancelled) {
             return;
@@ -124,7 +125,7 @@ function App(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [providers]);
+  }, [props.statsOptions, providers]);
 
   useInput((input, key) => {
     if (input === "q" || key.escape) {
@@ -717,8 +718,14 @@ function getLimitRowKey(row: LimitWindowRow): string {
   return `${row.scope}-${row.planType}-${row.limitId}-${row.startTimeUtcIso}-${row.endTimeUtcIso}`;
 }
 
-export function main(): void {
-  render(<App />);
+function parseStatsOptions(argv: string[]): ProviderStatsOptions {
+  return {
+    verbose: argv.includes("-v") || argv.includes("--verbose")
+  };
+}
+
+export function main(argv: string[] = process.argv.slice(2)): void {
+  render(<App statsOptions={parseStatsOptions(argv)} />);
 }
 
 main();
