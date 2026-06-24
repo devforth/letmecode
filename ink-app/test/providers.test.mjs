@@ -27,6 +27,12 @@ async function writeSession(root, relativePath, lines) {
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
 
+async function writeCodexModelsCache(root, models) {
+  const target = path.join(root, ".codex", "models_cache.json");
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, JSON.stringify({ models }, null, 2), "utf8");
+}
+
 async function writeClaudeSession(root, relativePath, lines) {
   const target = path.join(root, ".claude", "projects", relativePath);
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -851,6 +857,45 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
     assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens > 0, true);
     assert.equal(stats.warnings.some((warning) => warning.includes("malformed")), true);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-9")), true);
+    assert.equal(stats.modelUsage.find((row) => row.modelId === "gpt-9")?.totals.estimatedCreditsStatus, "unavailable");
+  });
+});
+
+test("CodexUsageProvider suppresses missing-rate warnings for hidden internal Codex models", async () => {
+  await withTempRoot(async (root) => {
+    await writeCodexModelsCache(root, [
+      { slug: "codex-auto-review", visibility: "hide" }
+    ]);
+
+    await writeSession(root, "2026/06/22/auto-review.jsonl", [
+      turnContext("codex-auto-review"),
+      tokenEvent({
+        timestamp: "2026-06-22T14:10:31.000Z",
+        total: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+          total_tokens: 110
+        },
+        last: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+          total_tokens: 110
+        },
+        primary: { used_percent: 1, window_minutes: 300, resets_at: 1782139200 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    const autoReviewTotals = stats.modelUsage.find((row) => row.modelId === "codex-auto-review")?.totals;
+
+    assert.equal(autoReviewTotals?.estimatedCredits, 0);
+    assert.notEqual(autoReviewTotals?.estimatedCreditsStatus, "unavailable");
+    assert.notEqual(stats.summary.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(stats.warnings.some((warning) => warning.includes("codex-auto-review")), false);
   });
 });
 

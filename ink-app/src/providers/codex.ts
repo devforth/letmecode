@@ -54,6 +54,10 @@ type CodexUsageProviderOptions = {
   root?: string;
 };
 
+type CodexModelMetadata = {
+  visibility: string;
+};
+
 export class CodexUsageProvider extends UsageProviderBase {
   private readonly root: string;
 
@@ -64,6 +68,7 @@ export class CodexUsageProvider extends UsageProviderBase {
 
   async getStats(_options: ProviderStatsOptions = {}): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".codex", "sessions");
+    const knownModels = await readCodexModelMetadata(this.root);
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
     const windows = createLimitWindowAggregates();
@@ -78,7 +83,7 @@ export class CodexUsageProvider extends UsageProviderBase {
 
     for await (const file of walkSessionFiles(sessionsRoot)) {
       parseTotals.filesScanned += 1;
-      const fileStats = await parseSessionFile(file, byModel, byDay, windows, planTypes);
+      const fileStats = await parseSessionFile(file, byModel, byDay, windows, planTypes, knownModels);
       parseTotals.linesRead += fileStats.linesRead;
       parseTotals.tokenEvents += fileStats.tokenEvents;
       parseTotals.malformedLines += fileStats.malformedLines;
@@ -94,7 +99,7 @@ export class CodexUsageProvider extends UsageProviderBase {
 
     const unknownPricedModels = modelUsage
       .map((row) => row.modelId)
-      .filter((modelId) => !RATE_CARD[modelId]);
+      .filter((modelId) => !RATE_CARD[modelId] && !isAssumedZeroRatedCodexModel(modelId, knownModels));
     if (unknownPricedModels.length > 0) {
       warnings.push(`No credit rate configured for: ${unknownPricedModels.join(", ")}.`);
     }
@@ -127,6 +132,44 @@ export class CodexUsageProvider extends UsageProviderBase {
       warnings
     };
   }
+}
+
+async function readCodexModelMetadata(root: string): Promise<Map<string, CodexModelMetadata>> {
+  const modelsCachePath = path.join(root, ".codex", "models_cache.json");
+
+  let fileText: string;
+  try {
+    fileText = await fs.promises.readFile(modelsCachePath, "utf8");
+  } catch {
+    return new Map();
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(fileText);
+  } catch {
+    return new Map();
+  }
+
+  const models = asRecord(payload)?.models;
+  if (!Array.isArray(models)) {
+    return new Map();
+  }
+
+  const metadata = new Map<string, CodexModelMetadata>();
+  for (const model of models) {
+    const record = asRecord(model);
+    const slug = typeof record?.slug === "string" ? record.slug : "";
+    if (!slug) {
+      continue;
+    }
+
+    metadata.set(slug, {
+      visibility: typeof record?.visibility === "string" ? record.visibility : ""
+    });
+  }
+
+  return metadata;
 }
 
 function createEmptyRawUsage(): RawUsage {
@@ -191,11 +234,18 @@ function rawUsageToTotals(usage: RawUsage): UsageTotals {
   };
 }
 
-function createUsageTotalsForModel(modelId: string, usage: RawUsage): UsageTotals {
+function createUsageTotalsForModel(
+  modelId: string,
+  usage: RawUsage,
+  knownModels: Map<string, CodexModelMetadata>
+): UsageTotals {
   const resolvedModelId = modelId || "unknown";
   const deltaTotals = rawUsageToTotals(usage);
   deltaTotals.estimatedCredits = creditsFor(resolvedModelId, usage);
   deltaTotals.eventCount = 1;
+  if (!RATE_CARD[resolvedModelId] && !isAssumedZeroRatedCodexModel(resolvedModelId, knownModels)) {
+    deltaTotals.estimatedCreditsStatus = "unavailable";
+  }
   return deltaTotals;
 }
 
@@ -204,6 +254,16 @@ function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, delta
   const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("openai");
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
+}
+
+function isHiddenCodexModel(modelId: string, knownModels: Map<string, CodexModelMetadata>): boolean {
+  return knownModels.get(modelId)?.visibility === "hide";
+}
+
+function isAssumedZeroRatedCodexModel(modelId: string, knownModels: Map<string, CodexModelMetadata>): boolean {
+  // Hidden internal Codex models do not have a public rate card entry. For dashboard
+  // rollups we treat them as zero-rated so they do not turn aggregate totals unknown.
+  return isHiddenCodexModel(modelId, knownModels);
 }
 
 function isSessionFile(filePath: string): boolean {
@@ -233,7 +293,8 @@ async function parseSessionFile(
   byModel: Map<string, UsageTotals>,
   byDay: DailyUsageAggregates,
   windows: LimitWindowAggregates,
-  planTypes: Set<string>
+  planTypes: Set<string>,
+  knownModels: Map<string, CodexModelMetadata>
 ): Promise<{ linesRead: number; tokenEvents: number; malformedLines: number }> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -281,7 +342,7 @@ async function parseSessionFile(
     const usage = lastUsage ? normalizeRawUsage(lastUsage) : previousTotal ? subtractRawUsage(totalUsage, previousTotal) : totalUsage;
     previousTotal = totalUsage;
     const resolvedModelId = currentModel || "unknown";
-    const deltaTotals = createUsageTotalsForModel(resolvedModelId, usage);
+    const deltaTotals = createUsageTotalsForModel(resolvedModelId, usage, knownModels);
 
     tokenEvents += 1;
     addModelUsage(byModel, resolvedModelId, deltaTotals);

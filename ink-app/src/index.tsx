@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { Box, Text, useApp, useInput, render } from "ink";
+import React, { useEffect, useRef, useState } from "react";
+import { Box, Text, measureElement, useApp, useInput, useStdout, render } from "ink";
 import {
   configureCopilotVsCodeLogging,
   createProviders,
@@ -18,6 +18,14 @@ type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
   | { provider: UsageProviderBase; status: "ready"; stats: ProviderStats }
   | { provider: UsageProviderBase; status: "error"; errorMessage: string };
+
+type ScrollableLine = {
+  key: string;
+  text: string;
+  bold?: boolean;
+  color?: string;
+  inverse?: boolean;
+};
 
 type CopilotActionId = "vscode";
 
@@ -82,8 +90,15 @@ const COPILOT_ACTIONS: Array<{ id: CopilotActionId; label: string; enabled: bool
   { id: "vscode", label: "Start logging VS Code", enabled: true }
 ];
 
+const ENTER_FULLSCREEN_MODE = "\u001B[?1049h\u001B[2J\u001B[H";
+const EXIT_FULLSCREEN_MODE = "\u001B[?1049l";
+const SCROLLBAR_TRACK_GLYPH = "│";
+const SCROLLBAR_THUMB_GLYPH = "█";
+
 function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const { exit } = useApp();
+  const viewportHeight = useViewportHeight();
+  const { ref: contentPanelRef, height: contentPanelHeight } = useMeasuredElementSize();
   const providers = React.useState(() => createProviders())[0];
   const [providerStates, setProviderStates] = useState<ProviderLoadState[]>(
     providers.map((provider) => ({ provider, status: "loading" }))
@@ -253,7 +268,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   });
 
   return (
-    <Box flexDirection="column" paddingX={1}>
+    <Box flexDirection="column" paddingX={1} height={viewportHeight} overflow="hidden">
       <Text bold color="cyan">
         letmecode usage dashboard
       </Text>
@@ -271,45 +286,48 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         ))}
       </Box>
 
-      <Box marginTop={1}>
-        <Box flexDirection="column" width={VERTICAL_TAB_WIDTH} marginRight={2}>
-          {VERTICAL_TABS.map((tab, index) => (
-            <VerticalTab key={tab.id} label={tab.label} active={index === selectedVerticalTabIndex} />
-          ))}
+      <Box marginTop={1} flexDirection="column" flexGrow={1} overflow="hidden">
+        <Box flexGrow={1} overflow="hidden">
+          <Box flexDirection="column" width={VERTICAL_TAB_WIDTH} marginRight={2} overflow="hidden">
+            {VERTICAL_TABS.map((tab, index) => (
+              <VerticalTab key={tab.id} label={tab.label} active={index === selectedVerticalTabIndex} />
+            ))}
+          </Box>
+          <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
+            <ContentPanel
+              providerState={selectedProvider}
+              tabId={selectedVerticalTab.id}
+              selectedLimitRowKey={selectedLimitRow ? getLimitRowKey(selectedLimitRow) : undefined}
+              selectedDayKey={selectedDayRow?.dayKey}
+              selectedModelId={selectedModelRow?.modelId}
+              availableHeight={contentPanelHeight}
+            />
+          </Box>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
-          <ContentPanel
-            providerState={selectedProvider}
-            tabId={selectedVerticalTab.id}
-            selectedLimitRowKey={selectedLimitRow ? getLimitRowKey(selectedLimitRow) : undefined}
-            selectedDayKey={selectedDayRow?.dayKey}
-            selectedModelId={selectedModelRow?.modelId}
-          />
-        </Box>
+
+        <SelectionDetailsPanel
+          providerState={selectedProvider}
+          tabId={selectedVerticalTab.id}
+          selectedLimitRow={selectedLimitRow}
+          selectedDayRow={selectedDayRow}
+          selectedModelRow={selectedModelRow}
+        />
+
+        <CopilotActionsPanel
+          providerState={selectedProvider}
+          actionMessage={copilotActionMessage}
+          selectedActionIndex={selectedCopilotActionIndex}
+        />
+
+        {selectedProvider.status === "ready" && selectedProvider.stats.warnings.length > 0 ? (
+          <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" overflow="hidden">
+            <Text color="yellow">Warnings</Text>
+            {selectedProvider.stats.warnings.map((warning) => (
+              <Text key={warning}>{warning}</Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
-
-      <SelectionDetailsPanel
-        providerState={selectedProvider}
-        tabId={selectedVerticalTab.id}
-        selectedLimitRow={selectedLimitRow}
-        selectedDayRow={selectedDayRow}
-        selectedModelRow={selectedModelRow}
-      />
-
-      <CopilotActionsPanel
-        providerState={selectedProvider}
-        actionMessage={copilotActionMessage}
-        selectedActionIndex={selectedCopilotActionIndex}
-      />
-
-      {selectedProvider.status === "ready" && selectedProvider.stats.warnings.length > 0 ? (
-        <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
-          <Text color="yellow">Warnings</Text>
-          {selectedProvider.stats.warnings.map((warning) => (
-            <Text key={warning}>{warning}</Text>
-          ))}
-        </Box>
-      ) : null}
     </Box>
   );
 }
@@ -431,6 +449,7 @@ function ContentPanel(props: {
   selectedLimitRowKey?: string;
   selectedDayKey?: string;
   selectedModelId?: string;
+  availableHeight: number;
 }): React.JSX.Element {
   if (props.providerState.status === "loading") {
     return <Text color="yellow">Loading {props.providerState.provider.label} stats...</Text>;
@@ -441,7 +460,13 @@ function ContentPanel(props: {
   }
 
   if (props.tabId === "limit-windows") {
-    return <LimitWindowsPanel stats={props.providerState.stats} selectedRowKey={props.selectedLimitRowKey} />;
+    return (
+      <LimitWindowsPanel
+        stats={props.providerState.stats}
+        selectedRowKey={props.selectedLimitRowKey}
+        availableHeight={props.availableHeight}
+      />
+    );
   }
 
   if (props.tabId === "summary") {
@@ -449,53 +474,51 @@ function ContentPanel(props: {
   }
 
   if (props.tabId === "day-to-day-analyses") {
-    return <DayToDayPanel stats={props.providerState.stats} selectedDayKey={props.selectedDayKey} />;
-  }
-
-  return <UsageByModelPanel stats={props.providerState.stats} selectedModelId={props.selectedModelId} />;
-}
-
-function LimitWindowsPanel(props: { stats: ProviderStats; selectedRowKey?: string }): React.JSX.Element {
-  return (
-    <Box flexDirection="column">
-      <Text bold>Primary Limit Windows</Text>
-      <LimitWindowSection windows={props.stats.primaryLimitWindows} selectedRowKey={props.selectedRowKey} />
-      <Box marginTop={1} />
-      <Text bold>Secondary Limit Windows</Text>
-      <LimitWindowSection windows={props.stats.secondaryLimitWindows} selectedRowKey={props.selectedRowKey} />
-    </Box>
-  );
-}
-
-function LimitWindowSection(props: { windows: LimitWindowRow[]; selectedRowKey?: string }): React.JSX.Element {
-  if (props.windows.length === 0) {
-    return <Text color="gray">No windows found.</Text>;
+    return (
+      <DayToDayPanel
+        stats={props.providerState.stats}
+        selectedDayKey={props.selectedDayKey}
+        availableHeight={props.availableHeight}
+      />
+    );
   }
 
   return (
-    <Box flexDirection="column">
-      <Text color="gray">
-        {pad("plan", LIMIT_WINDOW_COLUMNS.plan)} {pad("window", LIMIT_WINDOW_COLUMNS.window)} {pad("used", LIMIT_WINDOW_COLUMNS.used)} {pad("start", LIMIT_WINDOW_COLUMNS.date)} {pad("end", LIMIT_WINDOW_COLUMNS.date)} value
-      </Text>
-      {props.windows.map((window) => {
-        const windowLabel = formatWindowMinutes(window.windowMinutes);
-        const usedLabel = `${window.minUsedPercent}%->${window.maxUsedPercent}%`;
-        const isSelected = props.selectedRowKey === getLimitRowKey(window);
-        return (
-          <Text
-            key={getLimitRowKey(window)}
-            inverse={isSelected}
-            color={isSelected ? "cyan" : undefined}
-          >
-            {pad(window.planType, LIMIT_WINDOW_COLUMNS.plan)} {pad(windowLabel, LIMIT_WINDOW_COLUMNS.window)} {pad(usedLabel, LIMIT_WINDOW_COLUMNS.used)} {pad(formatLocalDateTime(window.startTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatLocalDateTime(window.endTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} {pad(formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD), LIMIT_WINDOW_COLUMNS.value)}
-          </Text>
-        );
-      })}
-    </Box>
+    <UsageByModelPanel
+      stats={props.providerState.stats}
+      selectedModelId={props.selectedModelId}
+      availableHeight={props.availableHeight}
+    />
   );
 }
 
-function UsageByModelPanel(props: { stats: ProviderStats; selectedModelId?: string }): React.JSX.Element {
+function LimitWindowsPanel(props: {
+  stats: ProviderStats;
+  selectedRowKey?: string;
+  availableHeight: number;
+}): React.JSX.Element {
+  const bodyLines = [
+    { key: "primary-title", text: "Primary Limit Windows", bold: true },
+    ...buildLimitWindowSectionLines("primary", props.stats.primaryLimitWindows, props.selectedRowKey),
+    { key: "section-gap", text: "" },
+    { key: "secondary-title", text: "Secondary Limit Windows", bold: true },
+    ...buildLimitWindowSectionLines("secondary", props.stats.secondaryLimitWindows, props.selectedRowKey)
+  ];
+
+  return (
+    <ScrollableLineViewport
+      bodyLines={bodyLines}
+      selectedBodyLineKey={props.selectedRowKey ? `limit-row:${props.selectedRowKey}` : undefined}
+      availableHeight={props.availableHeight}
+    />
+  );
+}
+
+function UsageByModelPanel(props: {
+  stats: ProviderStats;
+  selectedModelId?: string;
+  availableHeight: number;
+}): React.JSX.Element {
   if (props.stats.modelUsage.length === 0) {
     return <Text color="gray">No model usage found.</Text>;
   }
@@ -503,54 +526,82 @@ function UsageByModelPanel(props: { stats: ProviderStats; selectedModelId?: stri
   const totals = props.stats.summary.totals;
   if (totals.tokenBreakdown.schema === "anthropic") {
     return (
-      <Box flexDirection="column">
-        <Text color="gray">
-          {pad("model", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} {pad("input", ANTHROPIC_MODEL_USAGE_COLUMNS.input)} {pad("cacheW5m", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} {pad("cacheW1h", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} {pad("cacheRead", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} {pad("output", ANTHROPIC_MODEL_USAGE_COLUMNS.output)} {pad("credits", ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} value
-        </Text>
-        {props.stats.modelUsage.map((row) => {
-          const isSelected = props.selectedModelId === row.modelId;
+      <ScrollableLineViewport
+        headerLines={[
+          {
+            key: "anthropic-model-header",
+            text: `${pad("model", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad("input", ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad("cacheW5m", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad("cacheRead", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad("output", ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad("credits", ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} value`,
+            color: "gray"
+          }
+        ]}
+        bodyLines={props.stats.modelUsage.flatMap((row) => {
           if (row.totals.tokenBreakdown.schema !== "anthropic") {
-            return null;
+            return [];
           }
 
-          return (
-            <Text key={row.modelId} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-              {pad(row.modelId, ANTHROPIC_MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} {pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} {pad(formatInteger(row.totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}
-            </Text>
-          );
+          return [
+            {
+              key: `model-row:${row.modelId}`,
+              text: `${pad(row.modelId, ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(row.totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}`,
+              inverse: props.selectedModelId === row.modelId,
+              color: props.selectedModelId === row.modelId ? "cyan" : undefined
+            }
+          ];
         })}
-        <Text color="cyan">
-          {pad("TOTAL", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} {pad(formatInteger(totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} {pad(formatInteger(totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} {pad(formatInteger(totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}
-        </Text>
-      </Box>
+        footerLines={[
+          {
+            key: "anthropic-model-total",
+            text: `${pad("TOTAL", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad(formatInteger(totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad(formatInteger(totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}`,
+            color: "cyan"
+          }
+        ]}
+        selectedBodyLineKey={props.selectedModelId ? `model-row:${props.selectedModelId}` : undefined}
+        availableHeight={props.availableHeight}
+      />
     );
   }
 
   return (
-    <Box flexDirection="column">
-      <Text color="gray">
-        {pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} {pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} {pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} {pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} {pad("credits", OPENAI_MODEL_USAGE_COLUMNS.credits)} value
-      </Text>
-      {props.stats.modelUsage.map((row) => {
-        const isSelected = props.selectedModelId === row.modelId;
+    <ScrollableLineViewport
+      headerLines={[
+        {
+          key: "openai-model-header",
+          text: `${pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad("credits", OPENAI_MODEL_USAGE_COLUMNS.credits)} value`,
+          color: "gray"
+        }
+      ]}
+      bodyLines={props.stats.modelUsage.flatMap((row) => {
         if (row.totals.tokenBreakdown.schema !== "openai") {
-          return null;
+          return [];
         }
 
-        return (
-          <Text key={row.modelId} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} {pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} {pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(row.totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(row.totals), OPENAI_MODEL_USAGE_COLUMNS.value)}
-          </Text>
-        );
+        return [
+          {
+            key: `model-row:${row.modelId}`,
+            text: `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
+            inverse: props.selectedModelId === row.modelId,
+            color: props.selectedModelId === row.modelId ? "cyan" : undefined
+          }
+        ];
       })}
-      <Text color="cyan">
-        {pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} {pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} {pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}
-      </Text>
-    </Box>
+      footerLines={[
+        {
+          key: "openai-model-total",
+          text: `${pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
+          color: "cyan"
+        }
+      ]}
+      selectedBodyLineKey={props.selectedModelId ? `model-row:${props.selectedModelId}` : undefined}
+      availableHeight={props.availableHeight}
+    />
   );
 }
 
-function DayToDayPanel(props: { stats: ProviderStats; selectedDayKey?: string }): React.JSX.Element {
+function DayToDayPanel(props: {
+  stats: ProviderStats;
+  selectedDayKey?: string;
+  availableHeight: number;
+}): React.JSX.Element {
   if (props.stats.dayUsage.length === 0) {
     return <Text color="gray">No day-by-day usage found.</Text>;
   }
@@ -558,45 +609,162 @@ function DayToDayPanel(props: { stats: ProviderStats; selectedDayKey?: string })
   const totals = props.stats.summary.totals;
   if (totals.tokenBreakdown.schema === "anthropic") {
     return (
-      <Box flexDirection="column">
-        <Text color="gray">
-          {pad("day", ANTHROPIC_DAY_USAGE_COLUMNS.day)} {pad("events", ANTHROPIC_DAY_USAGE_COLUMNS.events)} {pad("input", ANTHROPIC_DAY_USAGE_COLUMNS.input)} {pad("cacheW5m", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} {pad("cacheW1h", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} {pad("cacheRead", ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} {pad("output", ANTHROPIC_DAY_USAGE_COLUMNS.output)} value
-        </Text>
-        {props.stats.dayUsage.map((row) => {
-          const isSelected = props.selectedDayKey === row.dayKey;
+      <ScrollableLineViewport
+        headerLines={[
+          {
+            key: "anthropic-day-header",
+            text: `${pad("day", ANTHROPIC_DAY_USAGE_COLUMNS.day)} ${pad("events", ANTHROPIC_DAY_USAGE_COLUMNS.events)} ${pad("input", ANTHROPIC_DAY_USAGE_COLUMNS.input)} ${pad("cacheW5m", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} ${pad("cacheRead", ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} ${pad("output", ANTHROPIC_DAY_USAGE_COLUMNS.output)} value`,
+            color: "gray"
+          }
+        ]}
+        bodyLines={props.stats.dayUsage.flatMap((row) => {
           if (row.totals.tokenBreakdown.schema !== "anthropic") {
-            return null;
+            return [];
           }
 
-          return (
-            <Text key={row.dayKey} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-              {pad(formatUtcDay(row.dayKey), ANTHROPIC_DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), ANTHROPIC_DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} {pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} {pad(formatInteger(row.totals.outputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.output)} {pad(formatUsageUsd(row.totals), ANTHROPIC_DAY_USAGE_COLUMNS.value)}
-            </Text>
-          );
+          return [
+            {
+              key: `day-row:${row.dayKey}`,
+              text: `${pad(formatUtcDay(row.dayKey), ANTHROPIC_DAY_USAGE_COLUMNS.day)} ${pad(formatInteger(row.totals.eventCount), ANTHROPIC_DAY_USAGE_COLUMNS.events)} ${pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(row.totals.outputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(row.totals), ANTHROPIC_DAY_USAGE_COLUMNS.value)}`,
+              inverse: props.selectedDayKey === row.dayKey,
+              color: props.selectedDayKey === row.dayKey ? "cyan" : undefined
+            }
+          ];
         })}
-      </Box>
+        selectedBodyLineKey={props.selectedDayKey ? `day-row:${props.selectedDayKey}` : undefined}
+        availableHeight={props.availableHeight}
+      />
     );
   }
 
   return (
-    <Box flexDirection="column">
-      <Text color="gray">
-        {pad("day", OPENAI_DAY_USAGE_COLUMNS.day)} {pad("events", OPENAI_DAY_USAGE_COLUMNS.events)} {pad("input", OPENAI_DAY_USAGE_COLUMNS.input)} {pad("output", OPENAI_DAY_USAGE_COLUMNS.output)} value
-      </Text>
-      {props.stats.dayUsage.map((row) => {
-        const isSelected = props.selectedDayKey === row.dayKey;
+    <ScrollableLineViewport
+      headerLines={[
+        {
+          key: "openai-day-header",
+          text: `${pad("day", OPENAI_DAY_USAGE_COLUMNS.day)} ${pad("events", OPENAI_DAY_USAGE_COLUMNS.events)} ${pad("input", OPENAI_DAY_USAGE_COLUMNS.input)} ${pad("output", OPENAI_DAY_USAGE_COLUMNS.output)} value`,
+          color: "gray"
+        }
+      ]}
+      bodyLines={props.stats.dayUsage.flatMap((row) => {
         if (row.totals.tokenBreakdown.schema !== "openai") {
-          return null;
+          return [];
         }
 
-        return (
-          <Text key={row.dayKey} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(formatUtcDay(row.dayKey), OPENAI_DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), OPENAI_DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.inputTotalTokens), OPENAI_DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.outputTokens), OPENAI_DAY_USAGE_COLUMNS.output)} {pad(formatUsageUsd(row.totals), OPENAI_DAY_USAGE_COLUMNS.value)}
-          </Text>
-        );
+        return [
+          {
+            key: `day-row:${row.dayKey}`,
+            text: `${pad(formatUtcDay(row.dayKey), OPENAI_DAY_USAGE_COLUMNS.day)} ${pad(formatInteger(row.totals.eventCount), OPENAI_DAY_USAGE_COLUMNS.events)} ${pad(formatInteger(row.totals.inputTotalTokens), OPENAI_DAY_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_DAY_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(row.totals), OPENAI_DAY_USAGE_COLUMNS.value)}`,
+            inverse: props.selectedDayKey === row.dayKey,
+            color: props.selectedDayKey === row.dayKey ? "cyan" : undefined
+          }
+        ];
       })}
+      selectedBodyLineKey={props.selectedDayKey ? `day-row:${props.selectedDayKey}` : undefined}
+      availableHeight={props.availableHeight}
+    />
+  );
+}
+
+function ScrollableLineViewport(props: {
+  headerLines?: ScrollableLine[];
+  bodyLines: ScrollableLine[];
+  footerLines?: ScrollableLine[];
+  selectedBodyLineKey?: string;
+  availableHeight: number;
+}): React.JSX.Element {
+  const headerLines = props.headerLines ?? [];
+  const footerLines = props.footerLines ?? [];
+  const layout = resolveScrollableViewportLayout(
+    props.availableHeight,
+    headerLines.length,
+    props.bodyLines.length,
+    footerLines.length
+  );
+  const selectedBodyLineIndex = props.selectedBodyLineKey
+    ? props.bodyLines.findIndex((line) => line.key === props.selectedBodyLineKey)
+    : -1;
+  const scrollOffset = useAutoScrollOffset(selectedBodyLineIndex, props.bodyLines.length, layout.bodyVisibleCount);
+  const visibleHeaderLines = headerLines.slice(0, layout.headerVisibleCount);
+  const visibleBodyLines = props.bodyLines.slice(scrollOffset, scrollOffset + layout.bodyVisibleCount);
+  const visibleFooterLines = footerLines.slice(
+    Math.max(0, footerLines.length - layout.footerVisibleCount)
+  );
+  const bodyScrollbarLines = buildScrollbarLines(layout.bodyVisibleCount, props.bodyLines.length, scrollOffset);
+  const showScrollbar = bodyScrollbarLines.length > 0;
+
+  return (
+    <Box flexDirection="row" overflow="hidden">
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
+        {visibleHeaderLines.map((line) => (
+          <ScrollableViewportLine key={line.key} line={line} />
+        ))}
+        {visibleBodyLines.map((line) => (
+          <ScrollableViewportLine key={line.key} line={line} />
+        ))}
+        {visibleFooterLines.map((line) => (
+          <ScrollableViewportLine key={line.key} line={line} />
+        ))}
+      </Box>
+      {showScrollbar ? (
+        <Box flexDirection="column" marginLeft={1}>
+          {visibleHeaderLines.map((line) => (
+            <Text key={`${line.key}-scrollbar`} color="gray">
+              {" "}
+            </Text>
+          ))}
+          {bodyScrollbarLines.map((line, index) => (
+            <Text key={`scrollbar-${index}`} color={line === "#" ? "cyan" : "gray"}>
+              {line}
+            </Text>
+          ))}
+          {visibleFooterLines.map((line) => (
+            <Text key={`${line.key}-scrollbar`} color="gray">
+              {" "}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
     </Box>
   );
+}
+
+function ScrollableViewportLine(props: { line: ScrollableLine }): React.JSX.Element {
+  return (
+    <Text bold={props.line.bold} color={props.line.color} inverse={props.line.inverse} wrap="truncate-end">
+      {props.line.text}
+    </Text>
+  );
+}
+
+function buildLimitWindowSectionLines(
+  scope: "primary" | "secondary",
+  windows: LimitWindowRow[],
+  selectedRowKey?: string
+): ScrollableLine[] {
+  if (windows.length === 0) {
+    return [{ key: `${scope}-empty`, text: "No windows found.", color: "gray" }];
+  }
+
+  return [
+    {
+      key: `${scope}-header`,
+      text: `${pad("plan", LIMIT_WINDOW_COLUMNS.plan)} ${pad("window", LIMIT_WINDOW_COLUMNS.window)} ${pad("used", LIMIT_WINDOW_COLUMNS.used)} ${pad("start", LIMIT_WINDOW_COLUMNS.date)} ${pad("end", LIMIT_WINDOW_COLUMNS.date)} value`,
+      color: "gray"
+    },
+    ...windows.map<ScrollableLine>((window) => {
+      const lineKey = getLimitRowKey(window);
+      const windowLabel = formatWindowMinutes(window.windowMinutes);
+      const usedLabel = `${window.minUsedPercent}%->${window.maxUsedPercent}%`;
+      const isSelected = selectedRowKey === lineKey;
+      return {
+        key: `limit-row:${lineKey}`,
+        text: `${pad(window.planType, LIMIT_WINDOW_COLUMNS.plan)} ${pad(windowLabel, LIMIT_WINDOW_COLUMNS.window)} ${pad(usedLabel, LIMIT_WINDOW_COLUMNS.used)} ${pad(formatLocalDateTime(window.startTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} ${pad(formatLocalDateTime(window.endTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} ${pad(formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD), LIMIT_WINDOW_COLUMNS.value)}`,
+        inverse: isSelected,
+        color: isSelected ? "cyan" : undefined
+      };
+    })
+  ];
 }
 
 function SelectionDetailsPanel(props: {
@@ -662,8 +830,7 @@ function UsageTotalsDetails(props: { totals: UsageTotals }): React.JSX.Element {
   return (
     <Box flexDirection="column">
       <UsageBreakdownLines totals={totals} />
-      <Text>Total credits burned: {formatUsageCredits(totals)}</Text>
-      <Text>Credits Value (@ $0.01/credit): {formatUsageUsd(totals)}</Text>
+      <Text>Burned tokens for: {formatUsageUsd(totals)}</Text>
       <Text>IpO: {formatInputPerOutput(totals)}</Text>
     </Box>
   );
@@ -810,6 +977,112 @@ function formatInputPerOutput(totals: UsageTotals): string {
   return `uncached:cached:output = ${formatInteger(Math.round(totals.tokenBreakdown.nonCachedInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cachedInputTokens / totals.outputTokens))}:1`;
 }
 
+function useMeasuredElementSize(): {
+  ref: React.MutableRefObject<any>;
+  height: number;
+  width: number;
+} {
+  const ref = useRef<any>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    if (!ref.current) {
+      return;
+    }
+
+    const nextSize = measureElement(ref.current);
+    setSize((current) =>
+      current.width === nextSize.width && current.height === nextSize.height ? current : nextSize
+    );
+  });
+
+  return {
+    ref,
+    width: size.width,
+    height: size.height
+  };
+}
+
+function useAutoScrollOffset(selectedIndex: number, rowCount: number, viewportSize: number): number {
+  const [scrollOffset, setScrollOffset] = useState(0);
+
+  useEffect(() => {
+    const maxOffset = Math.max(0, rowCount - Math.max(0, viewportSize));
+    setScrollOffset((current) => {
+      let next = Math.max(0, Math.min(current, maxOffset));
+      if (selectedIndex < 0 || viewportSize <= 0) {
+        return next;
+      }
+
+      if (selectedIndex < next) {
+        next = selectedIndex;
+      } else if (selectedIndex >= next + viewportSize) {
+        next = selectedIndex - viewportSize + 1;
+      }
+
+      return Math.max(0, Math.min(next, maxOffset));
+    });
+  }, [rowCount, selectedIndex, viewportSize]);
+
+  return scrollOffset;
+}
+
+function resolveScrollableViewportLayout(
+  availableHeight: number,
+  headerCount: number,
+  bodyCount: number,
+  footerCount: number
+): { headerVisibleCount: number; bodyVisibleCount: number; footerVisibleCount: number } {
+  const totalHeight = Math.max(1, availableHeight || 1);
+  if (bodyCount === 0) {
+    const headerVisibleCount = Math.min(headerCount, totalHeight);
+    return {
+      headerVisibleCount,
+      bodyVisibleCount: 0,
+      footerVisibleCount: Math.min(footerCount, Math.max(0, totalHeight - headerVisibleCount))
+    };
+  }
+
+  let headerVisibleCount = Math.min(headerCount, totalHeight);
+  let footerVisibleCount = Math.min(footerCount, Math.max(0, totalHeight - headerVisibleCount - 1));
+  let bodyVisibleCount = Math.min(bodyCount, Math.max(0, totalHeight - headerVisibleCount - footerVisibleCount));
+
+  if (bodyVisibleCount === 0 && footerVisibleCount > 0) {
+    footerVisibleCount -= 1;
+    bodyVisibleCount = Math.min(bodyCount, Math.max(0, totalHeight - headerVisibleCount - footerVisibleCount));
+  }
+
+  if (bodyVisibleCount === 0 && headerVisibleCount > 0) {
+    headerVisibleCount -= 1;
+    bodyVisibleCount = Math.min(bodyCount, Math.max(0, totalHeight - headerVisibleCount - footerVisibleCount));
+  }
+
+  if (bodyVisibleCount === 0) {
+    return {
+      headerVisibleCount: 0,
+      bodyVisibleCount: Math.min(bodyCount, totalHeight),
+      footerVisibleCount: 0
+    };
+  }
+
+  return { headerVisibleCount, bodyVisibleCount, footerVisibleCount };
+}
+
+function buildScrollbarLines(viewportSize: number, rowCount: number, scrollOffset: number): string[] {
+  if (viewportSize <= 0 || rowCount <= viewportSize) {
+    return [];
+  }
+
+  const thumbSize = Math.max(1, Math.round((viewportSize * viewportSize) / rowCount));
+  const maxThumbOffset = Math.max(0, viewportSize - thumbSize);
+  const maxScrollOffset = Math.max(1, rowCount - viewportSize);
+  const thumbOffset = Math.round((Math.max(0, Math.min(scrollOffset, maxScrollOffset)) / maxScrollOffset) * maxThumbOffset);
+
+  return Array.from({ length: viewportSize }, (_, index) =>
+    index >= thumbOffset && index < thumbOffset + thumbSize ? SCROLLBAR_THUMB_GLYPH : SCROLLBAR_TRACK_GLYPH
+  );
+}
+
 function clampSelectionIndex(value: number, rowCount: number): number {
   if (rowCount === 0) {
     return -1;
@@ -872,8 +1145,72 @@ function parseStatsOptions(argv: string[]): ProviderStatsOptions {
   };
 }
 
+function useViewportHeight(): number {
+  const { stdout } = useStdout();
+  const [viewportHeight, setViewportHeight] = useState(() => resolveViewportHeight(stdout.rows));
+
+  useEffect(() => {
+    const updateViewportHeight = () => {
+      setViewportHeight(resolveViewportHeight(stdout.rows));
+    };
+
+    updateViewportHeight();
+    if (!stdout.isTTY) {
+      return;
+    }
+
+    stdout.on("resize", updateViewportHeight);
+    return () => {
+      stdout.off("resize", updateViewportHeight);
+    };
+  }, [stdout]);
+
+  return viewportHeight;
+}
+
+function resolveViewportHeight(rows: number | undefined): number {
+  const terminalRows = typeof rows === "number" && rows > 0 ? rows : 24;
+  // Keep Ink below the terminal height so it stays on its incremental redraw path
+  // instead of the full-screen print path that can leave the viewport scrolled.
+  return Math.max(1, terminalRows - 1);
+}
+
 export function main(argv: string[] = process.argv.slice(2)): void {
-  render(<App statsOptions={parseStatsOptions(argv)} />);
+  const restoreFullscreen = enterFullscreenMode(process.stdout);
+  const exitHandler = () => {
+    restoreFullscreen();
+  };
+  process.once("exit", exitHandler);
+
+  const instance = render(<App statsOptions={parseStatsOptions(argv)} />, {
+    stdout: process.stdout,
+    stdin: process.stdin,
+    stderr: process.stderr
+  });
+
+  void instance.waitUntilExit().finally(() => {
+    process.off("exit", exitHandler);
+    instance.cleanup();
+    restoreFullscreen();
+  });
+}
+
+function enterFullscreenMode(stdout: NodeJS.WriteStream): () => void {
+  if (!stdout.isTTY) {
+    return () => {};
+  }
+
+  let restored = false;
+  stdout.write(ENTER_FULLSCREEN_MODE);
+
+  return () => {
+    if (restored) {
+      return;
+    }
+
+    restored = true;
+    stdout.write(EXIT_FULLSCREEN_MODE);
+  };
 }
 
 main();
