@@ -159,7 +159,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
 
     const unknownPricedModels = modelUsage
       .map((row) => row.modelId)
-      .filter((modelId) => !resolveRate(modelId));
+      .filter((modelId) => !resolveRate(modelId) && !isInternalClaudeModel(modelId));
     if (unknownPricedModels.length > 0) {
       warnings.push(`No credit rate configured for: ${unknownPricedModels.join(", ")}.`);
     }
@@ -233,6 +233,10 @@ function resolveRate(modelId: string): ClaudeRate | undefined {
   }
 
   return undefined;
+}
+
+function isInternalClaudeModel(modelId: string): boolean {
+  return modelId === "<synthetic>";
 }
 
 function creditsFor(modelId: string, usage: ClaudeUsage): number {

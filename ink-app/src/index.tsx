@@ -542,7 +542,7 @@ function UsageByModelPanel(props: {
           return [
             {
               key: `model-row:${row.modelId}`,
-              text: `${pad(row.modelId, ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(row.totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}`,
+              text: `${pad(row.modelId, ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(row.totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals, row.modelId), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals, row.modelId), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}`,
               inverse: props.selectedModelId === row.modelId,
               color: props.selectedModelId === row.modelId ? "cyan" : undefined
             }
@@ -578,7 +578,7 @@ function UsageByModelPanel(props: {
         return [
           {
             key: `model-row:${row.modelId}`,
-            text: `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
+            text: `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
             inverse: props.selectedModelId === row.modelId,
             color: props.selectedModelId === row.modelId ? "cyan" : undefined
           }
@@ -817,7 +817,7 @@ function SelectionDetailsPanel(props: {
         <Text>
           model: {props.selectedModelRow.modelId}  events: {formatInteger(props.selectedModelRow.totals.eventCount)}
         </Text>
-        <UsageTotalsDetails totals={props.selectedModelRow.totals} />
+        <UsageTotalsDetails totals={props.selectedModelRow.totals} modelId={props.selectedModelRow.modelId} />
       </Box>
     );
   }
@@ -825,12 +825,12 @@ function SelectionDetailsPanel(props: {
   return null;
 }
 
-function UsageTotalsDetails(props: { totals: UsageTotals }): React.JSX.Element {
+function UsageTotalsDetails(props: { totals: UsageTotals; modelId?: string }): React.JSX.Element {
   const { totals } = props;
   return (
     <Box flexDirection="column">
       <UsageBreakdownLines totals={totals} />
-      <Text>Burned tokens for: {formatUsageUsd(totals)}</Text>
+      <Text>Burned tokens for: {formatUsageUsd(totals, props.modelId)}</Text>
       <Text>IpO: {formatInputPerOutput(totals)}</Text>
     </Box>
   );
@@ -851,14 +851,26 @@ function formatCredits(value: number): string {
   });
 }
 
-function formatUsageCredits(totals: UsageTotals): string {
+function formatUsageCredits(totals: UsageTotals, modelId?: string): string {
+  if (isInternalUsageModel(modelId)) {
+    return "N/A";
+  }
+
   return totals.estimatedCreditsStatus === "unavailable" ? "unknown" : formatCredits(totals.estimatedCredits);
 }
 
-function formatUsageUsd(totals: UsageTotals): string {
+function formatUsageUsd(totals: UsageTotals, modelId?: string): string {
+  if (isInternalUsageModel(modelId)) {
+    return "N/A";
+  }
+
   return totals.estimatedCreditsStatus === "unavailable"
     ? "unknown"
     : formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD);
+}
+
+function isInternalUsageModel(modelId?: string): boolean {
+  return modelId === "codex-auto-review" || modelId === "<synthetic>";
 }
 
 function formatUsd(value: number): string {

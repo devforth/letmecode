@@ -1243,3 +1243,25 @@ test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", as
     );
   });
 });
+
+test("ClaudeUsageProvider suppresses missing-rate warnings for internal synthetic model rows", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/synthetic.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-synthetic",
+        messageId: "msg-synthetic",
+        model: "<synthetic>",
+        inputTokens: 40,
+        cacheReadInputTokens: 10,
+        outputTokens: 5
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    const syntheticTotals = stats.modelUsage.find((row) => row.modelId === "<synthetic>")?.totals;
+
+    assert.equal(syntheticTotals?.estimatedCredits, 0);
+    assert.equal(stats.warnings.some((warning) => warning.includes("<synthetic>")), false);
+  });
+});
