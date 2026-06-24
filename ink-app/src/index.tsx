@@ -419,6 +419,7 @@ function VerticalTab(props: { label: string; active: boolean }): React.JSX.Eleme
 
 function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
   const { summary } = props.stats;
+  const isCodexProvider = props.stats.providerId === "codex";
   return (
     <Box flexDirection="column">
       <Text bold>{props.stats.providerLabel}</Text>
@@ -429,9 +430,13 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
         files: {formatInteger(summary.filesScanned)}  lines: {formatInteger(summary.linesRead)}  token events: {formatInteger(summary.tokenEvents)}
       </Text>
       <UsageBreakdownLines totals={summary.totals} />
-      <Text>
-        estimated credits: {formatUsageCredits(summary.totals)} 
-      </Text>
+      {isCodexProvider ? (
+        <Text>Burned tokens for: {formatUsageUsd(summary.totals)}</Text>
+      ) : (
+        <Text>
+          estimated credits: {formatUsageCredits(summary.totals)}
+        </Text>
+      )}
       <Text>IpO: {formatInputPerOutput(summary.totals)}</Text>
       <Text>
         models: {summary.distinctModels.join(", ") || "none"}
@@ -524,6 +529,7 @@ function UsageByModelPanel(props: {
   }
 
   const totals = props.stats.summary.totals;
+  const isCodexProvider = props.stats.providerId === "codex";
   if (totals.tokenBreakdown.schema === "anthropic") {
     return (
       <ScrollableLineViewport
@@ -566,7 +572,9 @@ function UsageByModelPanel(props: {
       headerLines={[
         {
           key: "openai-model-header",
-          text: `${pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad("credits", OPENAI_MODEL_USAGE_COLUMNS.credits)} value`,
+          text: isCodexProvider
+            ? `${pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} value`
+            : `${pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad("credits", OPENAI_MODEL_USAGE_COLUMNS.credits)} value`,
           color: "gray"
         }
       ]}
@@ -578,7 +586,9 @@ function UsageByModelPanel(props: {
         return [
           {
             key: `model-row:${row.modelId}`,
-            text: `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
+            text: isCodexProvider
+              ? `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.value)}`
+              : `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
             inverse: props.selectedModelId === row.modelId,
             color: props.selectedModelId === row.modelId ? "cyan" : undefined
           }
@@ -587,7 +597,9 @@ function UsageByModelPanel(props: {
       footerLines={[
         {
           key: "openai-model-total",
-          text: `${pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
+          text: isCodexProvider
+            ? `${pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`
+            : `${pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
           color: "cyan"
         }
       ]}
