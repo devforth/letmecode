@@ -1,6 +1,6 @@
 import {
   addUsageTotals,
-  createEmptyUsageTotals,
+  cloneUsageTotals,
   type DailyUsageRow,
   type UsageTotals
 } from "./contract.js";
@@ -45,7 +45,7 @@ export function addDailyUsage(
       sortTimeMs,
       firstEventMs: Number.isFinite(eventTimeMs) ? eventTimeMs : null,
       lastEventMs: Number.isFinite(eventTimeMs) ? eventTimeMs : null,
-      totals: { ...deltaTotals },
+      totals: cloneUsageTotals(deltaTotals),
       models,
       planTypes
     });
@@ -76,7 +76,7 @@ export function buildDailyUsageRows(rows: DailyUsageAggregates): DailyUsageRow[]
       lastEventUtcIso: row.lastEventMs === null ? null : formatIsoFromMilliseconds(row.lastEventMs),
       distinctModels: [...row.models].sort(),
       distinctPlanTypes: [...row.planTypes].sort(),
-      totals: { ...row.totals }
+      totals: cloneUsageTotals(row.totals)
     }));
 }
 

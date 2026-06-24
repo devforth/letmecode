@@ -39,20 +39,41 @@ const LIMIT_WINDOW_COLUMNS = {
   value: 10
 } as const;
 
-const MODEL_USAGE_COLUMNS = {
+const OPENAI_MODEL_USAGE_COLUMNS = {
   model: 17,
   input: 12,
   cached: 12,
-  nonCached: 12,
   output: 11,
   credits: 12,
   value: 12
 } as const;
 
-const DAY_USAGE_COLUMNS = {
+const ANTHROPIC_MODEL_USAGE_COLUMNS = {
+  model: 17,
+  input: 10,
+  cacheWrite5m: 10,
+  cacheWrite1h: 10,
+  cacheRead: 10,
+  output: 10,
+  credits: 12,
+  value: 12
+} as const;
+
+const OPENAI_DAY_USAGE_COLUMNS = {
   day: 11,
   events: 6,
   input: 11,
+  output: 10,
+  value: 10
+} as const;
+
+const ANTHROPIC_DAY_USAGE_COLUMNS = {
+  day: 11,
+  events: 6,
+  input: 10,
+  cacheWrite5m: 10,
+  cacheWrite1h: 10,
+  cacheRead: 10,
   output: 10,
   value: 10
 } as const;
@@ -380,7 +401,6 @@ function VerticalTab(props: { label: string; active: boolean }): React.JSX.Eleme
 
 function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
   const { summary } = props.stats;
-  const inputPerOutput = formatInputPerOutput(summary.totals);
   return (
     <Box flexDirection="column">
       <Text bold>{props.stats.providerLabel}</Text>
@@ -390,18 +410,11 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
       <Text>
         files: {formatInteger(summary.filesScanned)}  lines: {formatInteger(summary.linesRead)}  token events: {formatInteger(summary.tokenEvents)}
       </Text>
-      <Text>
-        input: {formatInteger(summary.totals.inputTokens)}  cached: {formatCacheTokens(summary.totals, "cached")}  non-cached: {formatCacheTokens(summary.totals, "non-cached")}
-      </Text>
-      <Text>
-        output: {formatInteger(summary.totals.outputTokens)}  reasoning: {formatInteger(summary.totals.reasoningOutputTokens)}  total: {formatInteger(summary.totals.totalTokens)}
-      </Text>
+      <UsageBreakdownLines totals={summary.totals} />
       <Text>
         estimated credits: {formatUsageCredits(summary.totals)} 
       </Text>
-      <Text>
-        IpO: {inputPerOutput.cached}:{inputPerOutput.nonCached}:{inputPerOutput.output}
-      </Text>
+      <Text>IpO: {formatInputPerOutput(summary.totals)}</Text>
       <Text>
         models: {summary.distinctModels.join(", ") || "none"}
       </Text>
@@ -488,21 +501,50 @@ function UsageByModelPanel(props: { stats: ProviderStats; selectedModelId?: stri
   }
 
   const totals = props.stats.summary.totals;
+  if (totals.tokenBreakdown.schema === "anthropic") {
+    return (
+      <Box flexDirection="column">
+        <Text color="gray">
+          {pad("model", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} {pad("input", ANTHROPIC_MODEL_USAGE_COLUMNS.input)} {pad("cacheW5m", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} {pad("cacheW1h", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} {pad("cacheRead", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} {pad("output", ANTHROPIC_MODEL_USAGE_COLUMNS.output)} {pad("credits", ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} value
+        </Text>
+        {props.stats.modelUsage.map((row) => {
+          const isSelected = props.selectedModelId === row.modelId;
+          if (row.totals.tokenBreakdown.schema !== "anthropic") {
+            return null;
+          }
+
+          return (
+            <Text key={row.modelId} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
+              {pad(row.modelId, ANTHROPIC_MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} {pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} {pad(formatInteger(row.totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(row.totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}
+            </Text>
+          );
+        })}
+        <Text color="cyan">
+          {pad("TOTAL", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} {pad(formatInteger(totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} {pad(formatInteger(totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} {pad(formatInteger(totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} {pad(formatInteger(totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}
+        </Text>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column">
       <Text color="gray">
-        {pad("model", MODEL_USAGE_COLUMNS.model)} {pad("input", MODEL_USAGE_COLUMNS.input)} {pad("cached", MODEL_USAGE_COLUMNS.cached)} {pad("non-cached", MODEL_USAGE_COLUMNS.nonCached)} {pad("output", MODEL_USAGE_COLUMNS.output)} {pad("credits", MODEL_USAGE_COLUMNS.credits)} value
+        {pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} {pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} {pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} {pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} {pad("credits", OPENAI_MODEL_USAGE_COLUMNS.credits)} value
       </Text>
       {props.stats.modelUsage.map((row) => {
         const isSelected = props.selectedModelId === row.modelId;
+        if (row.totals.tokenBreakdown.schema !== "openai") {
+          return null;
+        }
+
         return (
           <Text key={row.modelId} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(row.modelId, MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(row.totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatCacheTokens(row.totals, "cached"), MODEL_USAGE_COLUMNS.cached)} {pad(formatCacheTokens(row.totals, "non-cached"), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(row.totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(row.totals), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(row.totals), MODEL_USAGE_COLUMNS.value)}
+            {pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} {pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} {pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(row.totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(row.totals), OPENAI_MODEL_USAGE_COLUMNS.value)}
           </Text>
         );
       })}
       <Text color="cyan">
-        {pad("TOTAL", MODEL_USAGE_COLUMNS.model)} {pad(formatInteger(totals.inputTokens), MODEL_USAGE_COLUMNS.input)} {pad(formatCacheTokens(totals, "cached"), MODEL_USAGE_COLUMNS.cached)} {pad(formatCacheTokens(totals, "non-cached"), MODEL_USAGE_COLUMNS.nonCached)} {pad(formatInteger(totals.outputTokens), MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(totals), MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(totals), MODEL_USAGE_COLUMNS.value)}
+        {pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} {pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} {pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} {pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} {pad(formatUsageCredits(totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} {pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}
       </Text>
     </Box>
   );
@@ -513,16 +555,43 @@ function DayToDayPanel(props: { stats: ProviderStats; selectedDayKey?: string })
     return <Text color="gray">No day-by-day usage found.</Text>;
   }
 
+  const totals = props.stats.summary.totals;
+  if (totals.tokenBreakdown.schema === "anthropic") {
+    return (
+      <Box flexDirection="column">
+        <Text color="gray">
+          {pad("day", ANTHROPIC_DAY_USAGE_COLUMNS.day)} {pad("events", ANTHROPIC_DAY_USAGE_COLUMNS.events)} {pad("input", ANTHROPIC_DAY_USAGE_COLUMNS.input)} {pad("cacheW5m", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} {pad("cacheW1h", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} {pad("cacheRead", ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} {pad("output", ANTHROPIC_DAY_USAGE_COLUMNS.output)} value
+        </Text>
+        {props.stats.dayUsage.map((row) => {
+          const isSelected = props.selectedDayKey === row.dayKey;
+          if (row.totals.tokenBreakdown.schema !== "anthropic") {
+            return null;
+          }
+
+          return (
+            <Text key={row.dayKey} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
+              {pad(formatUtcDay(row.dayKey), ANTHROPIC_DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), ANTHROPIC_DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} {pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} {pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} {pad(formatInteger(row.totals.outputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.output)} {pad(formatUsageUsd(row.totals), ANTHROPIC_DAY_USAGE_COLUMNS.value)}
+            </Text>
+          );
+        })}
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column">
       <Text color="gray">
-        {pad("day", DAY_USAGE_COLUMNS.day)} {pad("events", DAY_USAGE_COLUMNS.events)} {pad("input", DAY_USAGE_COLUMNS.input)} {pad("output", DAY_USAGE_COLUMNS.output)} value
+        {pad("day", OPENAI_DAY_USAGE_COLUMNS.day)} {pad("events", OPENAI_DAY_USAGE_COLUMNS.events)} {pad("input", OPENAI_DAY_USAGE_COLUMNS.input)} {pad("output", OPENAI_DAY_USAGE_COLUMNS.output)} value
       </Text>
       {props.stats.dayUsage.map((row) => {
         const isSelected = props.selectedDayKey === row.dayKey;
+        if (row.totals.tokenBreakdown.schema !== "openai") {
+          return null;
+        }
+
         return (
           <Text key={row.dayKey} inverse={isSelected} color={isSelected ? "cyan" : undefined}>
-            {pad(formatUtcDay(row.dayKey), DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.inputTokens), DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.outputTokens), DAY_USAGE_COLUMNS.output)} {pad(formatUsageUsd(row.totals), DAY_USAGE_COLUMNS.value)}
+            {pad(formatUtcDay(row.dayKey), OPENAI_DAY_USAGE_COLUMNS.day)} {pad(formatInteger(row.totals.eventCount), OPENAI_DAY_USAGE_COLUMNS.events)} {pad(formatInteger(row.totals.inputTotalTokens), OPENAI_DAY_USAGE_COLUMNS.input)} {pad(formatInteger(row.totals.outputTokens), OPENAI_DAY_USAGE_COLUMNS.output)} {pad(formatUsageUsd(row.totals), OPENAI_DAY_USAGE_COLUMNS.value)}
           </Text>
         );
       })}
@@ -566,8 +635,6 @@ function SelectionDetailsPanel(props: {
           day: {formatUtcDay(row.dayKey)}  events: {formatInteger(row.totals.eventCount)}  models: {formatInteger(row.distinctModels.length)}  plans: {formatInteger(row.distinctPlanTypes.length)}
         </Text>
         <Text>range: {formatEventRange(row.firstEventUtcIso, row.lastEventUtcIso)}</Text>
-        <Text>input: {formatInteger(row.totals.inputTokens)}  cached: {formatCacheTokens(row.totals, "cached")}</Text>
-        <Text>non-cached: {formatCacheTokens(row.totals, "non-cached")}  output: {formatInteger(row.totals.outputTokens)}</Text>
         <Text>models: {row.distinctModels.join(", ") || "none"}</Text>
         <Text>plans: {row.distinctPlanTypes.join(", ") || "none"}</Text>
         <UsageTotalsDetails totals={row.totals} />
@@ -592,12 +659,12 @@ function SelectionDetailsPanel(props: {
 
 function UsageTotalsDetails(props: { totals: UsageTotals }): React.JSX.Element {
   const { totals } = props;
-  const inputPerOutput = formatInputPerOutput(totals);
   return (
     <Box flexDirection="column">
+      <UsageBreakdownLines totals={totals} />
       <Text>Total credits burned: {formatUsageCredits(totals)}</Text>
       <Text>Credits Value (@ $0.01/credit): {formatUsageUsd(totals)}</Text>
-      <Text>IpO: {inputPerOutput.cached}:{inputPerOutput.nonCached}:{inputPerOutput.output}</Text>
+      <Text>IpO: {formatInputPerOutput(totals)}</Text>
     </Box>
   );
 }
@@ -625,14 +692,6 @@ function formatUsageUsd(totals: UsageTotals): string {
   return totals.estimatedCreditsStatus === "unavailable"
     ? "unknown"
     : formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD);
-}
-
-function formatCacheTokens(totals: UsageTotals, kind: "cached" | "non-cached"): string {
-  if (totals.cacheStatus === "unavailable") {
-    return "unknown";
-  }
-
-  return formatInteger(kind === "cached" ? totals.cachedInputTokens : totals.nonCachedInputTokens);
 }
 
 function formatUsd(value: number): string {
@@ -700,20 +759,55 @@ function pad(value: string, length: number): string {
   return value.length >= length ? value.slice(0, length) : value.padEnd(length);
 }
 
-function formatInputPerOutput(totals: UsageTotals): { cached: string; nonCached: string; output: string } {
-  if (totals.cacheStatus === "unavailable") {
-    return { cached: "unknown", nonCached: "unknown", output: "1" };
+function UsageBreakdownLines(props: { totals: UsageTotals }): React.JSX.Element {
+  const { totals } = props;
+  if (totals.tokenBreakdown.schema === "anthropic") {
+    return (
+      <Box flexDirection="column">
+        <Text>
+          input total: {formatInteger(totals.inputTotalTokens)}  input: {formatInteger(totals.tokenBreakdown.inputTokens)}  cacheW5m: {formatInteger(totals.tokenBreakdown.cacheWrite5mInputTokens)}
+        </Text>
+        <Text>
+          cacheW1h: {formatInteger(totals.tokenBreakdown.cacheWrite1hInputTokens)}  cacheRead: {formatInteger(totals.tokenBreakdown.cacheReadInputTokens)}  output: {formatInteger(totals.outputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
+        </Text>
+      </Box>
+    );
   }
 
+  return (
+    <Box flexDirection="column">
+      <Text>
+        input total: {formatInteger(totals.inputTotalTokens)}  uncached: {formatOpenAiTokens(totals, "non-cached")}  cached: {formatOpenAiTokens(totals, "cached")}
+      </Text>
+      <Text>
+        output: {formatInteger(totals.outputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
+      </Text>
+    </Box>
+  );
+}
+
+function formatOpenAiTokens(totals: UsageTotals, kind: "non-cached" | "cached"): string {
+  if (totals.tokenBreakdown.schema !== "openai" || totals.cacheStatus === "unavailable") {
+    return "unknown";
+  }
+
+  return formatInteger(kind === "non-cached" ? totals.tokenBreakdown.nonCachedInputTokens : totals.tokenBreakdown.cachedInputTokens);
+}
+
+function formatInputPerOutput(totals: UsageTotals): string {
   if (totals.outputTokens <= 0) {
-    return { cached: "0", nonCached: "0", output: "0" };
+    return totals.tokenBreakdown.schema === "anthropic" ? "input:cacheW5m:cacheW1h:cacheRead:output = 0:0:0:0:0" : "uncached:cached:output = 0:0:0";
   }
 
-  return {
-    cached: formatInteger(Math.round(totals.cachedInputTokens / totals.outputTokens)),
-    nonCached: formatInteger(Math.round(totals.nonCachedInputTokens / totals.outputTokens)),
-    output: "1"
-  };
+  if (totals.tokenBreakdown.schema === "anthropic") {
+    return `input:cacheW5m:cacheW1h:cacheRead:output = ${formatInteger(Math.round(totals.tokenBreakdown.inputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cacheWrite5mInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cacheWrite1hInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cacheReadInputTokens / totals.outputTokens))}:1`;
+  }
+
+  if (totals.cacheStatus === "unavailable") {
+    return "uncached:cached:output = unknown:unknown:1";
+  }
+
+  return `uncached:cached:output = ${formatInteger(Math.round(totals.tokenBreakdown.nonCachedInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cachedInputTokens / totals.outputTokens))}:1`;
 }
 
 function clampSelectionIndex(value: number, rowCount: number): number {
@@ -741,7 +835,7 @@ function providerUsageScore(state: ProviderLoadState): number {
   }
 
   const totals = state.stats.summary.totals;
-  return totals.inputTokens + totals.cachedInputTokens + totals.outputTokens;
+  return totals.inputTotalTokens + totals.outputTokens;
 }
 
 function getLimitRows(providerState: ProviderLoadState): LimitWindowRow[] {

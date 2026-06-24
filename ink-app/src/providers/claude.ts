@@ -241,16 +241,14 @@ function creditsFor(modelId: string, usage: ClaudeUsage): number {
     return 0;
   }
 
-  const cacheWriteKnownTokens = usage.cacheCreation5mInputTokens + usage.cacheCreation1hInputTokens;
-  const cacheWriteFallbackTokens = Math.max(0, usage.cacheCreationInputTokens - cacheWriteKnownTokens);
+  const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
   const inferenceMultiplier = usage.inferenceGeo === "us" ? 1.1 : 1;
 
   return (
     ((usage.inputTokens / 1_000_000) * rate.input +
       (usage.cacheReadInputTokens / 1_000_000) * rate.cacheRead +
-      (usage.cacheCreation5mInputTokens / 1_000_000) * rate.cacheWrite5m +
-      (usage.cacheCreation1hInputTokens / 1_000_000) * rate.cacheWrite1h +
-      (cacheWriteFallbackTokens / 1_000_000) * rate.cacheWrite5m +
+      (cacheWriteBreakdown.cacheWrite5mInputTokens / 1_000_000) * rate.cacheWrite5m +
+      (cacheWriteBreakdown.cacheWrite1hInputTokens / 1_000_000) * rate.cacheWrite1h +
       (usage.outputTokens / 1_000_000) * rate.output) *
     inferenceMultiplier *
     USD_TO_CREDITS
@@ -258,26 +256,49 @@ function creditsFor(modelId: string, usage: ClaudeUsage): number {
 }
 
 function usageToTotals(modelId: string, usage: ClaudeUsage): UsageTotals {
-  const nonCachedInputTokens = usage.inputTokens + usage.cacheCreationInputTokens;
-  const cachedInputTokens = usage.cacheReadInputTokens;
+  const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
+  const inputTotalTokens =
+    usage.inputTokens +
+    cacheWriteBreakdown.cacheWrite5mInputTokens +
+    cacheWriteBreakdown.cacheWrite1hInputTokens +
+    usage.cacheReadInputTokens;
 
   return {
-    inputTokens: nonCachedInputTokens + cachedInputTokens,
-    cachedInputTokens,
-    nonCachedInputTokens,
+    inputTotalTokens,
     outputTokens: usage.outputTokens,
     reasoningOutputTokens: 0,
-    totalTokens: nonCachedInputTokens + cachedInputTokens + usage.outputTokens,
+    totalTokens: inputTotalTokens + usage.outputTokens,
     estimatedCredits: creditsFor(modelId, usage),
-    eventCount: 1
+    eventCount: 1,
+    tokenBreakdown: {
+      schema: "anthropic",
+      inputTokens: usage.inputTokens,
+      cacheWrite5mInputTokens: cacheWriteBreakdown.cacheWrite5mInputTokens,
+      cacheWrite1hInputTokens: cacheWriteBreakdown.cacheWrite1hInputTokens,
+      cacheReadInputTokens: usage.cacheReadInputTokens,
+      outputTokens: usage.outputTokens
+    }
   };
 }
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("anthropic");
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
+}
+
+function resolveClaudeCacheWriteBreakdown(usage: ClaudeUsage): {
+  cacheWrite5mInputTokens: number;
+  cacheWrite1hInputTokens: number;
+} {
+  const cacheWriteKnownTokens = usage.cacheCreation5mInputTokens + usage.cacheCreation1hInputTokens;
+  const cacheWriteFallbackTokens = Math.max(0, usage.cacheCreationInputTokens - cacheWriteKnownTokens);
+
+  return {
+    cacheWrite5mInputTokens: usage.cacheCreation5mInputTokens + cacheWriteFallbackTokens,
+    cacheWrite1hInputTokens: usage.cacheCreation1hInputTokens
+  };
 }
 
 function isSessionFile(filePath: string): boolean {

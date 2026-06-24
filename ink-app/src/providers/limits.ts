@@ -1,5 +1,6 @@
 import {
   addUsageTotals,
+  cloneUsageTotals,
   createEmptyUsageTotals,
   type LimitWindowRow,
   type LimitWindowScope,
@@ -118,7 +119,7 @@ function collapseNearbyWindows(rows: LimitWindowRow[]): LimitWindowRow[] {
     if (!existing) {
       collapsed.set(key, {
         ...row,
-        totals: { ...row.totals }
+        totals: cloneUsageTotals(row.totals)
       });
       continue;
     }
@@ -149,7 +150,7 @@ function computeWindowTotals(
 ): UsageTotals {
   // Session files are not guaranteed to be parsed in timestamp order, so
   // saturation has to be applied after we sort the captured window events.
-  const totals = createEmptyUsageTotals();
+  const totals = createEmptyUsageTotals(events[0]?.totals.tokenBreakdown.schema ?? "openai");
   let sawBelowCap = false;
   let isExhausted = false;
 
@@ -201,7 +202,7 @@ function upsertWindow(
       lastSeenMs: eventTimeMs,
       minUsedPercent: usedPercent,
       maxUsedPercent: usedPercent,
-      events: [{ eventTimeMs, usedPercent, totals: { ...deltaTotals } }]
+      events: [{ eventTimeMs, usedPercent, totals: cloneUsageTotals(deltaTotals) }]
     });
     return;
   }
@@ -212,5 +213,5 @@ function upsertWindow(
   existing.lastSeenMs = Math.max(existing.lastSeenMs, eventTimeMs);
   existing.minUsedPercent = Math.min(existing.minUsedPercent, usedPercent);
   existing.maxUsedPercent = Math.max(existing.maxUsedPercent, usedPercent);
-  existing.events.push({ eventTimeMs, usedPercent, totals: { ...deltaTotals } });
+  existing.events.push({ eventTimeMs, usedPercent, totals: cloneUsageTotals(deltaTotals) });
 }

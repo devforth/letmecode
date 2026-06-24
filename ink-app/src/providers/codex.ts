@@ -166,26 +166,28 @@ function creditsFor(modelId: string, usage: RawUsage): number {
     return 0;
   }
 
-  const cachedInputTokens = Math.min(usage.cachedInputTokens, usage.inputTokens);
-  const nonCachedInputTokens = Math.max(0, usage.inputTokens - cachedInputTokens);
   return (
-    (nonCachedInputTokens / 1_000_000) * rate.input +
-    (cachedInputTokens / 1_000_000) * rate.cachedInput +
+    (usage.inputTokens / 1_000_000) * rate.input +
+    (usage.cachedInputTokens / 1_000_000) * rate.cachedInput +
     (usage.outputTokens / 1_000_000) * rate.output
   );
 }
 
 function rawUsageToTotals(usage: RawUsage): UsageTotals {
-  const cachedInputTokens = Math.min(usage.cachedInputTokens, usage.inputTokens);
+  const inputTotalTokens = usage.inputTokens + usage.cachedInputTokens;
   return {
-    inputTokens: usage.inputTokens,
-    cachedInputTokens,
-    nonCachedInputTokens: Math.max(0, usage.inputTokens - cachedInputTokens),
+    inputTotalTokens,
     outputTokens: usage.outputTokens,
     reasoningOutputTokens: usage.reasoningOutputTokens,
-    totalTokens: usage.totalTokens,
+    totalTokens: inputTotalTokens + usage.outputTokens,
     estimatedCredits: 0,
-    eventCount: 0
+    eventCount: 0,
+    tokenBreakdown: {
+      schema: "openai",
+      nonCachedInputTokens: usage.inputTokens,
+      cachedInputTokens: usage.cachedInputTokens,
+      outputTokens: usage.outputTokens
+    }
   };
 }
 
@@ -199,7 +201,7 @@ function createUsageTotalsForModel(modelId: string, usage: RawUsage): UsageTotal
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("openai");
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
 }

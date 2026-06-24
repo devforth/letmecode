@@ -179,9 +179,9 @@ test("CopilotUsageProvider parses only VS Code OTEL usage and ignores old sessio
     assert.equal(stats.providerLabel, "Copilot");
     assert.equal(stats.summary.filesScanned, 1);
     assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 30);
-    assert.equal(stats.summary.totals.cachedInputTokens, 5);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 25);
+    assert.equal(stats.summary.totals.inputTotalTokens, 30);
+    assert.equal(stats.summary.totals.tokenBreakdown.nonCachedInputTokens, 25);
+    assert.equal(stats.summary.totals.tokenBreakdown.cachedInputTokens, 5);
     assert.equal(stats.summary.totals.outputTokens, 7);
     assert.equal(stats.summary.totals.reasoningOutputTokens, 0);
     assert.equal(stats.summary.totals.estimatedCredits, 0);
@@ -226,7 +226,7 @@ test("CopilotUsageProvider ignores generic OTLP log envelopes", async () => {
     const stats = await new CopilotUsageProvider({ root }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
-    assert.equal(stats.summary.totals.cachedInputTokens, 0);
+    assert.equal(stats.summary.totals.tokenBreakdown.cachedInputTokens, 0);
     assert.equal(stats.dayUsage.length, 0);
   });
 });
@@ -262,8 +262,8 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
     const stats = await new CopilotUsageProvider({ root }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
-    assert.equal(stats.summary.totals.inputTokens, 0);
-    assert.equal(stats.summary.totals.cachedInputTokens, 0);
+    assert.equal(stats.summary.totals.inputTotalTokens, 0);
+    assert.equal(stats.summary.totals.tokenBreakdown.cachedInputTokens, 0);
     assert.equal(stats.dayUsage.length, 0);
   });
 });
@@ -385,9 +385,9 @@ test("CopilotUsageProvider reads dotted cache attributes and Claude cache-write 
     const stats = await new CopilotUsageProvider({ root }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 100000);
-    assert.equal(stats.summary.totals.cachedInputTokens, 20000);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 80000);
+    assert.equal(stats.summary.totals.inputTotalTokens, 100000);
+    assert.equal(stats.summary.totals.tokenBreakdown.cachedInputTokens, 20000);
+    assert.equal(stats.summary.totals.tokenBreakdown.nonCachedInputTokens, 70000);
     assert.equal(stats.summary.totals.outputTokens, 1000);
     assert.equal(stats.summary.totals.reasoningOutputTokens, 1000);
     assert.equal(stats.summary.totals.totalTokens, 101000);
@@ -454,7 +454,7 @@ test("CopilotUsageProvider treats Copilot NES and suggestion models as non-billa
     const stats = await new CopilotUsageProvider({ root }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
-    assert.equal(stats.summary.totals.inputTokens, 3000);
+    assert.equal(stats.summary.totals.inputTotalTokens, 3000);
     assert.equal(stats.summary.totals.outputTokens, 50);
     assert.equal(stats.summary.totals.estimatedCredits, 0);
     assert.equal(byModel.get("copilot-nes")?.estimatedCredits, 0);
@@ -543,7 +543,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
     const stats = await new CopilotUsageProvider({ root }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 84275);
+    assert.equal(stats.summary.totals.inputTotalTokens, 84275);
     assert.deepEqual(stats.modelUsage.map((row) => row.modelId), ["gpt-5.4-2026-03-01"]);
   });
 });
@@ -668,13 +668,14 @@ test("CodexUsageProvider returns valid ProviderStats", async () => {
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
-    assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 20);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens, 120);
+    assert.equal(stats.primaryLimitWindows[0].totals.tokenBreakdown.nonCachedInputTokens, 100);
+    assert.equal(stats.primaryLimitWindows[0].totals.tokenBreakdown.cachedInputTokens, 20);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 10);
     assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
     assert.equal(stats.dayUsage.length, 1);
     assert.equal(stats.dayUsage[0].dayKey, "2026-06-18");
-    assert.equal(stats.dayUsage[0].totals.inputTokens, 100);
+    assert.equal(stats.dayUsage[0].totals.inputTotalTokens, 120);
     assert.deepEqual(stats.dayUsage[0].distinctModels, ["gpt-5.5"]);
     assert.deepEqual(stats.dayUsage[0].distinctPlanTypes, ["team"]);
     assert.deepEqual(stats.secondaryLimitWindows, []);
@@ -729,13 +730,13 @@ test("CodexUsageProvider groups usage into descending day buckets", async () => 
       stats.dayUsage.map((row) => row.dayKey),
       ["2026-06-19", "2026-06-18"]
     );
-    assert.equal(stats.dayUsage[0].totals.inputTokens, 80);
-    assert.equal(stats.dayUsage[0].totals.cachedInputTokens, 20);
+    assert.equal(stats.dayUsage[0].totals.inputTotalTokens, 100);
+    assert.equal(stats.dayUsage[0].totals.tokenBreakdown.cachedInputTokens, 20);
     assert.equal(stats.dayUsage[0].totals.outputTokens, 10);
     assert.deepEqual(stats.dayUsage[0].distinctPlanTypes, ["plus"]);
     assert.equal(stats.dayUsage[0].firstEventUtcIso, "2026-06-19T08:00:01Z");
     assert.equal(stats.dayUsage[0].lastEventUtcIso, "2026-06-19T08:00:01Z");
-    assert.equal(stats.dayUsage[1].totals.inputTokens, 100);
+    assert.equal(stats.dayUsage[1].totals.inputTotalTokens, 120);
     assert.deepEqual(stats.dayUsage[1].distinctPlanTypes, ["team"]);
   });
 });
@@ -831,9 +832,9 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
     assert.equal(stats.summary.linesRead, lines.length);
     assert.equal(stats.summary.tokenEvents, 9);
     assert.equal(stats.summary.totals.eventCount, 9);
-    assert.equal(stats.summary.totals.inputTokens, 360);
-    assert.equal(stats.summary.totals.cachedInputTokens, 100);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 260);
+    assert.equal(stats.summary.totals.inputTotalTokens, 460);
+    assert.equal(stats.summary.totals.tokenBreakdown.cachedInputTokens, 100);
+    assert.equal(stats.summary.totals.tokenBreakdown.nonCachedInputTokens, 360);
     assert.equal(stats.summary.totals.outputTokens, 61);
     assert.equal(stats.summary.distinctModels.includes("gpt-5.5"), true);
     assert.equal(stats.summary.distinctModels.includes("gpt-5.4-mini"), true);
@@ -847,7 +848,7 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
     assert.equal(stats.secondaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.primaryLimitWindows[0].eventCount, stats.primaryLimitWindows[0].totals.eventCount);
     assert.equal(stats.secondaryLimitWindows[0].eventCount, stats.secondaryLimitWindows[0].totals.eventCount);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens > 0, true);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens > 0, true);
     assert.equal(stats.warnings.some((warning) => warning.includes("malformed")), true);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-9")), true);
   });
@@ -918,12 +919,12 @@ test("limit window totals stop accumulating after a seen window first reaches 10
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 99);
     assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 100);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 220);
-    assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 40);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens, 260);
+    assert.equal(stats.primaryLimitWindows[0].totals.tokenBreakdown.cachedInputTokens, 40);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 25);
     assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 2);
-    assert.equal(stats.summary.totals.inputTokens, 360);
-    assert.equal(stats.summary.totals.cachedInputTokens, 70);
+    assert.equal(stats.summary.totals.inputTotalTokens, 430);
+    assert.equal(stats.summary.totals.tokenBreakdown.cachedInputTokens, 70);
     assert.equal(stats.summary.totals.outputTokens, 40);
     assert.equal(stats.summary.totals.eventCount, 3);
   });
@@ -991,8 +992,8 @@ test("limit window saturation is based on event timestamps, not parse order", as
 
     const stats = await new CodexUsageProvider({ root }).getStats();
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 220);
-    assert.equal(stats.primaryLimitWindows[0].totals.cachedInputTokens, 40);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens, 260);
+    assert.equal(stats.primaryLimitWindows[0].totals.tokenBreakdown.cachedInputTokens, 40);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 25);
     assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 2);
   });
@@ -1067,19 +1068,21 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
     assert.equal(stats.providerLabel, "Claude");
     assert.equal(stats.summary.filesScanned, 1);
     assert.equal(stats.summary.tokenEvents, 2);
-    assert.equal(stats.summary.totals.inputTokens, 250);
-    assert.equal(stats.summary.totals.cachedInputTokens, 80);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 170);
+    assert.equal(stats.summary.totals.inputTotalTokens, 250);
+    assert.equal(stats.summary.totals.tokenBreakdown.inputTokens, 140);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheWrite5mInputTokens, 20);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheWrite1hInputTokens, 10);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheReadInputTokens, 80);
     assert.equal(stats.summary.totals.outputTokens, 15);
     assert.equal(stats.modelUsage.length, 2);
     assert.deepEqual(
       stats.dayUsage.map((row) => row.dayKey),
       ["2026-06-19", "2026-06-18"]
     );
-    assert.equal(stats.dayUsage[0].totals.inputTokens, 80);
+    assert.equal(stats.dayUsage[0].totals.inputTotalTokens, 80);
     assert.equal(stats.dayUsage[0].totals.outputTokens, 5);
     assert.deepEqual(stats.dayUsage[0].distinctPlanTypes, []);
-    assert.equal(stats.dayUsage[1].totals.inputTokens, 170);
+    assert.equal(stats.dayUsage[1].totals.inputTotalTokens, 170);
     assert.deepEqual(stats.dayUsage[1].distinctPlanTypes, ["max"]);
     assert.deepEqual(
       stats.modelUsage.map((row) => row.modelId).sort(),
@@ -1087,7 +1090,7 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
     );
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens, 170);
     assert.equal(stats.summary.distinctPlanTypes.includes("max"), true);
     assert.deepEqual(stats.secondaryLimitWindows, []);
     assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), false);
@@ -1133,12 +1136,14 @@ test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of firs
 
     const stats = await new ClaudeUsageProvider({ root }).getStats();
     assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 170);
-    assert.equal(stats.summary.totals.cachedInputTokens, 50);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 120);
+    assert.equal(stats.summary.totals.inputTotalTokens, 170);
+    assert.equal(stats.summary.totals.tokenBreakdown.inputTokens, 100);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheWrite5mInputTokens, 20);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheWrite1hInputTokens, 0);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheReadInputTokens, 50);
     assert.equal(stats.summary.totals.outputTokens, 10);
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 170);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTotalTokens, 170);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("highest-cost/latest event per key")),
       false
@@ -1175,9 +1180,11 @@ test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", as
 
     const stats = await new ClaudeUsageProvider({ root }).getStats();
     assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 80);
-    assert.equal(stats.summary.totals.cachedInputTokens, 30);
-    assert.equal(stats.summary.totals.nonCachedInputTokens, 50);
+    assert.equal(stats.summary.totals.inputTotalTokens, 80);
+    assert.equal(stats.summary.totals.tokenBreakdown.inputTokens, 40);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheWrite5mInputTokens, 0);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheWrite1hInputTokens, 10);
+    assert.equal(stats.summary.totals.tokenBreakdown.cacheReadInputTokens, 30);
     assert.equal(stats.summary.totals.outputTokens, 5);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate unkeyed Claude usage event")),

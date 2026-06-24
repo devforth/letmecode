@@ -320,16 +320,24 @@ function isCopilotChatSpan(attributes: Record<string, unknown>): boolean {
 function createUsageTotals(modelId: string, usage: CopilotRawUsage): UsageTotals {
   const hasCacheInfo = usage.cachedInputTokens !== undefined || usage.cacheCreationInputTokens !== undefined;
   const hasKnownCreditPricing = isNonBillableModel(modelId) || (hasCacheInfo && rateForModel(modelId, usage.inputTokens) !== undefined);
-  const cachedInputTokens = hasCacheInfo ? Math.min(usage.cachedInputTokens ?? 0, usage.inputTokens) : 0;
+  const cachedInputTokens = hasCacheInfo ? Math.max(0, usage.cachedInputTokens ?? 0) : 0;
+  const cacheWriteInputTokens = hasCacheInfo ? Math.max(0, usage.cacheCreationInputTokens ?? 0) : 0;
+  const uncachedInputTokens = hasCacheInfo
+    ? Math.max(0, usage.inputTokens - cachedInputTokens - cacheWriteInputTokens)
+    : 0;
   return {
-    inputTokens: usage.inputTokens,
-    cachedInputTokens,
-    nonCachedInputTokens: hasCacheInfo ? Math.max(0, usage.inputTokens - cachedInputTokens) : 0,
+    inputTotalTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     reasoningOutputTokens: Math.min(usage.reasoningOutputTokens ?? 0, usage.outputTokens),
     totalTokens: usage.inputTokens + usage.outputTokens,
     estimatedCredits: creditsFor(modelId, usage),
     eventCount: 1,
+    tokenBreakdown: {
+      schema: "openai",
+      nonCachedInputTokens: uncachedInputTokens,
+      cachedInputTokens,
+      outputTokens: usage.outputTokens
+    },
     cacheStatus: hasCacheInfo ? "known" : "unavailable",
     estimatedCreditsStatus: hasKnownCreditPricing ? "known" : "unavailable"
   };
@@ -381,7 +389,7 @@ function isNonBillableModel(modelId: string): boolean {
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("openai");
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
 }

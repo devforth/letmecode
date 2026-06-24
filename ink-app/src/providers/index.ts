@@ -19,12 +19,16 @@ export type {
 } from "./copilot.js";
 export { UsageProviderBase } from "./contract.js";
 export type {
+  AnthropicTokenBreakdown,
   DailyUsageRow,
   LimitWindowRow,
   LimitWindowScope,
   ModelUsageRow,
+  OpenAiTokenBreakdown,
   ProviderStats,
   ProviderStatsOptions,
   ProviderSummary,
+  UsageTokenBreakdown,
+  UsageTokenSchema,
   UsageTotals
 } from "./contract.js";
