@@ -704,6 +704,13 @@ function describeUsageOutput(output: string | null): string {
   return output.trim() ? output : "<empty>";
 }
 
+function buildClaudeCommandEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    TZ: "UTC"
+  };
+}
+
 async function buildLiveLimitWindows(options: {
   root: string;
   usageCommandKind: ClaudeUsageCommandKind;
@@ -793,9 +800,10 @@ async function readClaudeAuthStatusOutput(
     }
 
     try {
-      traceClaude(traceLogger, usageCommandKind, `Running auth status command with ${binaryPath}.`);
+      traceClaude(traceLogger, usageCommandKind, `Running auth status command with ${binaryPath} (TZ=UTC).`);
       const { stdout, stderr } = await execFileAsync(binaryPath, ["auth", "status"], {
         encoding: "utf8",
+        env: buildClaudeCommandEnvironment(),
         maxBuffer: 1024 * 1024,
         timeout: 15_000,
         windowsHide: true
@@ -907,9 +915,10 @@ async function readClaudeUsageCommandOutput(
     }
 
     try {
-      traceClaude(traceLogger, usageCommandKind, `Running /usage command with ${binaryPath}.`);
+      traceClaude(traceLogger, usageCommandKind, `Running /usage command with ${binaryPath} (TZ=UTC).`);
       const { stdout, stderr } = await execFileAsync(binaryPath, ["-p", "/usage"], {
         encoding: "utf8",
+        env: buildClaudeCommandEnvironment(),
         maxBuffer: 1024 * 1024,
         timeout: 15_000,
         windowsHide: true

@@ -1720,6 +1720,93 @@ exit 1
   });
 });
 
+test("ClaudeUsageProvider forces TZ=UTC for Claude command execution", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/kyiv-session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T15:30:00.000Z",
+        requestId: "req-kyiv-session",
+        messageId: "msg-kyiv-session",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 120,
+        outputTokens: 12
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-24T10:00:00.000Z",
+        requestId: "req-kyiv-week",
+        messageId: "msg-kyiv-week",
+        entrypoint: "claude-vscode",
+        model: "claude-opus-4-8",
+        inputTokens: 80,
+        outputTokens: 8
+      })
+    ]);
+
+    const vscodeBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-2.1.191-linux-x64",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+    await writeExecutable(
+      vscodeBinary,
+      `#!/bin/sh
+if [ "$TZ" != "UTC" ]; then
+  echo "TZ was not forced to UTC: ${"$"}TZ" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+cat <<'EOF'
+{
+  "loggedIn": true,
+  "email": "kyiv@example.com",
+  "orgId": "org-kyiv",
+  "orgName": "Kyiv Org",
+  "subscriptionType": "team"
+}
+EOF
+exit 0
+fi
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
+cat <<'EOF'
+Current session: 26% used · resets Jun 25, 6:50pm (UTC)
+Current week (all models): 34% used · resets Jun 28, 8pm (UTC)
+EOF
+exit 0
+fi
+echo "unexpected args: ${"$"}*" >&2
+exit 1
+`
+    );
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode",
+      now: () => new Date("2026-06-25T14:19:42.154Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].planType, "team");
+    assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 26);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 26);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 120);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 12);
+    assert.equal(stats.secondaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 34);
+    assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 34);
+    assert.equal(stats.secondaryLimitWindows[0].totals.inputTokens, 200);
+    assert.equal(stats.secondaryLimitWindows[0].totals.outputTokens, 20);
+  });
+});
+
 test("ClaudeUsageProvider finds Linux Claude sessions under ~/.config/claude/projects", async () => {
   await withTempRoot(async (root) => {
     const sessionsRoot = path.join(root, ".config", "claude", "projects");
