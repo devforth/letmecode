@@ -20,6 +20,7 @@ npx -y letmecode
 | `1` | Select the Copilot VS Code setup action |
 | `h` / `l` | Select a Copilot setup action |
 | `q` or `Esc` | Quit |
+| Mouse click | Click a provider tab or a section tab to switch to it. Hold `Shift` while dragging to select/copy text anywhere else. |
 
 ## Copilot
 
