@@ -5,22 +5,17 @@ description: Prepare and publish a new letmecode npm release from /home/ivan/cod
 
 # Letmecode Release
 
-1. Verify in this order:
+1. The source of truth for this skill is this repo path: `skills/letmecode-release/`. Do not edit or create the release skill under `~/.codex/skills` when changing this project.
+2. Check the live version first with `npm view letmecode version`.
+3. Read the local version from `package.json`.
+4. Mandatory versioning rule: bump `package.json` patch version to one patch above the higher of the live npm version and the current local version. Never publish the current version unchanged. Keep `bin.letmecode` as `./bin/letmecode.js`.
+5. Commit after bump with `git commit -am "Bump version to $VERSION"`.
+6. Verify in this order:
    - `pnpm test`
    - `npm pack --dry-run`
    - `pnpm start` in a PTY, wait for the dashboard, then quit with `q`
-2. Check the live version first with `npm view letmecode version`.
-3. Bump `package.json` to the next version. Keep `bin.letmecode` as `./bin/letmecode.js`.
-4. Commit after bump with `git commit -am "Bump version to $VERSION"`.
-5. If `npm whoami` returns `401`, run `npm login` and ask user to click the link to log in. npm login returns a link to authenticate user account at.
-
-Important: ensure you run npm login in interactive mode so npm understands you are a human, otherwise it will quately fail with EOTP. You need to connect to interactive terminal. ALso SET Browser environment variable to your browser path, e.g. `export BROWSER=/dump`.
-Attach to PTY, read a link https://www.npmjs.com/auth/cli/xxxx, from STDOUT and attach it in agent message to user (clickable markdown link), ask user to click the link to log in. 
-
-6. Publish with `npm publish`, send user link to congirm.
-npm publish returns same link as npm login, do same.
-
-Important: ensure you run npm publish in interactive mode so npm understands you are a human, otherwise it will quately fail with EOTP. You need to connect to interactive terminal. ALso SET Browser environment variable to your browser path, e.g. `export BROWSER=/dump`.
-Attach to PTY, read a link https://www.npmjs.com/auth/cli/xxxx, from STDOUT and attach it in agent message to user (clickable markdown link), ask user to click the link to log in. 
-
-7. In the final reply, state the version, whether publish succeeded, and which checks passed.
+7. If `npm whoami` returns `401`, run `npm login` in a PTY with `BROWSER=true`.
+8. If `npm login` or `npm publish` prints an approval URL like `https://www.npmjs.com/auth/cli/...`, keep the PTY session alive and return it to the user as a clickable Markdown link such as `[Approve npm publish](https://www.npmjs.com/auth/cli/...)`. Never return the URL as plain text only. Ask the user to confirm when done, then resume the same session.
+9. Publish with `BROWSER=true npm publish` in a PTY.
+10. After a successful publish, create a git tag for the released version with `git tag v$VERSION`.
+11. In the final reply, state the version, whether publish succeeded, whether the git tag was created, and which checks passed.
