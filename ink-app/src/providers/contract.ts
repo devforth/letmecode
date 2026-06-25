@@ -55,6 +55,11 @@ export type ProviderSummary = {
   rootPath: string;
 };
 
+export type ProviderAnalytics = {
+  agentName: string;
+  userIdHash: string | null;
+};
+
 export type ProviderStats = {
   providerId: string;
   providerLabel: string;
@@ -64,6 +69,7 @@ export type ProviderStats = {
   primaryLimitWindows: LimitWindowRow[];
   secondaryLimitWindows: LimitWindowRow[];
   warnings: string[];
+  analytics?: ProviderAnalytics;
 };
 
 export type ProviderStatsOptions = {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { parse as parseJsonc } from "jsonc-parser";
 import os from "node:os";
@@ -7,6 +8,7 @@ import test from "node:test";
 import { AntigravityUsageProvider } from "../dist/providers/antigravity.js";
 import { ClaudeUsageProvider } from "../dist/providers/claude.js";
 import { CodexUsageProvider } from "../dist/providers/codex.js";
+import { buildAnonymousUsagePayload, buildAnonymousUsageReports } from "../dist/reporting.js";
 import {
   CopilotUsageProvider,
   configureCopilotVsCodeLogging
@@ -32,6 +34,12 @@ async function writeCodexModelsCache(root, models) {
   const target = path.join(root, ".codex", "models_cache.json");
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, JSON.stringify({ models }, null, 2), "utf8");
+}
+
+async function writeCodexAuth(root, payload) {
+  const target = path.join(root, ".codex", "auth.json");
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, JSON.stringify(payload, null, 2), "utf8");
 }
 
 async function writeClaudeSession(root, relativePath, lines) {
@@ -107,11 +115,26 @@ function tokenEvent({
   });
 }
 
+function fakeJwt(payload) {
+  const header = encodeBase64Url(JSON.stringify({ alg: "none", typ: "JWT" }));
+  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
+  return `${header}.${encodedPayload}.signature`;
+}
+
+function encodeBase64Url(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
 function claudeAssistantEvent({
   timestamp,
   requestId,
   messageId,
   model,
+  entrypoint = "sdk-cli",
   inputTokens,
   cacheReadInputTokens = 0,
   cacheCreation5mInputTokens = 0,
@@ -124,6 +147,7 @@ function claudeAssistantEvent({
     sessionId: "claude-session-1",
     requestId,
     timestamp,
+    entrypoint,
     ...(rateLimits ? { rate_limits: rateLimits } : {}),
     message: {
       id: messageId,
@@ -145,15 +169,17 @@ function claudeAssistantEvent({
 
 test("provider registry stays UI-generic", async () => {
   const providers = createProviders();
-  assert.equal(providers.length, 4);
+  assert.equal(providers.length, 5);
   assert.equal(providers[0].id, "codex");
   assert.equal(providers[1].id, "claude");
-  assert.equal(providers[2].id, "copilot");
-  assert.equal(providers[3].id, "antigravity");
+  assert.equal(providers[2].id, "claude-vscode");
+  assert.equal(providers[3].id, "copilot");
+  assert.equal(providers[4].id, "antigravity");
   assert.equal(typeof providers[0].getStats, "function");
   assert.equal(typeof providers[1].getStats, "function");
   assert.equal(typeof providers[2].getStats, "function");
   assert.equal(typeof providers[3].getStats, "function");
+  assert.equal(typeof providers[4].getStats, "function");
 });
 
 test("AntigravityUsageProvider parses one normalized usage record", async () => {
@@ -1285,6 +1311,44 @@ test("missing sessions directory yields empty but friendly stats", async () => {
   });
 });
 
+test("CodexUsageProvider exposes anonymous analytics identity from auth.json", async () => {
+  await withTempRoot(async (root) => {
+    await writeCodexAuth(root, {
+      auth_mode: "chatgpt",
+      tokens: {
+        id_token: fakeJwt({
+          email: "ivan@devforth.io",
+          "https://api.openai.com/auth": {
+            organizations: [
+              { id: "org-devforth", title: "devforth", is_default: true },
+              { id: "org-personal", title: "Personal", is_default: false }
+            ]
+          }
+        })
+      }
+    });
+    await writeSession(root, "2026/06/18/fixture.jsonl", [
+      turnContext("gpt-5.4"),
+      tokenEvent({
+        timestamp: "2026-06-18T20:00:00.000Z",
+        total: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          total_tokens: 110
+        },
+        primary: { used_percent: 3, window_minutes: 300, resets_at: 1780589753 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.deepEqual(stats.analytics, {
+      agentName: "Codex",
+      userIdHash: createHash("md5").update("Codex-ivan@devforth.io-org-devforth-devforth").digest("hex")
+    });
+  });
+});
+
 test("ClaudeUsageProvider dedupes repeated assistant transcript entries and parses optional limit windows", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/session.jsonl", [
@@ -1428,6 +1492,131 @@ test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of firs
   });
 });
 
+test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and builds live usage windows", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/mixed-entrypoints.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-vscode-session",
+        messageId: "msg-vscode-session",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        outputTokens: 10
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-20T14:00:00.000Z",
+        requestId: "req-vscode-week",
+        messageId: "msg-vscode-week",
+        entrypoint: "claude-vscode",
+        model: "claude-opus-4-8",
+        inputTokens: 40,
+        outputTokens: 5
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:00:00.000Z",
+        requestId: "req-cli-session",
+        messageId: "msg-cli-session",
+        entrypoint: "sdk-cli",
+        model: "claude-sonnet-4-5",
+        inputTokens: 70,
+        outputTokens: 7
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:30:00.000Z",
+        requestId: "req-unknown-entrypoint",
+        messageId: "msg-unknown-entrypoint",
+        entrypoint: "mystery-cli",
+        model: "claude-sonnet-4-5",
+        inputTokens: 999,
+        outputTokens: 99
+      })
+    ]);
+
+    const readUsageCommandOutput = async () =>
+      [
+        "Current session: 20% used · resets Jun 25, 12:30pm (UTC)",
+        "Current week (all models): 63% used · resets Jun 25, 12pm (UTC)"
+      ].join("\n");
+    const readAuthStatusOutput = async () =>
+      JSON.stringify(
+        {
+          loggedIn: true,
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+          email: "ivan@devforth.io",
+          orgId: "6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c",
+          orgName: "Devforth",
+          subscriptionType: "team"
+        },
+        null,
+        2
+      );
+    const now = () => new Date("2026-06-25T10:00:00.000Z");
+
+    const vscodeStats = await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode",
+      readUsageCommandOutput,
+      readAuthStatusOutput,
+      now
+    }).getStats();
+
+    assert.equal(vscodeStats.summary.filesScanned, 1);
+    assert.equal(vscodeStats.summary.tokenEvents, 2);
+    assert.equal(vscodeStats.summary.totals.inputTokens, 140);
+    assert.equal(vscodeStats.summary.totals.outputTokens, 15);
+    assert.deepEqual(
+      vscodeStats.modelUsage.map((row) => row.modelId).sort(),
+      ["claude-opus-4-8", "claude-sonnet-4-6"]
+    );
+    assert.equal(vscodeStats.primaryLimitWindows.length, 1);
+    assert.equal(vscodeStats.primaryLimitWindows[0].planType, "team");
+    assert.equal(vscodeStats.primaryLimitWindows[0].windowMinutes, 300);
+    assert.equal(vscodeStats.primaryLimitWindows[0].minUsedPercent, 20);
+    assert.equal(vscodeStats.primaryLimitWindows[0].maxUsedPercent, 20);
+    assert.equal(vscodeStats.primaryLimitWindows[0].totals.inputTokens, 100);
+    assert.equal(vscodeStats.primaryLimitWindows[0].totals.outputTokens, 10);
+    assert.equal(vscodeStats.secondaryLimitWindows.length, 1);
+    assert.equal(vscodeStats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(vscodeStats.secondaryLimitWindows[0].windowMinutes, 10080);
+    assert.equal(vscodeStats.secondaryLimitWindows[0].minUsedPercent, 63);
+    assert.equal(vscodeStats.secondaryLimitWindows[0].maxUsedPercent, 63);
+    assert.equal(vscodeStats.secondaryLimitWindows[0].totals.inputTokens, 140);
+    assert.equal(vscodeStats.secondaryLimitWindows[0].totals.outputTokens, 15);
+    assert.deepEqual(vscodeStats.analytics, {
+      agentName: "ClaudeVSCode",
+      userIdHash: createHash("md5").update("ClaudeVSCode-ivan@devforth.io-6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c-Devforth").digest("hex")
+    });
+
+    const cliStats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput,
+      readAuthStatusOutput,
+      now
+    }).getStats();
+
+    assert.equal(cliStats.summary.filesScanned, 1);
+    assert.equal(cliStats.summary.tokenEvents, 1);
+    assert.equal(cliStats.summary.totals.inputTokens, 70);
+    assert.equal(cliStats.summary.totals.outputTokens, 7);
+    assert.equal(cliStats.primaryLimitWindows.length, 1);
+    assert.equal(cliStats.primaryLimitWindows[0].planType, "team");
+    assert.equal(cliStats.primaryLimitWindows[0].totals.inputTokens, 70);
+    assert.equal(cliStats.secondaryLimitWindows.length, 1);
+    assert.equal(cliStats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(cliStats.secondaryLimitWindows[0].totals.inputTokens, 70);
+    assert.equal(cliStats.warnings.some((warning) => warning.includes("mystery-cli")), false);
+    assert.deepEqual(cliStats.analytics, {
+      agentName: "Claude",
+      userIdHash: createHash("md5").update("Claude-ivan@devforth.io-6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c-Devforth").digest("hex")
+    });
+  });
+});
+
 test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/unkeyed-duplicates.jsonl", [
@@ -1489,4 +1678,214 @@ test("ClaudeUsageProvider suppresses missing-rate warnings for internal syntheti
     assert.equal(syntheticTotals?.estimatedCredits, 0);
     assert.equal(stats.warnings.some((warning) => warning.includes("<synthetic>")), false);
   });
+});
+
+test("buildAnonymousUsageReports derives used percents for saturated and live windows", async () => {
+  const reports = await buildAnonymousUsageReports([
+    {
+      providerId: "codex",
+      providerLabel: "Codex",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          cacheWrite5mInputTokens: 0,
+          cacheWrite1hInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 0,
+          estimatedCredits: 0,
+          eventCount: 0
+        },
+        distinctModels: [],
+        distinctPlanTypes: [],
+        rootLabel: "~/.codex/sessions",
+        rootPath: "/tmp/.codex/sessions"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [
+        {
+          scope: "primary",
+          planType: "team",
+          limitId: "codex",
+          windowMinutes: 300,
+          startTimeUtcIso: "2026-06-25T07:30:00Z",
+          endTimeUtcIso: "2026-06-25T12:30:00Z",
+          firstSeenUtcIso: "2026-06-25T07:35:00Z",
+          lastSeenUtcIso: "2026-06-25T12:25:00Z",
+          minUsedPercent: 3,
+          maxUsedPercent: 100,
+          totals: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            cacheWrite5mInputTokens: 0,
+            cacheWrite1hInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: 0,
+            estimatedCredits: 250,
+            eventCount: 1
+          },
+          eventCount: 1
+        }
+      ],
+      secondaryLimitWindows: [],
+      warnings: [],
+      analytics: {
+        agentName: "Codex",
+        userIdHash: "codex-user"
+      }
+    },
+    {
+      providerId: "claude-vscode",
+      providerLabel: "Claude VSCode",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          cacheWrite5mInputTokens: 0,
+          cacheWrite1hInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 0,
+          estimatedCredits: 0,
+          eventCount: 0
+        },
+        distinctModels: [],
+        distinctPlanTypes: [],
+        rootLabel: "~/.claude/projects",
+        rootPath: "/tmp/.claude/projects"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [
+        {
+          scope: "primary",
+          planType: "team",
+          limitId: "current-session",
+          windowMinutes: 300,
+          startTimeUtcIso: "2026-06-25T07:30:00Z",
+          endTimeUtcIso: "2026-06-25T12:30:00Z",
+          firstSeenUtcIso: "2026-06-25T07:30:00Z",
+          lastSeenUtcIso: "2026-06-25T10:00:00Z",
+          minUsedPercent: 20,
+          maxUsedPercent: 20,
+          totals: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            cacheWrite5mInputTokens: 0,
+            cacheWrite1hInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: 0,
+            estimatedCredits: 50,
+            eventCount: 1
+          },
+          eventCount: 1
+        }
+      ],
+      secondaryLimitWindows: [],
+      warnings: [],
+      analytics: {
+        agentName: "ClaudeVSCode",
+        userIdHash: "claude-user"
+      }
+    }
+  ]);
+
+  assert.equal(reports.length, 2);
+  assert.deepEqual(
+    reports.map((report) => ({
+      agent: report.agent,
+      used_percents: report.used_percents,
+      used_exhausted: report.used_exhausted,
+      value_dollars: report.value_dollars
+    })),
+    [
+      { agent: "Codex", used_percents: 97, used_exhausted: true, value_dollars: 2.5 },
+      { agent: "ClaudeVSCode", used_percents: 20, used_exhausted: false, value_dollars: 0.5 }
+    ]
+  );
+  assert.equal(reports[0].letmecode_version.length > 0, true);
+});
+
+test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
+  const payload = await buildAnonymousUsagePayload([
+    {
+      providerId: "codex",
+      providerLabel: "Codex",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          cacheWrite5mInputTokens: 0,
+          cacheWrite1hInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 0,
+          estimatedCredits: 0,
+          eventCount: 0
+        },
+        distinctModels: [],
+        distinctPlanTypes: [],
+        rootLabel: "~/.codex/sessions",
+        rootPath: "/tmp/.codex/sessions"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [
+        {
+          scope: "primary",
+          planType: "team",
+          limitId: "codex",
+          windowMinutes: 300,
+          startTimeUtcIso: "2026-06-25T07:30:00Z",
+          endTimeUtcIso: "2026-06-25T12:30:00Z",
+          firstSeenUtcIso: "2026-06-25T07:35:00Z",
+          lastSeenUtcIso: "2026-06-25T12:25:00Z",
+          minUsedPercent: 3,
+          maxUsedPercent: 100,
+          totals: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            cacheWrite5mInputTokens: 0,
+            cacheWrite1hInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: 0,
+            estimatedCredits: 250,
+            eventCount: 1
+          },
+          eventCount: 1
+        }
+      ],
+      secondaryLimitWindows: [],
+      warnings: [],
+      analytics: {
+        agentName: "Codex",
+        userIdHash: "codex-user"
+      }
+    }
+  ]);
+
+  assert.deepEqual(Object.keys(payload), ["data"]);
+  assert.equal(Array.isArray(payload.data), true);
+  assert.equal(payload.data.length, 1);
+  assert.equal(payload.data[0].agent, "Codex");
 });

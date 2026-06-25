@@ -5,7 +5,18 @@ import { AntigravityUsageProvider } from "./antigravity.js";
 import type { UsageProviderBase } from "./contract.js";
 
 export function createProviders(): UsageProviderBase[] {
-  return [new CodexUsageProvider(), new ClaudeUsageProvider(), new CopilotUsageProvider(), new AntigravityUsageProvider()];
+  return [
+    new CodexUsageProvider(),
+    new ClaudeUsageProvider(),
+    new ClaudeUsageProvider({
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }),
+    new CopilotUsageProvider(),
+    new AntigravityUsageProvider()
+  ];
 }
 
 export { AntigravityUsageProvider } from "./antigravity.js";
@@ -25,6 +36,7 @@ export type {
   LimitWindowRow,
   LimitWindowScope,
   ModelUsageRow,
+  ProviderAnalytics,
   ProviderStats,
   ProviderStatsOptions,
   ProviderSummary,

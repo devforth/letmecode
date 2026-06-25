@@ -11,6 +11,7 @@ import {
   type UsageProviderBase,
   type UsageTotals
 } from "./providers/index.js";
+import { reportAnonymousUsage } from "./reporting.js";
 
 type VerticalTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 
@@ -110,6 +111,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const [selectedModelRowIndex, setSelectedModelRowIndex] = useState(0);
   const [selectedCopilotActionIndex, setSelectedCopilotActionIndex] = useState(0);
   const [copilotActionMessage, setCopilotActionMessage] = useState<string | undefined>();
+  const hasReportedAnonymousUsageRef = useRef(false);
 
   const sortedProviderStates = React.useMemo(() => sortProviderStatesByUsage(providerStates), [providerStates]);
   const selectedProviderIndex = Math.max(
@@ -180,6 +182,21 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
 
     setSelectedProviderId(topProvider.provider.id);
   }, [hasUserSelectedProvider, providerStates, sortedProviderStates]);
+
+  useEffect(() => {
+    if (hasReportedAnonymousUsageRef.current || providerStates.some((state) => state.status === "loading")) {
+      return;
+    }
+
+    hasReportedAnonymousUsageRef.current = true;
+    const readyStats = providerStates
+      .filter((state): state is Extract<ProviderLoadState, { status: "ready" }> => state.status === "ready")
+      .map((state) => state.stats);
+
+    void reportAnonymousUsage(readyStats).catch(() => {
+      // Anonymous usage reporting is best-effort and must never disturb the TUI.
+    });
+  }, [providerStates]);
 
   useMouseClick((click) => {
     const regionId = resolveClick(click);
@@ -539,10 +556,13 @@ function LimitWindowsPanel(props: {
   selectedRowKey?: string;
   availableHeight: number;
 }): React.JSX.Element {
+  const hasPrimaryWindows = props.stats.primaryLimitWindows.length > 0;
   const bodyLines = [
     { key: "primary-title", text: "Primary Limit Windows", bold: true },
     ...buildLimitWindowSectionLines("primary", props.stats.primaryLimitWindows, props.selectedRowKey),
-    { key: "section-gap", text: "" },
+    ...(hasPrimaryWindows
+      ? [{ key: "section-separator", text: buildLimitSectionSeparatorLine(), color: "gray" as const }]
+      : [{ key: "section-gap", text: "" }]),
     { key: "secondary-title", text: "Secondary Limit Windows", bold: true },
     ...buildLimitWindowSectionLines("secondary", props.stats.secondaryLimitWindows, props.selectedRowKey)
   ];
@@ -717,7 +737,7 @@ function buildLimitWindowSectionLines(
     ...windows.map<ScrollableLine>((window) => {
       const lineKey = getLimitRowKey(window);
       const windowLabel = formatWindowMinutes(window.windowMinutes);
-      const usedLabel = `${window.minUsedPercent}%->${window.maxUsedPercent}%`;
+      const usedLabel = formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent);
       const isSelected = selectedRowKey === lineKey;
       return {
         key: `limit-row:${lineKey}`,
@@ -746,7 +766,7 @@ function SelectionDetailsPanel(props: {
       <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
         <Text color="cyan">Limit details</Text>
         <Text>
-          {row.scope}  plan: {row.planType}  window: {formatWindowMinutes(row.windowMinutes)}  used: {row.minUsedPercent}%{"->"}{row.maxUsedPercent}%  limit: {row.limitId}
+          {row.scope}  plan: {row.planType}  window: {formatWindowMinutes(row.windowMinutes)}  used: {formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)}  limit: {row.limitId}
         </Text>
         <Text>
           range: {formatLocalDateTime(row.startTimeUtcIso)} {"->"} {formatLocalDateTime(row.endTimeUtcIso)}  events: {formatInteger(row.eventCount)}
@@ -869,6 +889,23 @@ function formatUsd(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
+}
+
+function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
+  return minUsedPercent === maxUsedPercent
+    ? `${minUsedPercent}%`
+    : `${minUsedPercent}%->${maxUsedPercent}%`;
+}
+
+function buildLimitSectionSeparatorLine(): string {
+  return "─".repeat(
+    LIMIT_WINDOW_COLUMNS.plan +
+      LIMIT_WINDOW_COLUMNS.window +
+      LIMIT_WINDOW_COLUMNS.used +
+      LIMIT_WINDOW_COLUMNS.date * 2 +
+      LIMIT_WINDOW_COLUMNS.value +
+      5
+  );
 }
 
 function formatWindowMinutes(value: number): string {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -68,6 +69,7 @@ export class CodexUsageProvider extends UsageProviderBase {
   async getStats(_options: ProviderStatsOptions = {}): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".codex", "sessions");
     const knownModels = await readCodexModelMetadata(this.root);
+    const userIdHash = await readCodexUserIdHash(this.root, this.label);
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
     const windows = createLimitWindowAggregates();
@@ -128,7 +130,11 @@ export class CodexUsageProvider extends UsageProviderBase {
       dayUsage,
       primaryLimitWindows,
       secondaryLimitWindows,
-      warnings
+      warnings,
+      analytics: {
+        agentName: normalizeAnalyticsAgentName(this.label),
+        userIdHash
+      }
     };
   }
 }
@@ -169,6 +175,105 @@ async function readCodexModelMetadata(root: string): Promise<Map<string, CodexMo
   }
 
   return metadata;
+}
+
+async function readCodexUserIdHash(root: string, agentName: string): Promise<string | null> {
+  const authPath = path.join(root, ".codex", "auth.json");
+
+  let fileText: string;
+  try {
+    fileText = await fs.promises.readFile(authPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(fileText);
+  } catch {
+    return null;
+  }
+
+  const tokens = asRecord(asRecord(payload)?.tokens);
+  const idToken = typeof tokens?.id_token === "string" ? tokens.id_token : "";
+  const accessToken = typeof tokens?.access_token === "string" ? tokens.access_token : "";
+  const identity = extractCodexIdentity(idToken) ?? extractCodexIdentity(accessToken);
+  if (!identity) {
+    return null;
+  }
+
+  return buildUserIdHash([
+    normalizeAnalyticsAgentName(agentName),
+    identity.email,
+    identity.orgId,
+    identity.orgName
+  ]);
+}
+
+function extractCodexIdentity(token: string): { email: string; orgId: string; orgName: string } | null {
+  const payload = decodeJwtPayload(token);
+  if (!payload) {
+    return null;
+  }
+
+  const authRecord = asRecord(payload["https://api.openai.com/auth"]);
+  const profileRecord = asRecord(payload["https://api.openai.com/profile"]);
+  const organizations = Array.isArray(authRecord?.organizations) ? authRecord.organizations : [];
+  const defaultOrganizationRecord =
+    organizations
+      .map((organization) => asRecord(organization))
+      .find((organization) => organization?.is_default === true) ??
+    organizations
+      .map((organization) => asRecord(organization))
+      .find(Boolean) ??
+    null;
+
+  const emailCandidates = [
+    typeof payload.email === "string" ? payload.email : "",
+    typeof profileRecord?.email === "string" ? profileRecord.email : ""
+  ];
+  const email = emailCandidates.find((candidate) => candidate) ?? "";
+  const orgId = typeof defaultOrganizationRecord?.id === "string" ? defaultOrganizationRecord.id : "";
+  const orgName = typeof defaultOrganizationRecord?.title === "string" ? defaultOrganizationRecord.title : "";
+
+  if (!email || !orgId || !orgName) {
+    return null;
+  }
+
+  return { email, orgId, orgName };
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2 || !parts[1]) {
+    return null;
+  }
+
+  try {
+    const payloadText = Buffer.from(normalizeBase64Url(parts[1]), "base64").toString("utf8");
+    const payload = JSON.parse(payloadText);
+    return asRecord(payload);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const paddingLength = (4 - (normalized.length % 4)) % 4;
+  return normalized + "=".repeat(paddingLength);
+}
+
+function buildUserIdHash(parts: string[]): string | null {
+  if (parts.some((part) => !part)) {
+    return null;
+  }
+
+  return createHash("md5").update(parts.join("-")).digest("hex");
+}
+
+function normalizeAnalyticsAgentName(label: string): string {
+  return label.replace(/\s+/g, "");
 }
 
 function createEmptyRawUsage(): RawUsage {

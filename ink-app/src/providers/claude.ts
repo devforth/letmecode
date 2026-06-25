@@ -1,12 +1,16 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import { promisify } from "node:util";
 import {
   UsageProviderBase,
   addUsageTotals,
   createEmptyUsageTotals,
   sumUsageTotals,
+  type LimitWindowRow,
   type ModelUsageRow,
   type ProviderStatsOptions,
   type ProviderStats,
@@ -17,14 +21,12 @@ import {
   asRecord,
   buildWindowLists,
   createLimitWindowAggregates,
-  numberOrZero,
-  type LimitWindowAggregates
+  numberOrZero
 } from "./limits.js";
 import {
   addDailyUsage,
   buildDailyUsageRows,
-  createDailyUsageAggregates,
-  type DailyUsageAggregates
+  createDailyUsageAggregates
 } from "./daily.js";
 import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
@@ -42,7 +44,33 @@ const RATE_CARD: Record<string, UsageRate> = {
   "claude-haiku-3-5": { input: 0.8, cacheRead: 0.08, cacheWrite: 1, cacheWrite5m: 1, cacheWrite1h: 1.6, output: 4 }
 };
 
+const execFileAsync = promisify(execFile);
 const USD_TO_CREDITS = 100;
+const VSCODE_CLAUDE_EXTENSION_PREFIX = "anthropic.claude-code-";
+const CLAUDE_SESSION_WINDOW_MINUTES = 5 * 60;
+const CLAUDE_WEEK_WINDOW_MINUTES = 7 * 24 * 60;
+const ANSI_ESCAPE_SEQUENCE = /\u001B\[[0-9;]*[A-Za-z]/g;
+const DEFAULT_CLAUDE_ENTRYPOINTS = ["sdk-cli", "claude"];
+
+const MONTH_INDEX_BY_LABEL: Record<string, number> = {
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  may: 4,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11
+};
+
+const parsedClaudeSessionFilesCache = new Map<string, Promise<ParsedClaudeSessionFile[]>>();
+const claudeBinaryPathCache = new Map<string, Promise<string | null>>();
+const claudeUsageOutputCache = new Map<string, Promise<string | null>>();
+const claudeAuthStatusOutputCache = new Map<string, Promise<string | null>>();
 
 type ClaudeUsage = {
   inputTokens: number;
@@ -61,17 +89,33 @@ type ParseTotals = {
   malformedLines: number;
 };
 
+type ClaudeUsageCommandKind = "cli" | "vscode";
+
 type ClaudeUsageProviderOptions = {
   root?: string;
+  id?: string;
+  label?: string;
+  entrypoints?: string[];
+  usageCommandKind?: ClaudeUsageCommandKind;
+  readUsageCommandOutput?: () => Promise<string | null>;
+  readAuthStatusOutput?: () => Promise<string | null>;
+  now?: () => Date;
 };
 
 type ParsedUsageEvent = {
+  entrypoint: string;
   usageKey: string | null;
   usageSignature: string;
   timestampMs: number;
   modelId: string;
   totals: UsageTotals;
   rateLimits: Record<string, unknown> | null;
+};
+
+type ParsedClaudeSessionFile = {
+  linesRead: number;
+  malformedLines: number;
+  events: ParsedUsageEvent[];
 };
 
 type ParsedUsageEventAccumulator = {
@@ -82,16 +126,41 @@ type ParsedUsageEventAccumulator = {
   duplicateUnkeyedEvents: number;
 };
 
+type LiveUsageWindowSnapshot = {
+  scope: "primary" | "secondary";
+  label: "session" | "week";
+  usedPercent: number;
+  resetsAtMs: number;
+  windowMinutes: number;
+};
+
 export class ClaudeUsageProvider extends UsageProviderBase {
   private readonly root: string;
+  private readonly entrypoints: Set<string>;
+  private readonly usageCommandKind: ClaudeUsageCommandKind;
+  private readonly readUsageCommandOutput?: () => Promise<string | null>;
+  private readonly readAuthStatusOutput?: () => Promise<string | null>;
+  private readonly now: () => Date;
 
   constructor(options: ClaudeUsageProviderOptions = {}) {
-    super("claude", "Claude");
+    super(options.id ?? "claude", options.label ?? "Claude");
     this.root = path.resolve(options.root ?? os.homedir());
+    this.entrypoints = new Set(options.entrypoints ?? DEFAULT_CLAUDE_ENTRYPOINTS);
+    this.usageCommandKind = options.usageCommandKind ?? "cli";
+    this.readUsageCommandOutput = options.readUsageCommandOutput;
+    this.readAuthStatusOutput = options.readAuthStatusOutput;
+    this.now = options.now ?? (() => new Date());
   }
 
   async getStats(options: ProviderStatsOptions = {}): Promise<ProviderStats> {
     const sessionsRoot = path.join(this.root, ".claude", "projects");
+    const agentName = normalizeAnalyticsAgentName(this.label);
+    const userIdHash = await readClaudeUserIdHash(
+      this.root,
+      this.usageCommandKind,
+      this.readAuthStatusOutput,
+      agentName
+    );
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
     const windows = createLimitWindowAggregates();
@@ -105,11 +174,21 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       malformedLines: 0
     };
 
-    for await (const file of walkSessionFiles(sessionsRoot)) {
+    const parsedSessionFiles = await loadParsedClaudeSessionFiles(sessionsRoot);
+
+    for (const file of parsedSessionFiles) {
+      const matchingEvents = file.events.filter((event) => this.entrypoints.has(event.entrypoint));
+      if (matchingEvents.length === 0) {
+        continue;
+      }
+
       parseTotals.filesScanned += 1;
-      const fileStats = await parseSessionFile(file, parsedEvents);
-      parseTotals.linesRead += fileStats.linesRead;
-      parseTotals.malformedLines += fileStats.malformedLines;
+      parseTotals.linesRead += file.linesRead;
+      parseTotals.malformedLines += file.malformedLines;
+
+      for (const event of matchingEvents) {
+        recordParsedUsageEvent(parsedEvents, event);
+      }
     }
 
     const selectedEvents = [
@@ -157,22 +236,30 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       warnings.push(`No credit rate configured for: ${unknownPricedModels.join(", ")}.`);
     }
 
-    if (parseTotals.filesScanned === 0) {
+    if (parsedSessionFiles.length === 0) {
       warnings.push(`No Claude session files found under ${sessionsRoot}.`);
     }
 
     const summaryTotals = sumUsageTotals(modelUsage.map((row) => row.totals));
     const dayUsage = buildDailyUsageRows(byDay);
-    const [primaryLimitWindows, secondaryLimitWindows] = buildWindowLists(windows);
+    const [fallbackPrimaryLimitWindows, fallbackSecondaryLimitWindows] = buildWindowLists(windows);
+    const liveLimitWindows = await buildLiveLimitWindows({
+      root: this.root,
+      usageCommandKind: this.usageCommandKind,
+      readUsageCommandOutput: this.readUsageCommandOutput,
+      readAuthStatusOutput: this.readAuthStatusOutput,
+      now: this.now(),
+      selectedEvents
+    });
 
-    if (
-      parseTotals.filesScanned > 0 &&
-      parseTotals.tokenEvents > 0 &&
-      primaryLimitWindows.length === 0 &&
-      secondaryLimitWindows.length === 0
-    ) {
-      warnings.push("Claude transcripts did not expose rate-limit windows in the local logs.");
-    }
+    const primaryLimitWindows =
+      liveLimitWindows.primaryLimitWindows.length > 0
+        ? liveLimitWindows.primaryLimitWindows
+        : fallbackPrimaryLimitWindows;
+    const secondaryLimitWindows =
+      liveLimitWindows.secondaryLimitWindows.length > 0
+        ? liveLimitWindows.secondaryLimitWindows
+        : fallbackSecondaryLimitWindows;
 
     return {
       providerId: this.id,
@@ -191,7 +278,11 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       dayUsage,
       primaryLimitWindows,
       secondaryLimitWindows,
-      warnings
+      warnings,
+      analytics: {
+        agentName,
+        userIdHash
+      }
     };
   }
 }
@@ -311,15 +402,33 @@ async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
   }
 }
 
-async function parseSessionFile(
-  filePath: string,
-  parsedEvents: ParsedUsageEventAccumulator
-): Promise<{ linesRead: number; malformedLines: number }> {
+async function loadParsedClaudeSessionFiles(sessionsRoot: string): Promise<ParsedClaudeSessionFile[]> {
+  const cacheKey = path.resolve(sessionsRoot);
+  const cached = parsedClaudeSessionFilesCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = (async () => {
+    const files: ParsedClaudeSessionFile[] = [];
+    for await (const filePath of walkSessionFiles(sessionsRoot)) {
+      files.push(await parseSessionFile(filePath));
+    }
+
+    return files;
+  })();
+
+  parsedClaudeSessionFilesCache.set(cacheKey, pending);
+  return pending;
+}
+
+async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFile> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   let linesRead = 0;
   let malformedLines = 0;
+  const events: ParsedUsageEvent[] = [];
 
   for await (const line of lineReader) {
     linesRead += 1;
@@ -351,19 +460,18 @@ async function parseSessionFile(
     const normalizedUsage = normalizeUsage(usage);
     const usageKey = buildUsageEventKey(payloadObject, message);
     const usageSignature = buildUsageSignature(payloadObject, modelId, normalizedUsage);
-    const parsedEvent: ParsedUsageEvent = {
+    events.push({
+      entrypoint: typeof payloadObject.entrypoint === "string" ? payloadObject.entrypoint : "",
       usageKey,
       usageSignature,
       timestampMs: eventTimeMs,
       modelId,
       totals: usageToTotals(modelId, normalizedUsage),
       rateLimits
-    };
-
-    recordParsedUsageEvent(parsedEvents, parsedEvent);
+    });
   }
 
-  return { linesRead, malformedLines };
+  return { linesRead, malformedLines, events };
 }
 
 function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string | null {
@@ -455,4 +563,457 @@ function extractRateLimits(
   message: Record<string, unknown> | null
 ): Record<string, unknown> | null {
   return asRecord(payloadObject.rate_limits) ?? asRecord(message?.rate_limits);
+}
+
+async function buildLiveLimitWindows(options: {
+  root: string;
+  usageCommandKind: ClaudeUsageCommandKind;
+  readUsageCommandOutput?: () => Promise<string | null>;
+  readAuthStatusOutput?: () => Promise<string | null>;
+  now: Date;
+  selectedEvents: ParsedUsageEvent[];
+}): Promise<{ primaryLimitWindows: LimitWindowRow[]; secondaryLimitWindows: LimitWindowRow[] }> {
+  const [usageOutput, subscriptionType] = await Promise.all([
+    readClaudeUsageCommandOutput(
+      options.root,
+      options.usageCommandKind,
+      options.readUsageCommandOutput
+    ),
+    readClaudeSubscriptionType(
+      options.root,
+      options.usageCommandKind,
+      options.readAuthStatusOutput
+    )
+  ]);
+  const snapshots = parseLiveUsageWindowSnapshots(usageOutput, options.now);
+  const resolvedPlanType = subscriptionType || "live";
+
+  return {
+    primaryLimitWindows: snapshots
+      .filter((snapshot) => snapshot.scope === "primary")
+      .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now)),
+    secondaryLimitWindows: snapshots
+      .filter((snapshot) => snapshot.scope === "secondary")
+      .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now))
+  };
+}
+
+async function readClaudeSubscriptionType(
+  root: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  override?: () => Promise<string | null>
+): Promise<string | null> {
+  const output = await readClaudeAuthStatusOutput(root, usageCommandKind, override);
+  return parseClaudeSubscriptionType(output);
+}
+
+async function readClaudeAuthStatusOutput(
+  root: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  override?: () => Promise<string | null>
+): Promise<string | null> {
+  if (override) {
+    try {
+      return await override();
+    } catch {
+      return null;
+    }
+  }
+
+  const cacheKey = `${usageCommandKind}:${path.resolve(root)}`;
+  const cached = claudeAuthStatusOutputCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = (async () => {
+    const binaryPath = await resolveClaudeBinaryPath(root, usageCommandKind);
+    if (!binaryPath) {
+      return null;
+    }
+
+    try {
+      const { stdout, stderr } = await execFileAsync(binaryPath, ["auth", "status"], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: 15_000,
+        windowsHide: true
+      });
+      const combined = [stdout, stderr].filter(Boolean).join("\n").trim();
+      return combined || null;
+    } catch (error: unknown) {
+      const combined = extractExecOutput(error);
+      return combined || null;
+    }
+  })();
+
+  claudeAuthStatusOutputCache.set(cacheKey, pending);
+  return pending;
+}
+
+function parseClaudeSubscriptionType(output: string | null): string | null {
+  const snapshot = parseClaudeAuthStatusSnapshot(output);
+  return snapshot?.subscriptionType ?? null;
+}
+
+function parseClaudeAuthStatusSnapshot(output: string | null): {
+  email: string;
+  orgId: string;
+  orgName: string;
+  subscriptionType: string;
+} | null {
+  if (!output) {
+    return null;
+  }
+
+  const normalizedOutput = output.replace(ANSI_ESCAPE_SEQUENCE, "").trim();
+  const firstBraceIndex = normalizedOutput.indexOf("{");
+  const lastBraceIndex = normalizedOutput.lastIndexOf("}");
+  if (firstBraceIndex < 0 || lastBraceIndex <= firstBraceIndex) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(normalizedOutput.slice(firstBraceIndex, lastBraceIndex + 1));
+    const record = asRecord(payload);
+    const email = typeof record?.email === "string" ? record.email.trim() : "";
+    const orgId = typeof record?.orgId === "string" ? record.orgId.trim() : "";
+    const orgName = typeof record?.orgName === "string" ? record.orgName.trim() : "";
+    const subscriptionType = typeof record?.subscriptionType === "string" ? record.subscriptionType.trim() : "";
+    if (!email || !orgId || !orgName || !subscriptionType) {
+      return null;
+    }
+
+    return { email, orgId, orgName, subscriptionType };
+  } catch {
+    return null;
+  }
+}
+
+async function readClaudeUserIdHash(
+  root: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  override: (() => Promise<string | null>) | undefined,
+  agentName: string
+): Promise<string | null> {
+  const authStatusOutput = await readClaudeAuthStatusOutput(root, usageCommandKind, override);
+  const snapshot = parseClaudeAuthStatusSnapshot(authStatusOutput);
+  if (!snapshot) {
+    return null;
+  }
+
+  return buildUserIdHash([agentName, snapshot.email, snapshot.orgId, snapshot.orgName]);
+}
+
+async function readClaudeUsageCommandOutput(
+  root: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  override?: () => Promise<string | null>
+): Promise<string | null> {
+  if (override) {
+    try {
+      return await override();
+    } catch {
+      return null;
+    }
+  }
+
+  const cacheKey = `${usageCommandKind}:${path.resolve(root)}`;
+  const cached = claudeUsageOutputCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = (async () => {
+    const binaryPath = await resolveClaudeBinaryPath(root, usageCommandKind);
+    if (!binaryPath) {
+      return null;
+    }
+
+    try {
+      const { stdout, stderr } = await execFileAsync(binaryPath, ["-p", "/usage"], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: 15_000,
+        windowsHide: true
+      });
+      const combined = [stdout, stderr].filter(Boolean).join("\n").trim();
+      return combined || null;
+    } catch (error: unknown) {
+      const combined = extractExecOutput(error);
+      return combined || null;
+    }
+  })();
+
+  claudeUsageOutputCache.set(cacheKey, pending);
+  return pending;
+}
+
+function extractExecOutput(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return "";
+  }
+
+  const stdout = typeof (error as { stdout?: unknown }).stdout === "string" ? (error as { stdout: string }).stdout : "";
+  const stderr = typeof (error as { stderr?: unknown }).stderr === "string" ? (error as { stderr: string }).stderr : "";
+  return [stdout, stderr].filter(Boolean).join("\n").trim();
+}
+
+async function resolveClaudeBinaryPath(root: string, usageCommandKind: ClaudeUsageCommandKind): Promise<string | null> {
+  const cacheKey = `${usageCommandKind}:${path.resolve(root)}`;
+  const cached = claudeBinaryPathCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending =
+    usageCommandKind === "vscode"
+      ? resolveVsCodeClaudeBinaryPath(root)
+      : resolveCliClaudeBinaryPath(root);
+
+  claudeBinaryPathCache.set(cacheKey, pending);
+  return pending;
+}
+
+async function resolveVsCodeClaudeBinaryPath(root: string): Promise<string | null> {
+  const boosterDirectories = [
+    path.join(root, ".vscode", "extensions"),
+    path.join(root, ".vscode-server", "extensions")
+  ];
+
+  for (const directory of boosterDirectories) {
+    const binaryPath = await resolveClaudeBinaryFromExtensionDirectory(directory);
+    if (binaryPath) {
+      return binaryPath;
+    }
+  }
+
+  return null;
+}
+
+async function resolveClaudeBinaryFromExtensionDirectory(directory: string): Promise<string | null> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(directory, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(VSCODE_CLAUDE_EXTENSION_PREFIX))
+    .map((entry) => entry.name)
+    .sort(compareClaudeExtensionDirectoryNames);
+
+  for (const candidate of candidates) {
+    const binaryPath = path.join(directory, candidate, "resources", "native-binary", "claude");
+    if (await isReadableExecutableFile(binaryPath)) {
+      return binaryPath;
+    }
+  }
+
+  return null;
+}
+
+function compareClaudeExtensionDirectoryNames(left: string, right: string): number {
+  const leftVersion = extractClaudeExtensionVersion(left);
+  const rightVersion = extractClaudeExtensionVersion(right);
+  const length = Math.max(leftVersion.length, rightVersion.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const difference = (rightVersion[index] ?? 0) - (leftVersion[index] ?? 0);
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+
+  return right.localeCompare(left);
+}
+
+function extractClaudeExtensionVersion(directoryName: string): number[] {
+  if (!directoryName.startsWith(VSCODE_CLAUDE_EXTENSION_PREFIX)) {
+    return [];
+  }
+
+  const versionLabel = directoryName.slice(VSCODE_CLAUDE_EXTENSION_PREFIX.length).split("-")[0] ?? "";
+  return versionLabel
+    .split(".")
+    .map((part) => Number(part))
+    .filter((part) => Number.isFinite(part));
+}
+
+async function resolveCliClaudeBinaryPath(root: string): Promise<string | null> {
+  const directCandidates = [
+    path.join(root, ".local", "bin", "claude"),
+    path.join(root, "bin", "claude")
+  ];
+
+  for (const candidate of directCandidates) {
+    if (await isReadableExecutableFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function isReadableExecutableFile(filePath: string): Promise<boolean> {
+  try {
+    await fs.promises.access(filePath, fs.constants.R_OK | fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseLiveUsageWindowSnapshots(usageOutput: string | null, now: Date): LiveUsageWindowSnapshot[] {
+  if (!usageOutput) {
+    return [];
+  }
+
+  const snapshots = new Map<LiveUsageWindowSnapshot["label"], LiveUsageWindowSnapshot>();
+  const normalizedOutput = usageOutput.replace(ANSI_ESCAPE_SEQUENCE, "");
+
+  for (const line of normalizedOutput.split(/\r?\n/)) {
+    const match = line
+      .trim()
+      .match(/^Current\s+(session|week)(?:\s+\([^)]+\))?:\s+(\d+)%\s+used\b.*?\bresets\s+(.+)$/i);
+    if (!match) {
+      continue;
+    }
+
+    const label = match[1].toLowerCase() === "session" ? "session" : "week";
+    const usedPercent = Number(match[2]);
+    const windowMinutes = label === "session" ? CLAUDE_SESSION_WINDOW_MINUTES : CLAUDE_WEEK_WINDOW_MINUTES;
+    const resetsAtMs = parseResetTimestampUtc(match[3], now.getTime(), windowMinutes);
+    if (!Number.isFinite(usedPercent) || !resetsAtMs) {
+      continue;
+    }
+
+    snapshots.set(label, {
+      scope: label === "session" ? "primary" : "secondary",
+      label,
+      usedPercent,
+      resetsAtMs,
+      windowMinutes
+    });
+  }
+
+  return [...snapshots.values()].sort((left, right) => left.windowMinutes - right.windowMinutes);
+}
+
+function parseResetTimestampUtc(value: string, nowMs: number, windowMinutes: number): number | null {
+  const match = value
+    .trim()
+    .match(/^([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s+\(UTC\)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const monthIndex = MONTH_INDEX_BY_LABEL[match[1].slice(0, 3).toLowerCase()];
+  const day = Number(match[2]);
+  const hour12 = Number(match[3]);
+  const minute = Number(match[4] ?? "0");
+  const meridiem = match[5].toLowerCase();
+
+  if (
+    monthIndex === undefined ||
+    !Number.isFinite(day) ||
+    !Number.isFinite(hour12) ||
+    !Number.isFinite(minute) ||
+    day < 1 ||
+    day > 31 ||
+    hour12 < 1 ||
+    hour12 > 12 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+  const hour24 = resolveHour24(hour12, meridiem);
+  const currentYear = new Date(nowMs).getUTCFullYear();
+  const candidates = [currentYear - 1, currentYear, currentYear + 1]
+    .map((year) => Date.UTC(year, monthIndex, day, hour24, minute))
+    .filter((candidate) => Number.isFinite(candidate));
+
+  const maxFutureMs = nowMs + windowMinutes * 60_000 + 24 * 60 * 60 * 1000;
+  const plausibleFutureCandidate = candidates
+    .filter((candidate) => candidate >= nowMs - 60_000 && candidate <= maxFutureMs)
+    .sort((left, right) => left - right)[0];
+
+  if (plausibleFutureCandidate !== undefined) {
+    return plausibleFutureCandidate;
+  }
+
+  const nearestCandidate = candidates.sort(
+    (left, right) => Math.abs(left - nowMs) - Math.abs(right - nowMs)
+  )[0];
+
+  return nearestCandidate ?? null;
+}
+
+function resolveHour24(hour12: number, meridiem: string): number {
+  if (hour12 === 12) {
+    return meridiem === "am" ? 0 : 12;
+  }
+
+  return meridiem === "pm" ? hour12 + 12 : hour12;
+}
+
+function buildLiveLimitWindowRow(
+  snapshot: LiveUsageWindowSnapshot,
+  planType: string,
+  selectedEvents: ParsedUsageEvent[],
+  now: Date
+): LimitWindowRow {
+  const startTimeMs = snapshot.resetsAtMs - snapshot.windowMinutes * 60_000;
+  const inWindowEvents = selectedEvents.filter(
+    (event) =>
+      Number.isFinite(event.timestampMs) &&
+      event.timestampMs >= startTimeMs &&
+      event.timestampMs < snapshot.resetsAtMs
+  );
+  const totals = sumUsageTotals(inWindowEvents.map((event) => event.totals));
+  const fallbackLastSeenMs = Math.min(now.getTime(), snapshot.resetsAtMs);
+  const firstSeenMs =
+    inWindowEvents.reduce(
+      (minimum, event) => Math.min(minimum, event.timestampMs),
+      Number.POSITIVE_INFINITY
+    );
+  const lastSeenMs =
+    inWindowEvents.reduce(
+      (maximum, event) => Math.max(maximum, event.timestampMs),
+      Number.NEGATIVE_INFINITY
+    );
+
+  return {
+    scope: snapshot.scope,
+    planType,
+    limitId: `current-${snapshot.label}`,
+    windowMinutes: snapshot.windowMinutes,
+    startTimeUtcIso: toUtcIso(startTimeMs),
+    endTimeUtcIso: toUtcIso(snapshot.resetsAtMs),
+    firstSeenUtcIso: toUtcIso(Number.isFinite(firstSeenMs) ? firstSeenMs : startTimeMs),
+    lastSeenUtcIso: toUtcIso(Number.isFinite(lastSeenMs) ? lastSeenMs : fallbackLastSeenMs),
+    minUsedPercent: snapshot.usedPercent,
+    maxUsedPercent: snapshot.usedPercent,
+    totals,
+    eventCount: totals.eventCount
+  };
+}
+
+function toUtcIso(value: number): string {
+  return new Date(value).toISOString().replace(".000Z", "Z");
+}
+
+function buildUserIdHash(parts: string[]): string | null {
+  if (parts.some((part) => !part)) {
+    return null;
+  }
+
+  return createHash("md5").update(parts.join("-")).digest("hex");
+}
+
+function normalizeAnalyticsAgentName(label: string): string {
+  return label.replace(/\s+/g, "");
 }
