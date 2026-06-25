@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Box, Text, measureElement, useApp, useInput, useStdout, render } from "ink";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Box, Text, measureElement, useApp, useInput, useStdin, useStdout, render, type DOMElement } from "ink";
 import {
   configureCopilotVsCodeLogging,
   createProviders,
@@ -28,6 +28,19 @@ type ScrollableLine = {
 };
 
 type CopilotActionId = "vscode";
+
+type MouseClick = { column: number; row: number };
+
+type Rect = { left: number; top: number; width: number; height: number };
+
+const ESC = String.fromCharCode(0x1b);
+// Normal mouse tracking (button press/release only) + SGR extended coordinates.
+// This makes the tabs clickable while leaving Shift+drag native text selection
+// available everywhere else, exactly like Midnight Commander.
+const ENABLE_MOUSE_TRACKING = `${ESC}[?1000h${ESC}[?1006h`;
+const DISABLE_MOUSE_TRACKING = `${ESC}[?1006l${ESC}[?1000l`;
+// SGR mouse report: ESC [ < button ; column ; row, ending in M (press) or m (release).
+const SGR_MOUSE_SEQUENCE = new RegExp(`${ESC}\\[<(\\d+);(\\d+);(\\d+)([Mm])`, "g");
 
 const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
   { id: "limit-windows", label: "Limits" },
@@ -99,6 +112,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   const { exit } = useApp();
   const viewportHeight = useViewportHeight();
   const { ref: contentPanelRef, height: contentPanelHeight } = useMeasuredElementSize();
+  const { getRegionRef, resolveClick } = useClickRegions();
   const providers = React.useState(() => createProviders())[0];
   const [providerStates, setProviderStates] = useState<ProviderLoadState[]>(
     providers.map((provider) => ({ provider, status: "loading" }))
@@ -182,7 +196,30 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     setSelectedProviderId(topProvider.provider.id);
   }, [hasUserSelectedProvider, providerStates, sortedProviderStates]);
 
+  useMouseClick((click) => {
+    const regionId = resolveClick(click);
+    if (!regionId) {
+      return;
+    }
+
+    if (regionId.startsWith("provider:")) {
+      setSelectedProviderId(regionId.slice("provider:".length));
+      setHasUserSelectedProvider(true);
+      return;
+    }
+
+    if (regionId.startsWith("vtab:")) {
+      setSelectedVerticalTabIndex(Number(regionId.slice("vtab:".length)));
+    }
+  });
+
   useInput((input, key) => {
+    // Mouse reports arrive as SGR escape sequences and are handled by useMouseClick.
+    // Ink strips the leading ESC, leaving e.g. "[<0;10;5M" — never treat that as a key.
+    if (input.startsWith("[<")) {
+      return;
+    }
+
     if (input === "q" || key.escape) {
       exit();
       return;
@@ -273,7 +310,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         letmecode usage dashboard
       </Text>
       <Text color="gray">
-        [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, enter for actions, q to quit
+        [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, enter for actions, click tabs to switch, q to quit
       </Text>
       <Box marginTop={1}>
         {sortedProviderStates.map((state) => (
@@ -282,6 +319,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
             label={state.provider.label}
             active={state.provider.id === selectedProvider.provider.id}
             status={state.status}
+            regionRef={getRegionRef(`provider:${state.provider.id}`)}
           />
         ))}
       </Box>
@@ -290,7 +328,12 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         <Box flexGrow={1} overflow="hidden">
           <Box flexDirection="column" width={VERTICAL_TAB_WIDTH} marginRight={2} overflow="hidden">
             {VERTICAL_TABS.map((tab, index) => (
-              <VerticalTab key={tab.id} label={tab.label} active={index === selectedVerticalTabIndex} />
+              <VerticalTab
+                key={tab.id}
+                label={tab.label}
+                active={index === selectedVerticalTabIndex}
+                regionRef={getRegionRef(`vtab:${index}`)}
+              />
             ))}
           </Box>
           <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
@@ -395,11 +438,16 @@ function formatCopilotLoggingResult(result: Awaited<ReturnType<typeof configureC
   ].join("\n");
 }
 
-function ProviderTab(props: { label: string; active: boolean; status: ProviderLoadState["status"] }): React.JSX.Element {
+function ProviderTab(props: {
+  label: string;
+  active: boolean;
+  status: ProviderLoadState["status"];
+  regionRef?: (node: DOMElement | null) => void;
+}): React.JSX.Element {
   const statusColor = props.status === "error" ? "red" : props.status === "loading" ? "yellow" : "green";
   const tabLabel = props.active ? ` ${props.label} ` : `[${props.label}]`;
   return (
-    <Box marginRight={1}>
+    <Box marginRight={1} ref={props.regionRef}>
       <Text inverse={props.active} color={statusColor}>
         {tabLabel}
       </Text>
@@ -407,9 +455,13 @@ function ProviderTab(props: { label: string; active: boolean; status: ProviderLo
   );
 }
 
-function VerticalTab(props: { label: string; active: boolean }): React.JSX.Element {
+function VerticalTab(props: {
+  label: string;
+  active: boolean;
+  regionRef?: (node: DOMElement | null) => void;
+}): React.JSX.Element {
   return (
-    <Box width={VERTICAL_TAB_WIDTH}>
+    <Box width={VERTICAL_TAB_WIDTH} ref={props.regionRef}>
       <Text wrap="truncate-end" inverse={props.active}>
         {props.active ? ` ${props.label} ` : ` ${props.label}`}
       </Text>
@@ -1027,6 +1079,121 @@ function useMeasuredElementSize(): {
   };
 }
 
+// Walks the Yoga layout tree to get a node's absolute position/size (in terminal
+// cells). Reading it live at click time keeps hit-testing correct across resizes,
+// wrapping, and re-layouts without tracking coordinates by hand.
+function getAbsoluteRect(node: DOMElement | undefined): Rect | undefined {
+  const yogaNode = node?.yogaNode;
+  if (!node || !yogaNode) {
+    return undefined;
+  }
+
+  let left = 0;
+  let top = 0;
+  let current: DOMElement | undefined = node;
+  while (current?.yogaNode) {
+    left += current.yogaNode.getComputedLeft();
+    top += current.yogaNode.getComputedTop();
+    current = current.parentNode;
+  }
+
+  return {
+    left,
+    top,
+    width: yogaNode.getComputedWidth(),
+    height: yogaNode.getComputedHeight()
+  };
+}
+
+function parseMouseClicks(chunk: string): MouseClick[] {
+  const clicks: MouseClick[] = [];
+  for (const match of chunk.matchAll(SGR_MOUSE_SEQUENCE)) {
+    const buttonCode = Number(match[1]);
+    const isPress = match[4] === "M";
+    // Only react to a plain left-button press (button 0, no modifier bits). Any
+    // press carrying Shift/Ctrl/Alt or motion/wheel bits is left alone so the
+    // terminal can still use it for native text selection.
+    if (!isPress || buttonCode !== 0) {
+      continue;
+    }
+
+    clicks.push({ column: Number(match[2]), row: Number(match[3]) });
+  }
+
+  return clicks;
+}
+
+// Tracks the on-screen rectangle of named clickable regions (the tabs) via Ink
+// refs and resolves a click coordinate back to a region id.
+function useClickRegions(): {
+  getRegionRef: (id: string) => (node: DOMElement | null) => void;
+  resolveClick: (click: MouseClick) => string | undefined;
+} {
+  const nodesRef = useRef(new Map<string, DOMElement>());
+  const refCallbacksRef = useRef(new Map<string, (node: DOMElement | null) => void>());
+
+  const getRegionRef = useCallback((id: string) => {
+    const cached = refCallbacksRef.current.get(id);
+    if (cached) {
+      return cached;
+    }
+
+    const callback = (node: DOMElement | null) => {
+      if (node) {
+        nodesRef.current.set(id, node);
+      } else {
+        nodesRef.current.delete(id);
+      }
+    };
+
+    refCallbacksRef.current.set(id, callback);
+    return callback;
+  }, []);
+
+  const resolveClick = useCallback((click: MouseClick) => {
+    // SGR mouse coordinates are 1-based; Ink layout coordinates are 0-based.
+    const column = click.column - 1;
+    const row = click.row - 1;
+    for (const [id, node] of nodesRef.current) {
+      const rect = getAbsoluteRect(node);
+      if (
+        rect &&
+        column >= rect.left &&
+        column < rect.left + rect.width &&
+        row >= rect.top &&
+        row < rect.top + rect.height
+      ) {
+        return id;
+      }
+    }
+
+    return undefined;
+  }, []);
+
+  return { getRegionRef, resolveClick };
+}
+
+// Parses left-clicks out of Ink's raw input stream and forwards them to onClick.
+// Keyboard handling stays in useInput; this only consumes mouse reports.
+function useMouseClick(onClick: (click: MouseClick) => void): void {
+  const { internal_eventEmitter } = useStdin();
+  const handlerRef = useRef(onClick);
+  handlerRef.current = onClick;
+
+  useEffect(() => {
+    const handleInput = (chunk: string) => {
+      for (const click of parseMouseClicks(chunk)) {
+        handlerRef.current(click);
+      }
+    };
+
+    internal_eventEmitter.on("input", handleInput);
+    return () => {
+      internal_eventEmitter.off("input", handleInput);
+    };
+  }, [internal_eventEmitter]);
+}
+
 function useAutoScrollOffset(selectedIndex: number, rowCount: number, viewportSize: number): number {
   const [scrollOffset, setScrollOffset] = useState(0);
 
@@ -1201,7 +1368,9 @@ function resolveViewportHeight(rows: number | undefined): number {
 
 export function main(argv: string[] = process.argv.slice(2)): void {
   const restoreFullscreen = enterFullscreenMode(process.stdout);
+  const disableMouse = enableMouseReporting(process.stdout);
   const exitHandler = () => {
+    disableMouse();
     restoreFullscreen();
   };
   process.once("exit", exitHandler);
@@ -1215,6 +1384,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   void instance.waitUntilExit().finally(() => {
     process.off("exit", exitHandler);
     instance.cleanup();
+    disableMouse();
     restoreFullscreen();
   });
 }
@@ -1234,6 +1404,24 @@ function enterFullscreenMode(stdout: NodeJS.WriteStream): () => void {
 
     restored = true;
     stdout.write(EXIT_FULLSCREEN_MODE);
+  };
+}
+
+function enableMouseReporting(stdout: NodeJS.WriteStream): () => void {
+  if (!stdout.isTTY) {
+    return () => {};
+  }
+
+  let disabled = false;
+  stdout.write(ENABLE_MOUSE_TRACKING);
+
+  return () => {
+    if (disabled) {
+      return;
+    }
+
+    disabled = true;
+    stdout.write(DISABLE_MOUSE_TRACKING);
   };
 }
 
