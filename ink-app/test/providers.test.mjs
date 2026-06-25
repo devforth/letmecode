@@ -1986,6 +1986,38 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
             estimatedCredits: 250,
             eventCount: 1
           },
+          modelUsage: [
+            {
+              modelId: "gpt-5.5",
+              totals: {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 150,
+                eventCount: 1
+              }
+            },
+            {
+              modelId: "gpt-5.4-mini",
+              totals: {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 100,
+                eventCount: 0
+              }
+            }
+          ],
           eventCount: 1
         }
       ],
@@ -2046,6 +2078,23 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
             estimatedCredits: 50,
             eventCount: 1
           },
+          modelUsage: [
+            {
+              modelId: "claude-sonnet-4-6",
+              totals: {
+                inputTokens: 11,
+                outputTokens: 22,
+                cacheReadInputTokens: 33,
+                cacheWriteInputTokens: 99,
+                cacheWrite5mInputTokens: 44,
+                cacheWrite1hInputTokens: 55,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 50,
+                eventCount: 1
+              }
+            }
+          ],
           eventCount: 1
         }
       ],
@@ -2074,9 +2123,20 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
         used_exhausted: true,
         value_dollars: 2.5,
         usage_raw: {
-          output: 0,
-          input_non_cache: 0,
-          input_cache_read: 0
+          "gpt-5.5": {
+            output: 0,
+            input_non_cache: 0,
+            input_cache_read: 0,
+            input_cache_w5m: 0,
+            input_cache_w1h: 0
+          },
+          "gpt-5.4-mini": {
+            output: 0,
+            input_non_cache: 0,
+            input_cache_read: 0,
+            input_cache_w5m: 0,
+            input_cache_w1h: 0
+          }
         }
       },
       {
@@ -2085,17 +2145,19 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
         used_exhausted: false,
         value_dollars: 0.5,
         usage_raw: {
-          output: 22,
-          input_non_cache: 11,
-          input_cache_read: 33,
-          input_cache_w5m: 44,
-          input_cache_w1h: 55
+          "claude-sonnet-4-6": {
+            output: 22,
+            input_non_cache: 11,
+            input_cache_read: 33,
+            input_cache_w5m: 44,
+            input_cache_w1h: 55
+          }
         }
       }
     ]
   );
-  assert.equal("input_cache_w5m" in reports[0].usage_raw, false);
-  assert.equal("input_cache_w1h" in reports[0].usage_raw, false);
+  assert.equal("input_cache_w5m" in reports[0].usage_raw["gpt-5.5"], true);
+  assert.equal("input_cache_w1h" in reports[0].usage_raw["gpt-5.5"], true);
   assert.equal(reports[0].letmecode_version.length > 0, true);
 });
 
@@ -2151,6 +2213,23 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
             estimatedCredits: 250,
             eventCount: 1
           },
+          modelUsage: [
+            {
+              modelId: "gpt-5.5",
+              totals: {
+                inputTokens: 12,
+                outputTokens: 34,
+                cacheReadInputTokens: 56,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 250,
+                eventCount: 1
+              }
+            }
+          ],
           eventCount: 1
         }
       ],
@@ -2168,10 +2247,14 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   assert.equal(payload.data.length, 1);
   assert.equal(payload.data[0].agent, "Codex");
   assert.deepEqual(payload.data[0].usage_raw, {
-    output: 34,
-    input_non_cache: 12,
-    input_cache_read: 56
+    "gpt-5.5": {
+      output: 34,
+      input_non_cache: 12,
+      input_cache_read: 56,
+      input_cache_w5m: 0,
+      input_cache_w1h: 0
+    }
   });
-  assert.equal("input_cache_w5m" in payload.data[0].usage_raw, false);
-  assert.equal("input_cache_w1h" in payload.data[0].usage_raw, false);
+  assert.equal("input_cache_w5m" in payload.data[0].usage_raw["gpt-5.5"], true);
+  assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
 });

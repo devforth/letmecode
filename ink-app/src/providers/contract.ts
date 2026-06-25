@@ -41,6 +41,7 @@ export type LimitWindowRow = {
   minUsedPercent: number;
   maxUsedPercent: number;
   totals: UsageTotals;
+  modelUsage: ModelUsageRow[];
   eventCount: number;
 };
 

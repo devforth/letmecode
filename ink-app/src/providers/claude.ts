@@ -215,7 +215,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       const safeEventTimeMs = Number.isFinite(event.timestampMs) ? event.timestampMs : 0;
 
       addDailyUsage(byDay, event.timestampMs, event.modelId, planType, event.totals);
-      applyRateLimits(windows, event.rateLimits, safeEventTimeMs, event.totals, planTypes);
+      applyRateLimits(windows, event.rateLimits, safeEventTimeMs, event.modelId, event.totals, planTypes);
     }
 
     parseTotals.tokenEvents = selectedEvents.length;
@@ -1242,8 +1242,21 @@ function buildLiveLimitWindowRow(
     minUsedPercent: snapshot.usedPercent,
     maxUsedPercent: snapshot.usedPercent,
     totals,
+    modelUsage: buildModelUsageRowsForEvents(inWindowEvents),
     eventCount: totals.eventCount
   };
+}
+
+function buildModelUsageRowsForEvents(events: ParsedUsageEvent[]): ModelUsageRow[] {
+  const byModel = new Map<string, UsageTotals>();
+
+  for (const event of events) {
+    addModelUsage(byModel, event.modelId, event.totals);
+  }
+
+  return [...byModel.entries()]
+    .map<ModelUsageRow>(([modelId, totals]) => ({ modelId, totals }))
+    .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
 }
 
 function toUtcIso(value: number): string {
