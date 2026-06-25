@@ -1,12 +1,14 @@
 import { ClaudeUsageProvider } from "./claude.js";
 import { CodexUsageProvider } from "./codex.js";
 import { CopilotUsageProvider } from "./copilot.js";
+import { AntigravityUsageProvider } from "./antigravity.js";
 import type { UsageProviderBase } from "./contract.js";
 
 export function createProviders(): UsageProviderBase[] {
-  return [new CodexUsageProvider(), new ClaudeUsageProvider(), new CopilotUsageProvider()];
+  return [new CodexUsageProvider(), new ClaudeUsageProvider(), new CopilotUsageProvider(), new AntigravityUsageProvider()];
 }
 
+export { AntigravityUsageProvider } from "./antigravity.js";
 export { ClaudeUsageProvider } from "./claude.js";
 export { CodexUsageProvider } from "./codex.js";
 export {
@@ -19,16 +21,12 @@ export type {
 } from "./copilot.js";
 export { UsageProviderBase } from "./contract.js";
 export type {
-  AnthropicTokenBreakdown,
   DailyUsageRow,
   LimitWindowRow,
   LimitWindowScope,
   ModelUsageRow,
-  OpenAiTokenBreakdown,
   ProviderStats,
   ProviderStatsOptions,
   ProviderSummary,
-  UsageTokenBreakdown,
-  UsageTokenSchema,
   UsageTotals
 } from "./contract.js";

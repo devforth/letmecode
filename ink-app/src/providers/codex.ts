@@ -26,13 +26,12 @@ import {
   createDailyUsageAggregates,
   type DailyUsageAggregates
 } from "./daily.js";
+import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
-type Rate = { input: number; cachedInput: number; output: number };
-
-const RATE_CARD: Record<string, Rate> = {
-  "gpt-5.5": { input: 125, cachedInput: 12.5, output: 750 },
-  "gpt-5.4": { input: 62.5, cachedInput: 6.25, output: 375 },
-  "gpt-5.4-mini": { input: 18.75, cachedInput: 1.875, output: 113 }
+const RATE_CARD: Record<string, UsageRate> = {
+  "gpt-5.5": { input: 125, cacheRead: 12.5, cacheWrite: 125, cacheWrite5m: 125, cacheWrite1h: 125, output: 750 },
+  "gpt-5.4": { input: 62.5, cacheRead: 6.25, cacheWrite: 62.5, cacheWrite5m: 62.5, cacheWrite1h: 62.5, output: 375 },
+  "gpt-5.4-mini": { input: 18.75, cacheRead: 1.875, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 18.75, output: 113 }
 };
 
 type RawUsage = {
@@ -204,33 +203,36 @@ function subtractRawUsage(current: RawUsage, previous: RawUsage): RawUsage {
 }
 
 function creditsFor(modelId: string, usage: RawUsage): number {
-  const rate = RATE_CARD[modelId];
+  const rate = resolveUsageRate(RATE_CARD, modelId);
   if (!rate) {
     return 0;
   }
 
+  const cachedInputTokens = Math.min(usage.cachedInputTokens, usage.inputTokens);
+  const nonCachedInputTokens = Math.max(0, usage.inputTokens - cachedInputTokens);
+
   return (
-    (usage.inputTokens / 1_000_000) * rate.input +
-    (usage.cachedInputTokens / 1_000_000) * rate.cachedInput +
+    (nonCachedInputTokens / 1_000_000) * rate.input +
+    (cachedInputTokens / 1_000_000) * rate.cacheRead +
     (usage.outputTokens / 1_000_000) * rate.output
   );
 }
 
 function rawUsageToTotals(usage: RawUsage): UsageTotals {
-  const inputTotalTokens = usage.inputTokens + usage.cachedInputTokens;
+  const cacheReadInputTokens = Math.min(usage.cachedInputTokens, usage.inputTokens);
+  const inputTokens = Math.max(0, usage.inputTokens - cacheReadInputTokens);
+
   return {
-    inputTotalTokens,
+    inputTokens,
     outputTokens: usage.outputTokens,
+    cacheReadInputTokens,
+    cacheWriteInputTokens: 0,
+    cacheWrite5mInputTokens: 0,
+    cacheWrite1hInputTokens: 0,
     reasoningOutputTokens: usage.reasoningOutputTokens,
-    totalTokens: inputTotalTokens + usage.outputTokens,
+    totalTokens: inputTokens + cacheReadInputTokens + usage.outputTokens,
     estimatedCredits: 0,
-    eventCount: 0,
-    tokenBreakdown: {
-      schema: "openai",
-      nonCachedInputTokens: usage.inputTokens,
-      cachedInputTokens: usage.cachedInputTokens,
-      outputTokens: usage.outputTokens
-    }
+    eventCount: 0
   };
 }
 
@@ -251,7 +253,7 @@ function createUsageTotalsForModel(
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("openai");
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
 }

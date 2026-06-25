@@ -150,7 +150,7 @@ function computeWindowTotals(
 ): UsageTotals {
   // Session files are not guaranteed to be parsed in timestamp order, so
   // saturation has to be applied after we sort the captured window events.
-  const totals = createEmptyUsageTotals(events[0]?.totals.tokenBreakdown.schema ?? "openai");
+  const totals = createEmptyUsageTotals();
   let sawBelowCap = false;
   let isExhausted = false;
 

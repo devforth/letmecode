@@ -19,6 +19,7 @@ import {
   type DailyUsageAggregates
 } from "./daily.js";
 import { asRecord } from "./limits.js";
+import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
 const VSCODE_OTEL_SETTINGS = {
   "github.copilot.chat.otel.enabled": true,
@@ -26,37 +27,27 @@ const VSCODE_OTEL_SETTINGS = {
   "github.copilot.chat.otel.captureContent": false
 } as const;
 
-type Rate = { input: number; cachedInput: number; cacheWrite?: number; output: number };
-
-type LongContextRate = Rate & { thresholdInputTokens: number };
-
-const RATE_CARD: Record<string, Rate> = {
-  "gpt-5-mini": { input: 25, cachedInput: 2.5, output: 200 },
-  "gpt-5.3-codex": { input: 175, cachedInput: 17.5, output: 1400 },
-  "gpt-5.4": { input: 250, cachedInput: 25, output: 1500 },
-  "gpt-5.4-mini": { input: 75, cachedInput: 7.5, output: 450 },
-  "gpt-5.4-nano": { input: 20, cachedInput: 2, output: 125 },
-  "gpt-5.5": { input: 500, cachedInput: 50, output: 3000 },
-  "claude-haiku-4-5": { input: 100, cachedInput: 10, cacheWrite: 125, output: 500 },
-  "claude-sonnet-4-5": { input: 300, cachedInput: 30, cacheWrite: 375, output: 1500 },
-  "claude-sonnet-4-6": { input: 300, cachedInput: 30, cacheWrite: 375, output: 1500 },
-  "claude-opus-4-5": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
-  "claude-opus-4-6": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
-  "claude-opus-4-7": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
-  "claude-opus-4-8": { input: 500, cachedInput: 50, cacheWrite: 625, output: 2500 },
-  "claude-fable-5": { input: 1000, cachedInput: 100, cacheWrite: 1250, output: 5000 },
-  "gemini-2.5-pro": { input: 125, cachedInput: 12.5, output: 1000 },
-  "gemini-3-flash": { input: 50, cachedInput: 5, output: 300 },
-  "gemini-3.1-pro": { input: 200, cachedInput: 20, output: 1200 },
-  "gemini-3.5-flash": { input: 150, cachedInput: 15, output: 900 },
-  "mai-code-1-flash": { input: 75, cachedInput: 7.5, output: 450 },
-  "raptor-mini": { input: 25, cachedInput: 2.5, output: 200 }
-};
-
-const LONG_CONTEXT_RATE_CARD: Record<string, LongContextRate> = {
-  "gpt-5.4": { thresholdInputTokens: 272_000, input: 500, cachedInput: 50, output: 2250 },
-  "gpt-5.5": { thresholdInputTokens: 272_000, input: 1000, cachedInput: 100, output: 4500 },
-  "gemini-3.1-pro": { thresholdInputTokens: 200_000, input: 400, cachedInput: 40, output: 1800 }
+const RATE_CARD: Record<string, UsageRate> = {
+  "gpt-5-mini": { input: 25, cacheRead: 2.5, cacheWrite: 25, cacheWrite5m: 25, cacheWrite1h: 25, output: 200 },
+  "gpt-5.3-codex": { input: 175, cacheRead: 17.5, cacheWrite: 175, cacheWrite5m: 175, cacheWrite1h: 175, output: 1400 },
+  "gpt-5.4": { input: 250, cacheRead: 25, cacheWrite: 250, cacheWrite5m: 250, cacheWrite1h: 250, output: 1500, longContext: { thresholdTokens: 272_000, rate: { input: 500, cacheRead: 50, cacheWrite: 500, cacheWrite5m: 500, cacheWrite1h: 500, output: 2250 } } },
+  "gpt-5.4-mini": { input: 75, cacheRead: 7.5, cacheWrite: 75, cacheWrite5m: 75, cacheWrite1h: 75, output: 450 },
+  "gpt-5.4-nano": { input: 20, cacheRead: 2, cacheWrite: 20, cacheWrite5m: 20, cacheWrite1h: 20, output: 125 },
+  "gpt-5.5": { input: 500, cacheRead: 50, cacheWrite: 500, cacheWrite5m: 500, cacheWrite1h: 500, output: 3000, longContext: { thresholdTokens: 272_000, rate: { input: 1000, cacheRead: 100, cacheWrite: 1000, cacheWrite5m: 1000, cacheWrite1h: 1000, output: 4500 } } },
+  "claude-haiku-4-5": { input: 100, cacheRead: 10, cacheWrite: 125, cacheWrite5m: 125, cacheWrite1h: 200, output: 500 },
+  "claude-sonnet-4-5": { input: 300, cacheRead: 30, cacheWrite: 375, cacheWrite5m: 375, cacheWrite1h: 600, output: 1500 },
+  "claude-sonnet-4-6": { input: 300, cacheRead: 30, cacheWrite: 375, cacheWrite5m: 375, cacheWrite1h: 600, output: 1500 },
+  "claude-opus-4-5": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
+  "claude-opus-4-6": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
+  "claude-opus-4-7": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
+  "claude-opus-4-8": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
+  "claude-fable-5": { input: 1000, cacheRead: 100, cacheWrite: 1250, cacheWrite5m: 1250, cacheWrite1h: 2000, output: 5000 },
+  "gemini-2.5-pro": { input: 125, cacheRead: 12.5, cacheWrite: 125, cacheWrite5m: 125, cacheWrite1h: 125, output: 1000 },
+  "gemini-3-flash": { input: 50, cacheRead: 5, cacheWrite: 50, cacheWrite5m: 50, cacheWrite1h: 50, output: 300 },
+  "gemini-3.1-pro": { input: 200, cacheRead: 20, cacheWrite: 200, cacheWrite5m: 200, cacheWrite1h: 200, output: 1200, longContext: { thresholdTokens: 200_000, rate: { input: 400, cacheRead: 40, cacheWrite: 400, cacheWrite5m: 400, cacheWrite1h: 400, output: 1800 } } },
+  "gemini-3.5-flash": { input: 150, cacheRead: 15, cacheWrite: 150, cacheWrite5m: 150, cacheWrite1h: 150, output: 900 },
+  "mai-code-1-flash": { input: 75, cacheRead: 7.5, cacheWrite: 75, cacheWrite5m: 75, cacheWrite1h: 75, output: 450 },
+  "raptor-mini": { input: 25, cacheRead: 2.5, cacheWrite: 25, cacheWrite5m: 25, cacheWrite1h: 25, output: 200 }
 };
 
 const NON_BILLABLE_MODEL_PREFIXES = ["copilot-nes", "copilot-suggestion"] as const;
@@ -324,20 +315,18 @@ function createUsageTotals(modelId: string, usage: CopilotRawUsage): UsageTotals
   const cacheWriteInputTokens = hasCacheInfo ? Math.max(0, usage.cacheCreationInputTokens ?? 0) : 0;
   const uncachedInputTokens = hasCacheInfo
     ? Math.max(0, usage.inputTokens - cachedInputTokens - cacheWriteInputTokens)
-    : 0;
+    : usage.inputTokens;
   return {
-    inputTotalTokens: usage.inputTokens,
+    inputTokens: uncachedInputTokens,
     outputTokens: usage.outputTokens,
+    cacheReadInputTokens: cachedInputTokens,
+    cacheWriteInputTokens,
+    cacheWrite5mInputTokens: 0,
+    cacheWrite1hInputTokens: 0,
     reasoningOutputTokens: Math.min(usage.reasoningOutputTokens ?? 0, usage.outputTokens),
     totalTokens: usage.inputTokens + usage.outputTokens,
     estimatedCredits: creditsFor(modelId, usage),
     eventCount: 1,
-    tokenBreakdown: {
-      schema: "openai",
-      nonCachedInputTokens: uncachedInputTokens,
-      cachedInputTokens,
-      outputTokens: usage.outputTokens
-    },
     cacheStatus: hasCacheInfo ? "known" : "unavailable",
     estimatedCreditsStatus: hasKnownCreditPricing ? "known" : "unavailable"
   };
@@ -362,25 +351,14 @@ function creditsFor(modelId: string, usage: CopilotRawUsage): number {
   const regularInput = Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
   return (
     (regularInput / 1_000_000) * rate.input +
-    (cacheRead / 1_000_000) * rate.cachedInput +
-    (cacheWrite / 1_000_000) * (rate.cacheWrite ?? rate.input) +
+    (cacheRead / 1_000_000) * rate.cacheRead +
+    (cacheWrite / 1_000_000) * rate.cacheWrite +
     (usage.outputTokens / 1_000_000) * rate.output
   );
 }
 
-function rateForModel(modelId: string, inputTokens: number): Rate | undefined {
-  const candidates = Object.keys(RATE_CARD).sort((left, right) => right.length - left.length);
-  const model = candidates.find((candidate) => modelId === candidate || modelId.startsWith(`${candidate}-`));
-  if (!model) {
-    return undefined;
-  }
-
-  const longContextRate = LONG_CONTEXT_RATE_CARD[model];
-  if (longContextRate && inputTokens > longContextRate.thresholdInputTokens) {
-    return longContextRate;
-  }
-
-  return RATE_CARD[model];
+function rateForModel(modelId: string, inputTokens: number) {
+  return resolveUsageRate(RATE_CARD, modelId, inputTokens, { prefixMatch: true });
 }
 
 function isNonBillableModel(modelId: string): boolean {
@@ -389,7 +367,7 @@ function isNonBillableModel(modelId: string): boolean {
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("openai");
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
 }

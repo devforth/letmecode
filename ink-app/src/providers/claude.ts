@@ -26,27 +26,20 @@ import {
   createDailyUsageAggregates,
   type DailyUsageAggregates
 } from "./daily.js";
+import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
-type ClaudeRate = {
-  input: number;
-  cacheWrite5m: number;
-  cacheWrite1h: number;
-  cacheRead: number;
-  output: number;
-};
-
-const RATE_CARD: Record<string, ClaudeRate> = {
-  "claude-opus-4-8": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
-  "claude-opus-4-7": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
-  "claude-opus-4-6": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
-  "claude-opus-4-5": { input: 5, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5, output: 25 },
-  "claude-opus-4-1": { input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5, output: 75 },
-  "claude-opus-4": { input: 15, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5, output: 75 },
-  "claude-sonnet-4-6": { input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3, output: 15 },
-  "claude-sonnet-4-5": { input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3, output: 15 },
-  "claude-sonnet-4": { input: 3, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3, output: 15 },
-  "claude-haiku-4-5": { input: 1, cacheWrite5m: 1.25, cacheWrite1h: 2, cacheRead: 0.1, output: 5 },
-  "claude-haiku-3-5": { input: 0.8, cacheWrite5m: 1, cacheWrite1h: 1.6, cacheRead: 0.08, output: 4 }
+const RATE_CARD: Record<string, UsageRate> = {
+  "claude-opus-4-8": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
+  "claude-opus-4-7": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
+  "claude-opus-4-6": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
+  "claude-opus-4-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
+  "claude-opus-4-1": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
+  "claude-opus-4": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
+  "claude-sonnet-4-6": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
+  "claude-sonnet-4-5": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
+  "claude-sonnet-4": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
+  "claude-haiku-4-5": { input: 1, cacheRead: 0.1, cacheWrite: 1.25, cacheWrite5m: 1.25, cacheWrite1h: 2, output: 5 },
+  "claude-haiku-3-5": { input: 0.8, cacheRead: 0.08, cacheWrite: 1, cacheWrite5m: 1, cacheWrite1h: 1.6, output: 4 }
 };
 
 const USD_TO_CREDITS = 100;
@@ -224,15 +217,8 @@ function normalizeUsage(value: unknown): ClaudeUsage {
   };
 }
 
-function resolveRate(modelId: string): ClaudeRate | undefined {
-  const candidates = Object.keys(RATE_CARD).sort((left, right) => right.length - left.length);
-  for (const candidate of candidates) {
-    if (modelId === candidate || modelId.startsWith(`${candidate}-`)) {
-      return RATE_CARD[candidate];
-    }
-  }
-
-  return undefined;
+function resolveRate(modelId: string): UsageRate | undefined {
+  return resolveUsageRate(RATE_CARD, modelId, 0, { prefixMatch: true });
 }
 
 function isInternalClaudeModel(modelId: string): boolean {
@@ -261,33 +247,31 @@ function creditsFor(modelId: string, usage: ClaudeUsage): number {
 
 function usageToTotals(modelId: string, usage: ClaudeUsage): UsageTotals {
   const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
-  const inputTotalTokens =
-    usage.inputTokens +
+  const cacheWriteInputTokens =
     cacheWriteBreakdown.cacheWrite5mInputTokens +
-    cacheWriteBreakdown.cacheWrite1hInputTokens +
-    usage.cacheReadInputTokens;
+    cacheWriteBreakdown.cacheWrite1hInputTokens;
 
   return {
-    inputTotalTokens,
+    inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    cacheWriteInputTokens,
+    cacheWrite5mInputTokens: cacheWriteBreakdown.cacheWrite5mInputTokens,
+    cacheWrite1hInputTokens: cacheWriteBreakdown.cacheWrite1hInputTokens,
     reasoningOutputTokens: 0,
-    totalTokens: inputTotalTokens + usage.outputTokens,
+    totalTokens:
+      usage.inputTokens +
+      usage.cacheReadInputTokens +
+      cacheWriteInputTokens +
+      usage.outputTokens,
     estimatedCredits: creditsFor(modelId, usage),
-    eventCount: 1,
-    tokenBreakdown: {
-      schema: "anthropic",
-      inputTokens: usage.inputTokens,
-      cacheWrite5mInputTokens: cacheWriteBreakdown.cacheWrite5mInputTokens,
-      cacheWrite1hInputTokens: cacheWriteBreakdown.cacheWrite1hInputTokens,
-      cacheReadInputTokens: usage.cacheReadInputTokens,
-      outputTokens: usage.outputTokens
-    }
+    eventCount: 1
   };
 }
 
 function addModelUsage(byModel: Map<string, UsageTotals>, modelId: string, deltaTotals: UsageTotals): void {
   const resolvedModelId = modelId || "unknown";
-  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals("anthropic");
+  const totals = byModel.get(resolvedModelId) ?? createEmptyUsageTotals();
   addUsageTotals(totals, deltaTotals);
   byModel.set(resolvedModelId, totals);
 }

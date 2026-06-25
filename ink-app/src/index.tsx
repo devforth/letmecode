@@ -47,42 +47,27 @@ const LIMIT_WINDOW_COLUMNS = {
   value: 10
 } as const;
 
-const OPENAI_MODEL_USAGE_COLUMNS = {
+const MODEL_USAGE_COLUMNS = {
   model: 17,
-  input: 12,
-  cached: 12,
-  output: 11,
-  credits: 12,
-  value: 12
-} as const;
-
-const ANTHROPIC_MODEL_USAGE_COLUMNS = {
-  model: 17,
-  input: 10,
+  input: 11,
+  output: 10,
+  cacheRead: 11,
+  cacheWrite: 11,
   cacheWrite5m: 10,
   cacheWrite1h: 10,
-  cacheRead: 10,
-  output: 10,
   credits: 12,
   value: 12
 } as const;
 
-const OPENAI_DAY_USAGE_COLUMNS = {
+const DAY_USAGE_COLUMNS = {
   day: 11,
   events: 6,
   input: 11,
   output: 10,
-  value: 10
-} as const;
-
-const ANTHROPIC_DAY_USAGE_COLUMNS = {
-  day: 11,
-  events: 6,
-  input: 10,
+  cacheRead: 11,
+  cacheWrite: 11,
   cacheWrite5m: 10,
   cacheWrite1h: 10,
-  cacheRead: 10,
-  output: 10,
   value: 10
 } as const;
 
@@ -530,76 +515,27 @@ function UsageByModelPanel(props: {
 
   const totals = props.stats.summary.totals;
   const isCodexProvider = props.stats.providerId === "codex";
-  if (totals.tokenBreakdown.schema === "anthropic") {
-    return (
-      <ScrollableLineViewport
-        headerLines={[
-          {
-            key: "anthropic-model-header",
-            text: `${pad("model", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad("input", ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad("cacheW5m", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad("cacheRead", ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad("output", ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad("credits", ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} value`,
-            color: "gray"
-          }
-        ]}
-        bodyLines={props.stats.modelUsage.flatMap((row) => {
-          if (row.totals.tokenBreakdown.schema !== "anthropic") {
-            return [];
-          }
-
-          return [
-            {
-              key: `model-row:${row.modelId}`,
-              text: `${pad(row.modelId, ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(row.totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals, row.modelId), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals, row.modelId), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}`,
-              inverse: props.selectedModelId === row.modelId,
-              color: props.selectedModelId === row.modelId ? "cyan" : undefined
-            }
-          ];
-        })}
-        footerLines={[
-          {
-            key: "anthropic-model-total",
-            text: `${pad("TOTAL", ANTHROPIC_MODEL_USAGE_COLUMNS.model)} ${pad(formatInteger(totals.tokenBreakdown.inputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.input)} ${pad(formatInteger(totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(totals.outputTokens), ANTHROPIC_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals), ANTHROPIC_MODEL_USAGE_COLUMNS.value)}`,
-            color: "cyan"
-          }
-        ]}
-        selectedBodyLineKey={props.selectedModelId ? `model-row:${props.selectedModelId}` : undefined}
-        availableHeight={props.availableHeight}
-      />
-    );
-  }
-
   return (
     <ScrollableLineViewport
       headerLines={[
         {
-          key: "openai-model-header",
+          key: "model-header",
           text: isCodexProvider
-            ? `${pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} value`
-            : `${pad("model", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad("uncached", OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad("cached", OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad("output", OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad("credits", OPENAI_MODEL_USAGE_COLUMNS.credits)} value`,
+            ? `${pad("model", MODEL_USAGE_COLUMNS.model)} ${pad("input", MODEL_USAGE_COLUMNS.input)} ${pad("output", MODEL_USAGE_COLUMNS.output)} ${pad("cacheRead", MODEL_USAGE_COLUMNS.cacheRead)} ${pad("cacheWrite", MODEL_USAGE_COLUMNS.cacheWrite)} ${pad("cacheW5m", MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", MODEL_USAGE_COLUMNS.cacheWrite1h)} value`
+            : `${pad("model", MODEL_USAGE_COLUMNS.model)} ${pad("input", MODEL_USAGE_COLUMNS.input)} ${pad("output", MODEL_USAGE_COLUMNS.output)} ${pad("cacheRead", MODEL_USAGE_COLUMNS.cacheRead)} ${pad("cacheWrite", MODEL_USAGE_COLUMNS.cacheWrite)} ${pad("cacheW5m", MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad("credits", MODEL_USAGE_COLUMNS.credits)} value`,
           color: "gray"
         }
       ]}
-      bodyLines={props.stats.modelUsage.flatMap((row) => {
-        if (row.totals.tokenBreakdown.schema !== "openai") {
-          return [];
-        }
-
-        return [
-          {
-            key: `model-row:${row.modelId}`,
-            text: isCodexProvider
-              ? `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.value)}`
-              : `${pad(row.modelId, OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(row.totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(row.totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(row.totals, row.modelId), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
-            inverse: props.selectedModelId === row.modelId,
-            color: props.selectedModelId === row.modelId ? "cyan" : undefined
-          }
-        ];
-      })}
+      bodyLines={props.stats.modelUsage.map((row) => ({
+        key: `model-row:${row.modelId}`,
+        text: formatModelUsageRow(row.modelId, row.totals, isCodexProvider),
+        inverse: props.selectedModelId === row.modelId,
+        color: props.selectedModelId === row.modelId ? "cyan" : undefined
+      }))}
       footerLines={[
         {
-          key: "openai-model-total",
-          text: isCodexProvider
-            ? `${pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`
-            : `${pad("TOTAL", OPENAI_MODEL_USAGE_COLUMNS.model)} ${pad(formatOpenAiTokens(totals, "non-cached"), OPENAI_MODEL_USAGE_COLUMNS.input)} ${pad(formatOpenAiTokens(totals, "cached"), OPENAI_MODEL_USAGE_COLUMNS.cached)} ${pad(formatInteger(totals.outputTokens), OPENAI_MODEL_USAGE_COLUMNS.output)} ${pad(formatUsageCredits(totals), OPENAI_MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals), OPENAI_MODEL_USAGE_COLUMNS.value)}`,
+          key: "model-total",
+          text: formatModelUsageRow("TOTAL", totals, isCodexProvider),
           color: "cyan"
         }
       ]}
@@ -619,59 +555,21 @@ function DayToDayPanel(props: {
   }
 
   const totals = props.stats.summary.totals;
-  if (totals.tokenBreakdown.schema === "anthropic") {
-    return (
-      <ScrollableLineViewport
-        headerLines={[
-          {
-            key: "anthropic-day-header",
-            text: `${pad("day", ANTHROPIC_DAY_USAGE_COLUMNS.day)} ${pad("events", ANTHROPIC_DAY_USAGE_COLUMNS.events)} ${pad("input", ANTHROPIC_DAY_USAGE_COLUMNS.input)} ${pad("cacheW5m", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} ${pad("cacheRead", ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} ${pad("output", ANTHROPIC_DAY_USAGE_COLUMNS.output)} value`,
-            color: "gray"
-          }
-        ]}
-        bodyLines={props.stats.dayUsage.flatMap((row) => {
-          if (row.totals.tokenBreakdown.schema !== "anthropic") {
-            return [];
-          }
-
-          return [
-            {
-              key: `day-row:${row.dayKey}`,
-              text: `${pad(formatUtcDay(row.dayKey), ANTHROPIC_DAY_USAGE_COLUMNS.day)} ${pad(formatInteger(row.totals.eventCount), ANTHROPIC_DAY_USAGE_COLUMNS.events)} ${pad(formatInteger(row.totals.tokenBreakdown.inputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite5mInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheWrite1hInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatInteger(row.totals.tokenBreakdown.cacheReadInputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.cacheRead)} ${pad(formatInteger(row.totals.outputTokens), ANTHROPIC_DAY_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(row.totals), ANTHROPIC_DAY_USAGE_COLUMNS.value)}`,
-              inverse: props.selectedDayKey === row.dayKey,
-              color: props.selectedDayKey === row.dayKey ? "cyan" : undefined
-            }
-          ];
-        })}
-        selectedBodyLineKey={props.selectedDayKey ? `day-row:${props.selectedDayKey}` : undefined}
-        availableHeight={props.availableHeight}
-      />
-    );
-  }
-
   return (
     <ScrollableLineViewport
       headerLines={[
         {
-          key: "openai-day-header",
-          text: `${pad("day", OPENAI_DAY_USAGE_COLUMNS.day)} ${pad("events", OPENAI_DAY_USAGE_COLUMNS.events)} ${pad("input", OPENAI_DAY_USAGE_COLUMNS.input)} ${pad("output", OPENAI_DAY_USAGE_COLUMNS.output)} value`,
+          key: "day-header",
+          text: `${pad("day", DAY_USAGE_COLUMNS.day)} ${pad("events", DAY_USAGE_COLUMNS.events)} ${pad("input", DAY_USAGE_COLUMNS.input)} ${pad("output", DAY_USAGE_COLUMNS.output)} ${pad("cacheRead", DAY_USAGE_COLUMNS.cacheRead)} ${pad("cacheWrite", DAY_USAGE_COLUMNS.cacheWrite)} ${pad("cacheW5m", DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", DAY_USAGE_COLUMNS.cacheWrite1h)} value`,
           color: "gray"
         }
       ]}
-      bodyLines={props.stats.dayUsage.flatMap((row) => {
-        if (row.totals.tokenBreakdown.schema !== "openai") {
-          return [];
-        }
-
-        return [
-          {
-            key: `day-row:${row.dayKey}`,
-            text: `${pad(formatUtcDay(row.dayKey), OPENAI_DAY_USAGE_COLUMNS.day)} ${pad(formatInteger(row.totals.eventCount), OPENAI_DAY_USAGE_COLUMNS.events)} ${pad(formatInteger(row.totals.inputTotalTokens), OPENAI_DAY_USAGE_COLUMNS.input)} ${pad(formatInteger(row.totals.outputTokens), OPENAI_DAY_USAGE_COLUMNS.output)} ${pad(formatUsageUsd(row.totals), OPENAI_DAY_USAGE_COLUMNS.value)}`,
-            inverse: props.selectedDayKey === row.dayKey,
-            color: props.selectedDayKey === row.dayKey ? "cyan" : undefined
-          }
-        ];
-      })}
+      bodyLines={props.stats.dayUsage.map((row) => ({
+        key: `day-row:${row.dayKey}`,
+        text: `${pad(formatUtcDay(row.dayKey), DAY_USAGE_COLUMNS.day)} ${pad(formatCompactTokenCount(row.totals.eventCount), DAY_USAGE_COLUMNS.events)} ${pad(formatCompactTokenCount(row.totals.inputTokens), DAY_USAGE_COLUMNS.input)} ${pad(formatCompactTokenCount(row.totals.outputTokens), DAY_USAGE_COLUMNS.output)} ${pad(formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens), DAY_USAGE_COLUMNS.cacheRead)} ${pad(formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens), DAY_USAGE_COLUMNS.cacheWrite)} ${pad(formatOptionalCompactTokens(row.totals.cacheWrite5mInputTokens), DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatOptionalCompactTokens(row.totals.cacheWrite1hInputTokens), DAY_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatUsageUsd(row.totals), DAY_USAGE_COLUMNS.value)}`,
+        inverse: props.selectedDayKey === row.dayKey,
+        color: props.selectedDayKey === row.dayKey ? "cyan" : undefined
+      }))}
       selectedBodyLineKey={props.selectedDayKey ? `day-row:${props.selectedDayKey}` : undefined}
       availableHeight={props.availableHeight}
     />
@@ -852,6 +750,31 @@ function formatInteger(value: number): string {
   return Math.round(value).toLocaleString("en-US");
 }
 
+function formatCompactTokenCount(value: number): string {
+  const roundedValue = Math.round(value);
+  if (roundedValue < 1_000) {
+    return formatInteger(roundedValue);
+  }
+
+  if (roundedValue < 100_000) {
+    return `${formatCompactNumber(roundedValue / 1_000)}K`;
+  }
+
+  if (roundedValue < 1_000_000) {
+    return `${formatInteger(Math.round(roundedValue / 1_000))}K`;
+  }
+
+  return `${formatCompactNumber(roundedValue / 1_000_000)}M`;
+}
+
+function formatCompactNumber(value: number): string {
+  const maximumFractionDigits = value < 10 ? 2 : value < 100 ? 1 : 0;
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits,
+    minimumFractionDigits: 0
+  });
+}
+
 function formatCredits(value: number): string {
   if (value > 0 && value < 0.01) {
     return "<0.01";
@@ -868,7 +791,7 @@ function formatUsageCredits(totals: UsageTotals, modelId?: string): string {
     return "N/A";
   }
 
-  return totals.estimatedCreditsStatus === "unavailable" ? "unknown" : formatCredits(totals.estimatedCredits);
+  return totals.estimatedCreditsStatus === "unavailable" ? "-" : formatCredits(totals.estimatedCredits);
 }
 
 function formatUsageUsd(totals: UsageTotals, modelId?: string): string {
@@ -877,7 +800,7 @@ function formatUsageUsd(totals: UsageTotals, modelId?: string): string {
   }
 
   return totals.estimatedCreditsStatus === "unavailable"
-    ? "unknown"
+    ? "-"
     : formatUsd(totals.estimatedCredits * CODEX_CREDIT_COST_USD);
 }
 
@@ -886,15 +809,13 @@ function isInternalUsageModel(modelId?: string): boolean {
 }
 
 function formatUsd(value: number): string {
-  if (value > 0 && value < 0.0001) {
-    return "<$0.0001";
-  }
+  const roundedUpValue = value > 0 ? Math.ceil(value * 100) / 100 : value;
 
-  return value.toLocaleString("en-US", {
+  return roundedUpValue.toLocaleString("en-US", {
     currency: "USD",
     style: "currency",
     minimumFractionDigits: 2,
-    maximumFractionDigits: 4
+    maximumFractionDigits: 2
   });
 }
 
@@ -924,7 +845,7 @@ function formatLocalDateTime(value: string): string {
 
 function formatUtcDay(value: string): string {
   if (value === "unknown") {
-    return "unknown";
+    return "-";
   }
 
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -940,7 +861,7 @@ function formatUtcDay(value: string): string {
 
 function formatEventRange(firstEventUtcIso: string | null, lastEventUtcIso: string | null): string {
   if (!firstEventUtcIso || !lastEventUtcIso) {
-    return "unknown";
+    return "-";
   }
 
   return `${formatLocalDateTime(firstEventUtcIso)} -> ${formatLocalDateTime(lastEventUtcIso)}`;
@@ -950,55 +871,64 @@ function pad(value: string, length: number): string {
   return value.length >= length ? value.slice(0, length) : value.padEnd(length);
 }
 
+function formatModelUsageRow(modelId: string, totals: UsageTotals, isCodexProvider: boolean): string {
+  const displayModelId = modelId === "unknown" ? "-" : modelId;
+  const prefix = `${pad(displayModelId, MODEL_USAGE_COLUMNS.model)} ${pad(formatCompactTokenCount(totals.inputTokens), MODEL_USAGE_COLUMNS.input)} ${pad(formatCompactTokenCount(totals.outputTokens), MODEL_USAGE_COLUMNS.output)} ${pad(formatCompactCacheTokens(totals, totals.cacheReadInputTokens), MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatCompactCacheTokens(totals, totals.cacheWriteInputTokens), MODEL_USAGE_COLUMNS.cacheWrite)} ${pad(formatOptionalCompactTokens(totals.cacheWrite5mInputTokens), MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatOptionalCompactTokens(totals.cacheWrite1hInputTokens), MODEL_USAGE_COLUMNS.cacheWrite1h)}`;
+
+  return isCodexProvider
+    ? `${prefix} ${pad(formatUsageUsd(totals, modelId), MODEL_USAGE_COLUMNS.value)}`
+    : `${prefix} ${pad(formatUsageCredits(totals, modelId), MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals, modelId), MODEL_USAGE_COLUMNS.value)}`;
+}
+
 function UsageBreakdownLines(props: { totals: UsageTotals }): React.JSX.Element {
   const { totals } = props;
-  if (totals.tokenBreakdown.schema === "anthropic") {
-    return (
-      <Box flexDirection="column">
-        <Text>
-          input total: {formatInteger(totals.inputTotalTokens)}  input: {formatInteger(totals.tokenBreakdown.inputTokens)}  cacheW5m: {formatInteger(totals.tokenBreakdown.cacheWrite5mInputTokens)}
-        </Text>
-        <Text>
-          cacheW1h: {formatInteger(totals.tokenBreakdown.cacheWrite1hInputTokens)}  cacheRead: {formatInteger(totals.tokenBreakdown.cacheReadInputTokens)}  output: {formatInteger(totals.outputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
-        </Text>
-      </Box>
-    );
-  }
 
   return (
     <Box flexDirection="column">
       <Text>
-        input total: {formatInteger(totals.inputTotalTokens)}  uncached: {formatOpenAiTokens(totals, "non-cached")}  cached: {formatOpenAiTokens(totals, "cached")}
+        input: {formatInteger(totals.inputTokens)}  output: {formatInteger(totals.outputTokens)}  cacheRead: {formatCacheTokens(totals, totals.cacheReadInputTokens)}
       </Text>
       <Text>
-        output: {formatInteger(totals.outputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
+        cacheWrite: {formatCacheTokens(totals, totals.cacheWriteInputTokens)}  cacheW5m: {formatOptionalTokens(totals.cacheWrite5mInputTokens)}  cacheW1h: {formatOptionalTokens(totals.cacheWrite1hInputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
       </Text>
     </Box>
   );
 }
 
-function formatOpenAiTokens(totals: UsageTotals, kind: "non-cached" | "cached"): string {
-  if (totals.tokenBreakdown.schema !== "openai" || totals.cacheStatus === "unavailable") {
-    return "unknown";
+function formatCacheTokens(totals: UsageTotals, value: number): string {
+  if (totals.cacheStatus === "unavailable") {
+    return "-";
   }
 
-  return formatInteger(kind === "non-cached" ? totals.tokenBreakdown.nonCachedInputTokens : totals.tokenBreakdown.cachedInputTokens);
+  return formatOptionalTokens(value);
+}
+
+function formatCompactCacheTokens(totals: UsageTotals, value: number): string {
+  if (totals.cacheStatus === "unavailable") {
+    return "-";
+  }
+
+  return formatOptionalCompactTokens(value);
+}
+
+function formatOptionalTokens(value: number): string {
+  return value > 0 ? formatInteger(value) : "-";
+}
+
+function formatOptionalCompactTokens(value: number): string {
+  return value > 0 ? formatCompactTokenCount(value) : "-";
 }
 
 function formatInputPerOutput(totals: UsageTotals): string {
   if (totals.outputTokens <= 0) {
-    return totals.tokenBreakdown.schema === "anthropic" ? "input:cacheW5m:cacheW1h:cacheRead:output = 0:0:0:0:0" : "uncached:cached:output = 0:0:0";
-  }
-
-  if (totals.tokenBreakdown.schema === "anthropic") {
-    return `input:cacheW5m:cacheW1h:cacheRead:output = ${formatInteger(Math.round(totals.tokenBreakdown.inputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cacheWrite5mInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cacheWrite1hInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cacheReadInputTokens / totals.outputTokens))}:1`;
+    return "input:cacheRead:cacheWrite:output = 0:0:0:0";
   }
 
   if (totals.cacheStatus === "unavailable") {
-    return "uncached:cached:output = unknown:unknown:1";
+    return `input:cacheRead:cacheWrite:output = ${formatInteger(Math.round(totals.inputTokens / totals.outputTokens))}:-:-:1`;
   }
 
-  return `uncached:cached:output = ${formatInteger(Math.round(totals.tokenBreakdown.nonCachedInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.tokenBreakdown.cachedInputTokens / totals.outputTokens))}:1`;
+  return `input:cacheRead:cacheWrite:output = ${formatInteger(Math.round(totals.inputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.cacheReadInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.cacheWriteInputTokens / totals.outputTokens))}:1`;
 }
 
 function useMeasuredElementSize(): {
@@ -1132,7 +1062,7 @@ function providerUsageScore(state: ProviderLoadState): number {
   }
 
   const totals = state.stats.summary.totals;
-  return totals.inputTotalTokens + totals.outputTokens;
+  return totals.inputTokens + totals.outputTokens + totals.cacheReadInputTokens + totals.cacheWriteInputTokens;
 }
 
 function getLimitRows(providerState: ProviderLoadState): LimitWindowRow[] {
