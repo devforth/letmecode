@@ -1,12 +1,14 @@
 {
   "name": "letmecode",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Provider-based terminal usage dashboard for LetMeCode.",
   "author": "devforth.io",
   "license": "MIT",
   "packageManager": "pnpm@10.28.2",
   "type": "commonjs",
-  "bin": "./bin/letmecode.js",
+  "bin": {
+    "letmecode": "./bin/letmecode.js"
+  },
   "files": [
     "bin",
     "dist",

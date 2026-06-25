@@ -1,0 +1,4 @@
+interface:
+  display_name: "Letmecode Release"
+  short_description: "Bump, verify, and publish letmecode."
+  default_prompt: "Use $letmecode-release to prepare and publish a new letmecode npm release."
