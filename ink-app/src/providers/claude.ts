@@ -134,6 +134,11 @@ type LiveUsageWindowSnapshot = {
   windowMinutes: number;
 };
 
+type ClaudeSessionsRootCandidate = {
+  rootLabel: string;
+  rootPath: string;
+};
+
 export class ClaudeUsageProvider extends UsageProviderBase {
   private readonly root: string;
   private readonly entrypoints: Set<string>;
@@ -153,7 +158,8 @@ export class ClaudeUsageProvider extends UsageProviderBase {
   }
 
   async getStats(options: ProviderStatsOptions = {}): Promise<ProviderStats> {
-    const sessionsRoot = path.join(this.root, ".claude", "projects");
+    const resolvedSessionsRoot = await resolveClaudeSessionsRoot(this.root);
+    const sessionsRoot = resolvedSessionsRoot.rootPath;
     const agentName = normalizeAnalyticsAgentName(this.label);
     const userIdHash = await readClaudeUserIdHash(
       this.root,
@@ -271,7 +277,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
         totals: summaryTotals,
         distinctModels: modelUsage.map((row) => row.modelId),
         distinctPlanTypes: [...planTypes].sort(),
-        rootLabel: "~/.claude/projects",
+        rootLabel: resolvedSessionsRoot.rootLabel,
         rootPath: sessionsRoot
       },
       modelUsage,
@@ -381,7 +387,99 @@ function resolveClaudeCacheWriteBreakdown(usage: ClaudeUsage): {
 }
 
 function isSessionFile(filePath: string): boolean {
-  return filePath.endsWith(".jsonl") && filePath.includes(`${path.sep}.claude${path.sep}projects${path.sep}`);
+  return filePath.endsWith(".jsonl");
+}
+
+async function resolveClaudeSessionsRoot(root: string): Promise<ClaudeSessionsRootCandidate> {
+  const candidates = buildClaudeSessionsRootCandidates(root);
+
+  for (const candidate of candidates) {
+    if (await isDirectory(candidate.rootPath)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0] ?? {
+    rootLabel: "~/.claude/projects",
+    rootPath: path.join(path.resolve(root), ".claude", "projects")
+  };
+}
+
+function buildClaudeSessionsRootCandidates(root: string): ClaudeSessionsRootCandidate[] {
+  const resolvedRoot = path.resolve(root);
+  const baseName = path.basename(resolvedRoot);
+  const parentBaseName = path.basename(path.dirname(resolvedRoot));
+  const candidates: ClaudeSessionsRootCandidate[] = [];
+
+  if (baseName === "projects") {
+    if (parentBaseName === ".claude") {
+      candidates.push({
+        rootLabel: "~/.claude/projects",
+        rootPath: resolvedRoot
+      });
+    } else if (parentBaseName === "claude" || parentBaseName === "Claude") {
+      candidates.push({
+        rootLabel: `~/.config/${parentBaseName}/projects`,
+        rootPath: resolvedRoot
+      });
+    } else {
+      candidates.push({
+        rootLabel: "projects",
+        rootPath: resolvedRoot
+      });
+    }
+  }
+
+  if (baseName === ".claude") {
+    candidates.push({
+      rootLabel: "~/.claude/projects",
+      rootPath: path.join(resolvedRoot, "projects")
+    });
+  }
+
+  if (parentBaseName === ".config" && (baseName === "claude" || baseName === "Claude")) {
+    candidates.push({
+      rootLabel: `~/.config/${baseName}/projects`,
+      rootPath: path.join(resolvedRoot, "projects")
+    });
+  }
+
+  candidates.push(
+    {
+      rootLabel: "~/.claude/projects",
+      rootPath: path.join(resolvedRoot, ".claude", "projects")
+    },
+    {
+      rootLabel: "~/.config/claude/projects",
+      rootPath: path.join(resolvedRoot, ".config", "claude", "projects")
+    },
+    {
+      rootLabel: "~/.config/Claude/projects",
+      rootPath: path.join(resolvedRoot, ".config", "Claude", "projects")
+    }
+  );
+
+  const dedupedCandidates = new Map<string, ClaudeSessionsRootCandidate>();
+  for (const candidate of candidates) {
+    const normalizedPath = path.resolve(candidate.rootPath);
+    if (!dedupedCandidates.has(normalizedPath)) {
+      dedupedCandidates.set(normalizedPath, {
+        rootLabel: candidate.rootLabel,
+        rootPath: normalizedPath
+      });
+    }
+  }
+
+  return [...dedupedCandidates.values()];
+}
+
+async function isDirectory(directoryPath: string): Promise<boolean> {
+  try {
+    const stats = await fs.promises.stat(directoryPath);
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
@@ -778,7 +876,8 @@ async function resolveClaudeBinaryPath(root: string, usageCommandKind: ClaudeUsa
 async function resolveVsCodeClaudeBinaryPath(root: string): Promise<string | null> {
   const boosterDirectories = [
     path.join(root, ".vscode", "extensions"),
-    path.join(root, ".vscode-server", "extensions")
+    path.join(root, ".vscode-server", "extensions"),
+    path.join(root, ".vscode-server-insiders", "extensions")
   ];
 
   for (const directory of boosterDirectories) {

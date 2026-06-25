@@ -48,6 +48,12 @@ async function writeClaudeSession(root, relativePath, lines) {
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
 
+async function writeClaudeSessionAt(targetRoot, relativePath, lines) {
+  const target = path.join(targetRoot, relativePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, lines.join("\n"), "utf8");
+}
+
 async function writeCopilotSession(root, relativePath, lines) {
   const target = path.join(root, ".copilot", "session-state", relativePath);
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -1614,6 +1620,70 @@ test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and build
       agentName: "Claude",
       userIdHash: createHash("md5").update("Claude-ivan@devforth.io-6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c-Devforth").digest("hex")
     });
+  });
+});
+
+test("ClaudeUsageProvider finds Linux Claude sessions under ~/.config/claude/projects", async () => {
+  await withTempRoot(async (root) => {
+    const sessionsRoot = path.join(root, ".config", "claude", "projects");
+    await writeClaudeSessionAt(sessionsRoot, "ubuntu-vscode/session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-ubuntu-vscode",
+        messageId: "msg-ubuntu-vscode",
+        entrypoint: "claude-vscode",
+        model: "claude-opus-4-8",
+        inputTokens: 120,
+        outputTokens: 12
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }).getStats();
+
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 120);
+    assert.equal(stats.summary.totals.outputTokens, 12);
+    assert.equal(stats.summary.rootLabel, "~/.config/claude/projects");
+    assert.equal(stats.summary.rootPath, sessionsRoot);
+  });
+});
+
+test("ClaudeUsageProvider accepts a root that already points at a raw Claude projects dump", async () => {
+  await withTempRoot(async (root) => {
+    const projectsRoot = path.join(root, "projects");
+    await writeClaudeSessionAt(projectsRoot, "-home-vsemeniuk-Desktop-tugabet-e2e/session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-dump-vscode",
+        messageId: "msg-dump-vscode",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 90,
+        outputTokens: 9
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root: projectsRoot,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }).getStats();
+
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 90);
+    assert.equal(stats.summary.totals.outputTokens, 9);
+    assert.equal(stats.summary.rootLabel, "projects");
+    assert.equal(stats.summary.rootPath, projectsRoot);
   });
 });
 
