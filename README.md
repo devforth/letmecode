@@ -4,6 +4,8 @@ Ussage:
 
 ```bash
 npx -y letmecode
+npx -y letmecode -- -h
+npx -y letmecode -- --log-to log.txt
 ```
 
 <img width="2308" height="1491" alt="image" src="https://github.com/user-attachments/assets/f3f52d79-00e3-4ff5-bf2f-65f8be632aaa" />

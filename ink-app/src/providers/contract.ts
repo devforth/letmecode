@@ -60,6 +60,10 @@ export type ProviderAnalytics = {
   userIdHash: string | null;
 };
 
+export type ProviderTraceLogger = {
+  log(message: string): void;
+};
+
 export type ProviderStats = {
   providerId: string;
   providerLabel: string;
@@ -74,6 +78,7 @@ export type ProviderStats = {
 
 export type ProviderStatsOptions = {
   verbose?: boolean;
+  traceLogger?: ProviderTraceLogger;
 };
 
 export abstract class UsageProviderBase {

@@ -54,6 +54,12 @@ async function writeClaudeSessionAt(targetRoot, relativePath, lines) {
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
 
+async function writeExecutable(target, contents) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, contents, "utf8");
+  await fs.chmod(target, 0o755);
+}
+
 async function writeCopilotSession(root, relativePath, lines) {
   const target = path.join(root, ".copilot", "session-state", relativePath);
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -1620,6 +1626,97 @@ test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and build
       agentName: "Claude",
       userIdHash: createHash("md5").update("Claude-ivan@devforth.io-6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c-Devforth").digest("hex")
     });
+  });
+});
+
+test("ClaudeUsageProvider traces binary detection and /usage output for Claude and Claude VSCode", async () => {
+  await withTempRoot(async (root) => {
+    const cliBinary = path.join(root, ".local", "bin", "claude");
+    const cliMissingBinary = path.join(root, "bin", "claude");
+    const vscodeMissingBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-1.9.0",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+    const vscodeBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-1.8.0",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+    const buildFakeClaudeBinary = (usageLines) => `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+cat <<'EOF'
+{
+  "loggedIn": true,
+  "email": "trace@example.com",
+  "orgId": "org-1",
+  "orgName": "Trace Org",
+  "subscriptionType": "team"
+}
+EOF
+exit 0
+fi
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
+cat <<'EOF'
+${usageLines.join("\n")}
+EOF
+exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`;
+
+    await writeExecutable(
+      cliBinary,
+      buildFakeClaudeBinary([
+        "Current session: 12% used · resets Jun 25, 12:30pm (UTC)",
+        "Current week (all models): 34% used · resets Jun 28, 12pm (UTC)"
+      ])
+    );
+    await fs.mkdir(path.dirname(vscodeMissingBinary), { recursive: true });
+    await writeExecutable(
+      vscodeBinary,
+      buildFakeClaudeBinary([
+        "Current session: 56% used · resets Jun 25, 1:30pm (UTC)",
+        "Current week (all models): 78% used · resets Jun 29, 3pm (UTC)"
+      ])
+    );
+
+    const logs = [];
+    const traceLogger = {
+      log(message) {
+        logs.push(message);
+      }
+    };
+
+    await new ClaudeUsageProvider({ root }).getStats({ traceLogger });
+    await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }).getStats({ traceLogger });
+
+    const combinedLogs = logs.join("\n");
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${cliBinary} -> success.`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${cliMissingBinary} -> failure (`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${cliBinary}.`), true);
+    assert.equal(combinedLogs.includes("[Claude] Usage returned:\nCurrent session: 12% used"), true);
+    assert.equal(combinedLogs.includes("Current week (all models): 34% used"), true);
+    assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeMissingBinary} -> failure (`), true);
+    assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeBinary} -> success.`), true);
+    assert.equal(combinedLogs.includes(`[Claude VSCode] Binary detection result: found ${vscodeBinary}.`), true);
+    assert.equal(combinedLogs.includes("[Claude VSCode] Usage returned:\nCurrent session: 56% used"), true);
+    assert.equal(combinedLogs.includes("Current week (all models): 78% used"), true);
   });
 });
 
