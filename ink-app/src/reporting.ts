@@ -9,6 +9,14 @@ const CREDIT_TO_DOLLARS = 0.01;
 
 let versionCache: Promise<string> | null = null;
 
+export type UsageRaw = {
+  output?: number;
+  input_non_cache?: number;
+  input_cache_w5m?: number;
+  input_cache_w1h?: number;
+  input_cache_read?: number;
+};
+
 export type AnonymousUsageReport = {
   agent: string;
   userid_hash: string;
@@ -19,6 +27,7 @@ export type AnonymousUsageReport = {
   used_percents: number;
   used_exhausted: boolean;
   value_dollars: number;
+  usage_raw: UsageRaw;
   letmecode_version: string;
 };
 
@@ -70,8 +79,28 @@ function buildAnonymousUsageReport(
     used_percents: resolveReportedUsedPercents(window),
     used_exhausted: window.maxUsedPercent >= 100,
     value_dollars: roundDollars(window.totals.estimatedCredits * CREDIT_TO_DOLLARS),
+    usage_raw: buildUsageRaw(stats.providerId, window),
     letmecode_version: letmecodeVersion
   };
+}
+
+function buildUsageRaw(providerId: string, window: LimitWindowRow): UsageRaw {
+  const usageRaw: UsageRaw = {
+    output: window.totals.outputTokens,
+    input_non_cache: window.totals.inputTokens,
+    input_cache_read: window.totals.cacheReadInputTokens
+  };
+
+  if (isAnthropicProvider(providerId)) {
+    usageRaw.input_cache_w5m = window.totals.cacheWrite5mInputTokens;
+    usageRaw.input_cache_w1h = window.totals.cacheWrite1hInputTokens;
+  }
+
+  return usageRaw;
+}
+
+function isAnthropicProvider(providerId: string): boolean {
+  return providerId === "claude" || providerId === "claude-vscode";
 }
 
 function resolveReportedUsedPercents(window: LimitWindowRow): number {
