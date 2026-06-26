@@ -49,6 +49,7 @@ export type {
   ProviderAnalytics,
   ProviderStats,
   ProviderStatsOptions,
+  ProviderTraceLogger,
   ProviderSummary,
   UsageTotals
 } from "./contract.js";

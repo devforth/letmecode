@@ -2,12 +2,24 @@ import { request } from "node:https";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { LimitWindowRow, ProviderStats } from "./providers/index.js";
+import type { LimitWindowRow, ModelUsageRow, ProviderStats } from "./providers/index.js";
 
 const REPORTING_ENDPOINT = "https://devforth.io/admin/api/report_ussage_anonymous";
 const CREDIT_TO_DOLLARS = 0.01;
 
 let versionCache: Promise<string> | null = null;
+
+export type UsageRaw = {
+  output: number;
+  input_non_cache: number;
+  input_cache_w5m: number;
+  input_cache_w1h: number;
+  input_cache_read: number;
+};
+
+export type UsageRawByModel = {
+  [modelId: string]: UsageRaw;
+};
 
 export type AnonymousUsageReport = {
   agent: string;
@@ -19,6 +31,7 @@ export type AnonymousUsageReport = {
   used_percents: number;
   used_exhausted: boolean;
   value_dollars: number;
+  usage_raw: UsageRawByModel;
   letmecode_version: string;
 };
 
@@ -70,8 +83,25 @@ function buildAnonymousUsageReport(
     used_percents: resolveReportedUsedPercents(window),
     used_exhausted: window.maxUsedPercent >= 100,
     value_dollars: roundDollars(window.totals.estimatedCredits * CREDIT_TO_DOLLARS),
+    usage_raw: buildUsageRaw(window.modelUsage),
     letmecode_version: letmecodeVersion
   };
+}
+
+function buildUsageRaw(modelUsage: ModelUsageRow[]): UsageRawByModel {
+  const usageRaw: UsageRawByModel = {};
+
+  for (const row of modelUsage) {
+    usageRaw[row.modelId] = {
+      output: row.totals.outputTokens,
+      input_non_cache: row.totals.inputTokens,
+      input_cache_w5m: row.totals.cacheWrite5mInputTokens,
+      input_cache_w1h: row.totals.cacheWrite1hInputTokens,
+      input_cache_read: row.totals.cacheReadInputTokens
+    };
+  }
+
+  return usageRaw;
 }
 
 function resolveReportedUsedPercents(window: LimitWindowRow): number {

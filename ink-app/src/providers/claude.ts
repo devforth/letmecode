@@ -14,6 +14,7 @@ import {
   type ModelUsageRow,
   type ProviderStatsOptions,
   type ProviderStats,
+  type ProviderTraceLogger,
   type UsageTotals
 } from "./contract.js";
 import {
@@ -134,6 +135,16 @@ type LiveUsageWindowSnapshot = {
   windowMinutes: number;
 };
 
+type ClaudeSessionsRootCandidate = {
+  rootLabel: string;
+  rootPath: string;
+};
+
+type FileAccessCheckResult = {
+  ok: boolean;
+  errorMessage?: string;
+};
+
 export class ClaudeUsageProvider extends UsageProviderBase {
   private readonly root: string;
   private readonly entrypoints: Set<string>;
@@ -153,13 +164,15 @@ export class ClaudeUsageProvider extends UsageProviderBase {
   }
 
   async getStats(options: ProviderStatsOptions = {}): Promise<ProviderStats> {
-    const sessionsRoot = path.join(this.root, ".claude", "projects");
+    const resolvedSessionsRoot = await resolveClaudeSessionsRoot(this.root);
+    const sessionsRoot = resolvedSessionsRoot.rootPath;
     const agentName = normalizeAnalyticsAgentName(this.label);
     const userIdHash = await readClaudeUserIdHash(
       this.root,
       this.usageCommandKind,
       this.readAuthStatusOutput,
-      agentName
+      agentName,
+      options.traceLogger
     );
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
@@ -202,7 +215,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       const safeEventTimeMs = Number.isFinite(event.timestampMs) ? event.timestampMs : 0;
 
       addDailyUsage(byDay, event.timestampMs, event.modelId, planType, event.totals);
-      applyRateLimits(windows, event.rateLimits, safeEventTimeMs, event.totals, planTypes);
+      applyRateLimits(windows, event.rateLimits, safeEventTimeMs, event.modelId, event.totals, planTypes);
     }
 
     parseTotals.tokenEvents = selectedEvents.length;
@@ -248,6 +261,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       usageCommandKind: this.usageCommandKind,
       readUsageCommandOutput: this.readUsageCommandOutput,
       readAuthStatusOutput: this.readAuthStatusOutput,
+      traceLogger: options.traceLogger,
       now: this.now(),
       selectedEvents
     });
@@ -271,7 +285,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
         totals: summaryTotals,
         distinctModels: modelUsage.map((row) => row.modelId),
         distinctPlanTypes: [...planTypes].sort(),
-        rootLabel: "~/.claude/projects",
+        rootLabel: resolvedSessionsRoot.rootLabel,
         rootPath: sessionsRoot
       },
       modelUsage,
@@ -381,7 +395,99 @@ function resolveClaudeCacheWriteBreakdown(usage: ClaudeUsage): {
 }
 
 function isSessionFile(filePath: string): boolean {
-  return filePath.endsWith(".jsonl") && filePath.includes(`${path.sep}.claude${path.sep}projects${path.sep}`);
+  return filePath.endsWith(".jsonl");
+}
+
+async function resolveClaudeSessionsRoot(root: string): Promise<ClaudeSessionsRootCandidate> {
+  const candidates = buildClaudeSessionsRootCandidates(root);
+
+  for (const candidate of candidates) {
+    if (await isDirectory(candidate.rootPath)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0] ?? {
+    rootLabel: "~/.claude/projects",
+    rootPath: path.join(path.resolve(root), ".claude", "projects")
+  };
+}
+
+function buildClaudeSessionsRootCandidates(root: string): ClaudeSessionsRootCandidate[] {
+  const resolvedRoot = path.resolve(root);
+  const baseName = path.basename(resolvedRoot);
+  const parentBaseName = path.basename(path.dirname(resolvedRoot));
+  const candidates: ClaudeSessionsRootCandidate[] = [];
+
+  if (baseName === "projects") {
+    if (parentBaseName === ".claude") {
+      candidates.push({
+        rootLabel: "~/.claude/projects",
+        rootPath: resolvedRoot
+      });
+    } else if (parentBaseName === "claude" || parentBaseName === "Claude") {
+      candidates.push({
+        rootLabel: `~/.config/${parentBaseName}/projects`,
+        rootPath: resolvedRoot
+      });
+    } else {
+      candidates.push({
+        rootLabel: "projects",
+        rootPath: resolvedRoot
+      });
+    }
+  }
+
+  if (baseName === ".claude") {
+    candidates.push({
+      rootLabel: "~/.claude/projects",
+      rootPath: path.join(resolvedRoot, "projects")
+    });
+  }
+
+  if (parentBaseName === ".config" && (baseName === "claude" || baseName === "Claude")) {
+    candidates.push({
+      rootLabel: `~/.config/${baseName}/projects`,
+      rootPath: path.join(resolvedRoot, "projects")
+    });
+  }
+
+  candidates.push(
+    {
+      rootLabel: "~/.claude/projects",
+      rootPath: path.join(resolvedRoot, ".claude", "projects")
+    },
+    {
+      rootLabel: "~/.config/claude/projects",
+      rootPath: path.join(resolvedRoot, ".config", "claude", "projects")
+    },
+    {
+      rootLabel: "~/.config/Claude/projects",
+      rootPath: path.join(resolvedRoot, ".config", "Claude", "projects")
+    }
+  );
+
+  const dedupedCandidates = new Map<string, ClaudeSessionsRootCandidate>();
+  for (const candidate of candidates) {
+    const normalizedPath = path.resolve(candidate.rootPath);
+    if (!dedupedCandidates.has(normalizedPath)) {
+      dedupedCandidates.set(normalizedPath, {
+        rootLabel: candidate.rootLabel,
+        rootPath: normalizedPath
+      });
+    }
+  }
+
+  return [...dedupedCandidates.values()];
+}
+
+async function isDirectory(directoryPath: string): Promise<boolean> {
+  try {
+    const stats = await fs.promises.stat(directoryPath);
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
@@ -565,11 +671,52 @@ function extractRateLimits(
   return asRecord(payloadObject.rate_limits) ?? asRecord(message?.rate_limits);
 }
 
+function traceClaude(
+  traceLogger: ProviderTraceLogger | undefined,
+  usageCommandKind: ClaudeUsageCommandKind,
+  message: string
+): void {
+  if (!traceLogger) {
+    return;
+  }
+
+  const targetLabel = usageCommandKind === "vscode" ? "Claude VSCode" : "Claude";
+  traceLogger.log(`[${targetLabel}] ${message}`);
+}
+
+function formatErrorMessage(error: unknown): string {
+  if (!error) {
+    return "Unknown error";
+  }
+
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function describeUsageOutput(output: string | null): string {
+  if (output == null) {
+    return "<null>";
+  }
+
+  return output.trim() ? output : "<empty>";
+}
+
+function buildClaudeCommandEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    TZ: "UTC"
+  };
+}
+
 async function buildLiveLimitWindows(options: {
   root: string;
   usageCommandKind: ClaudeUsageCommandKind;
   readUsageCommandOutput?: () => Promise<string | null>;
   readAuthStatusOutput?: () => Promise<string | null>;
+  traceLogger?: ProviderTraceLogger;
   now: Date;
   selectedEvents: ParsedUsageEvent[];
 }): Promise<{ primaryLimitWindows: LimitWindowRow[]; secondaryLimitWindows: LimitWindowRow[] }> {
@@ -577,15 +724,22 @@ async function buildLiveLimitWindows(options: {
     readClaudeUsageCommandOutput(
       options.root,
       options.usageCommandKind,
-      options.readUsageCommandOutput
+      options.readUsageCommandOutput,
+      options.traceLogger
     ),
     readClaudeSubscriptionType(
       options.root,
       options.usageCommandKind,
-      options.readAuthStatusOutput
+      options.readAuthStatusOutput,
+      options.traceLogger
     )
   ]);
   const snapshots = parseLiveUsageWindowSnapshots(usageOutput, options.now);
+  traceClaude(
+    options.traceLogger,
+    options.usageCommandKind,
+    `Parsed ${snapshots.length} live usage snapshot(s) from /usage output.`
+  );
   const resolvedPlanType = subscriptionType || "live";
 
   return {
@@ -601,21 +755,32 @@ async function buildLiveLimitWindows(options: {
 async function readClaudeSubscriptionType(
   root: string,
   usageCommandKind: ClaudeUsageCommandKind,
-  override?: () => Promise<string | null>
+  override?: () => Promise<string | null>,
+  traceLogger?: ProviderTraceLogger
 ): Promise<string | null> {
-  const output = await readClaudeAuthStatusOutput(root, usageCommandKind, override);
-  return parseClaudeSubscriptionType(output);
+  const output = await readClaudeAuthStatusOutput(root, usageCommandKind, override, traceLogger);
+  const subscriptionType = parseClaudeSubscriptionType(output);
+  traceClaude(
+    traceLogger,
+    usageCommandKind,
+    `Subscription type result: ${subscriptionType ?? "<none>"}.`
+  );
+  return subscriptionType;
 }
 
 async function readClaudeAuthStatusOutput(
   root: string,
   usageCommandKind: ClaudeUsageCommandKind,
-  override?: () => Promise<string | null>
+  override?: () => Promise<string | null>,
+  traceLogger?: ProviderTraceLogger
 ): Promise<string | null> {
   if (override) {
     try {
-      return await override();
+      const output = await override();
+      traceClaude(traceLogger, usageCommandKind, "Using injected auth status output override.");
+      return output;
     } catch {
+      traceClaude(traceLogger, usageCommandKind, "Injected auth status output override failed.");
       return null;
     }
   }
@@ -623,26 +788,36 @@ async function readClaudeAuthStatusOutput(
   const cacheKey = `${usageCommandKind}:${path.resolve(root)}`;
   const cached = claudeAuthStatusOutputCache.get(cacheKey);
   if (cached) {
+    traceClaude(traceLogger, usageCommandKind, "Auth status output cache hit.");
     return cached;
   }
 
   const pending = (async () => {
-    const binaryPath = await resolveClaudeBinaryPath(root, usageCommandKind);
+    const binaryPath = await resolveClaudeBinaryPath(root, usageCommandKind, traceLogger);
     if (!binaryPath) {
+      traceClaude(traceLogger, usageCommandKind, "Skipping auth status command because no Claude binary was found.");
       return null;
     }
 
     try {
+      traceClaude(traceLogger, usageCommandKind, `Running auth status command with ${binaryPath} (TZ=UTC).`);
       const { stdout, stderr } = await execFileAsync(binaryPath, ["auth", "status"], {
         encoding: "utf8",
+        env: buildClaudeCommandEnvironment(),
         maxBuffer: 1024 * 1024,
         timeout: 15_000,
         windowsHide: true
       });
       const combined = [stdout, stderr].filter(Boolean).join("\n").trim();
+      traceClaude(traceLogger, usageCommandKind, "Auth status command completed successfully.");
       return combined || null;
     } catch (error: unknown) {
       const combined = extractExecOutput(error);
+      traceClaude(
+        traceLogger,
+        usageCommandKind,
+        `Auth status command failed: ${formatErrorMessage(error)}.`
+      );
       return combined || null;
     }
   })();
@@ -694,9 +869,10 @@ async function readClaudeUserIdHash(
   root: string,
   usageCommandKind: ClaudeUsageCommandKind,
   override: (() => Promise<string | null>) | undefined,
-  agentName: string
+  agentName: string,
+  traceLogger?: ProviderTraceLogger
 ): Promise<string | null> {
-  const authStatusOutput = await readClaudeAuthStatusOutput(root, usageCommandKind, override);
+  const authStatusOutput = await readClaudeAuthStatusOutput(root, usageCommandKind, override, traceLogger);
   const snapshot = parseClaudeAuthStatusSnapshot(authStatusOutput);
   if (!snapshot) {
     return null;
@@ -708,12 +884,17 @@ async function readClaudeUserIdHash(
 async function readClaudeUsageCommandOutput(
   root: string,
   usageCommandKind: ClaudeUsageCommandKind,
-  override?: () => Promise<string | null>
+  override?: () => Promise<string | null>,
+  traceLogger?: ProviderTraceLogger
 ): Promise<string | null> {
   if (override) {
     try {
-      return await override();
+      const output = await override();
+      traceClaude(traceLogger, usageCommandKind, "Using injected /usage output override.");
+      traceClaude(traceLogger, usageCommandKind, `Usage returned:\n${describeUsageOutput(output)}`);
+      return output;
     } catch {
+      traceClaude(traceLogger, usageCommandKind, "Injected /usage output override failed.");
       return null;
     }
   }
@@ -721,26 +902,35 @@ async function readClaudeUsageCommandOutput(
   const cacheKey = `${usageCommandKind}:${path.resolve(root)}`;
   const cached = claudeUsageOutputCache.get(cacheKey);
   if (cached) {
+    traceClaude(traceLogger, usageCommandKind, "Usage output cache hit.");
     return cached;
   }
 
   const pending = (async () => {
-    const binaryPath = await resolveClaudeBinaryPath(root, usageCommandKind);
+    const binaryPath = await resolveClaudeBinaryPath(root, usageCommandKind, traceLogger);
     if (!binaryPath) {
+      traceClaude(traceLogger, usageCommandKind, "Skipping /usage command because no Claude binary was found.");
+      traceClaude(traceLogger, usageCommandKind, "Usage returned:\n<not available>");
       return null;
     }
 
     try {
+      traceClaude(traceLogger, usageCommandKind, `Running /usage command with ${binaryPath} (TZ=UTC).`);
       const { stdout, stderr } = await execFileAsync(binaryPath, ["-p", "/usage"], {
         encoding: "utf8",
+        env: buildClaudeCommandEnvironment(),
         maxBuffer: 1024 * 1024,
         timeout: 15_000,
         windowsHide: true
       });
       const combined = [stdout, stderr].filter(Boolean).join("\n").trim();
+      traceClaude(traceLogger, usageCommandKind, "Usage command completed successfully.");
+      traceClaude(traceLogger, usageCommandKind, `Usage returned:\n${describeUsageOutput(combined || null)}`);
       return combined || null;
     } catch (error: unknown) {
       const combined = extractExecOutput(error);
+      traceClaude(traceLogger, usageCommandKind, `Usage command failed: ${formatErrorMessage(error)}.`);
+      traceClaude(traceLogger, usageCommandKind, `Usage returned:\n${describeUsageOutput(combined || null)}`);
       return combined || null;
     }
   })();
@@ -759,43 +949,72 @@ function extractExecOutput(error: unknown): string {
   return [stdout, stderr].filter(Boolean).join("\n").trim();
 }
 
-async function resolveClaudeBinaryPath(root: string, usageCommandKind: ClaudeUsageCommandKind): Promise<string | null> {
+async function resolveClaudeBinaryPath(
+  root: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  traceLogger?: ProviderTraceLogger
+): Promise<string | null> {
   const cacheKey = `${usageCommandKind}:${path.resolve(root)}`;
   const cached = claudeBinaryPathCache.get(cacheKey);
   if (cached) {
-    return cached;
+    const binaryPath = await cached;
+    traceClaude(
+      traceLogger,
+      usageCommandKind,
+      `Binary detection cache hit: ${binaryPath ? `found ${binaryPath}` : "not found"}.`
+    );
+    return binaryPath;
   }
 
-  const pending =
-    usageCommandKind === "vscode"
-      ? resolveVsCodeClaudeBinaryPath(root)
-      : resolveCliClaudeBinaryPath(root);
+  const pending = (async () => {
+    traceClaude(traceLogger, usageCommandKind, `Starting binary detection under ${root}.`);
+    const binaryPath =
+      usageCommandKind === "vscode"
+        ? await resolveVsCodeClaudeBinaryPath(root, traceLogger)
+        : await resolveCliClaudeBinaryPath(root, traceLogger);
+    traceClaude(
+      traceLogger,
+      usageCommandKind,
+      `Binary detection result: ${binaryPath ? `found ${binaryPath}` : "not found"}.`
+    );
+    return binaryPath;
+  })();
 
   claudeBinaryPathCache.set(cacheKey, pending);
   return pending;
 }
 
-async function resolveVsCodeClaudeBinaryPath(root: string): Promise<string | null> {
+async function resolveVsCodeClaudeBinaryPath(
+  root: string,
+  traceLogger?: ProviderTraceLogger
+): Promise<string | null> {
   const boosterDirectories = [
     path.join(root, ".vscode", "extensions"),
-    path.join(root, ".vscode-server", "extensions")
+    path.join(root, ".vscode-server", "extensions"),
+    path.join(root, ".vscode-server-insiders", "extensions")
   ];
 
+  let firstFoundPath: string | null = null;
   for (const directory of boosterDirectories) {
-    const binaryPath = await resolveClaudeBinaryFromExtensionDirectory(directory);
-    if (binaryPath) {
-      return binaryPath;
+    const binaryPath = await resolveClaudeBinaryFromExtensionDirectory(directory, traceLogger);
+    if (!firstFoundPath && binaryPath) {
+      firstFoundPath = binaryPath;
     }
   }
 
-  return null;
+  return firstFoundPath;
 }
 
-async function resolveClaudeBinaryFromExtensionDirectory(directory: string): Promise<string | null> {
+async function resolveClaudeBinaryFromExtensionDirectory(
+  directory: string,
+  traceLogger?: ProviderTraceLogger
+): Promise<string | null> {
   let entries: fs.Dirent[];
+  traceClaude(traceLogger, "vscode", `Scanning extension directory ${directory}.`);
   try {
     entries = await fs.promises.readdir(directory, { withFileTypes: true });
-  } catch {
+  } catch (error: unknown) {
+    traceClaude(traceLogger, "vscode", `Could not read ${directory}: ${formatErrorMessage(error)}.`);
     return null;
   }
 
@@ -804,14 +1023,26 @@ async function resolveClaudeBinaryFromExtensionDirectory(directory: string): Pro
     .map((entry) => entry.name)
     .sort(compareClaudeExtensionDirectoryNames);
 
+  if (candidates.length === 0) {
+    traceClaude(traceLogger, "vscode", `No Claude VSCode extension candidates found in ${directory}.`);
+    return null;
+  }
+
+  let firstFoundPath: string | null = null;
   for (const candidate of candidates) {
     const binaryPath = path.join(directory, candidate, "resources", "native-binary", "claude");
-    if (await isReadableExecutableFile(binaryPath)) {
-      return binaryPath;
+    const accessCheck = await checkReadableExecutableFile(binaryPath);
+    traceClaude(
+      traceLogger,
+      "vscode",
+      `Checked ${binaryPath} -> ${accessCheck.ok ? "success" : `failure (${accessCheck.errorMessage ?? "unknown"})`}.`
+    );
+    if (!firstFoundPath && accessCheck.ok) {
+      firstFoundPath = binaryPath;
     }
   }
 
-  return null;
+  return firstFoundPath;
 }
 
 function compareClaudeExtensionDirectoryNames(left: string, right: string): number {
@@ -841,27 +1072,40 @@ function extractClaudeExtensionVersion(directoryName: string): number[] {
     .filter((part) => Number.isFinite(part));
 }
 
-async function resolveCliClaudeBinaryPath(root: string): Promise<string | null> {
+async function resolveCliClaudeBinaryPath(
+  root: string,
+  traceLogger?: ProviderTraceLogger
+): Promise<string | null> {
   const directCandidates = [
     path.join(root, ".local", "bin", "claude"),
     path.join(root, "bin", "claude")
   ];
 
+  let firstFoundPath: string | null = null;
   for (const candidate of directCandidates) {
-    if (await isReadableExecutableFile(candidate)) {
-      return candidate;
+    const accessCheck = await checkReadableExecutableFile(candidate);
+    traceClaude(
+      traceLogger,
+      "cli",
+      `Checked ${candidate} -> ${accessCheck.ok ? "success" : `failure (${accessCheck.errorMessage ?? "unknown"})`}.`
+    );
+    if (!firstFoundPath && accessCheck.ok) {
+      firstFoundPath = candidate;
     }
   }
 
-  return null;
+  return firstFoundPath;
 }
 
-async function isReadableExecutableFile(filePath: string): Promise<boolean> {
+async function checkReadableExecutableFile(filePath: string): Promise<FileAccessCheckResult> {
   try {
     await fs.promises.access(filePath, fs.constants.R_OK | fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      errorMessage: formatErrorMessage(error)
+    };
   }
 }
 
@@ -998,8 +1242,21 @@ function buildLiveLimitWindowRow(
     minUsedPercent: snapshot.usedPercent,
     maxUsedPercent: snapshot.usedPercent,
     totals,
+    modelUsage: buildModelUsageRowsForEvents(inWindowEvents),
     eventCount: totals.eventCount
   };
+}
+
+function buildModelUsageRowsForEvents(events: ParsedUsageEvent[]): ModelUsageRow[] {
+  const byModel = new Map<string, UsageTotals>();
+
+  for (const event of events) {
+    addModelUsage(byModel, event.modelId, event.totals);
+  }
+
+  return [...byModel.entries()]
+    .map<ModelUsageRow>(([modelId, totals]) => ({ modelId, totals }))
+    .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
 }
 
 function toUtcIso(value: number): string {

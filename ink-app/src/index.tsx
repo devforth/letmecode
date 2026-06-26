@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, measureElement, useApp, useInput, useStdin, useStdout, render, type DOMElement } from "ink";
+import { buildHelpText, buildProviderStatsOptions, parseCliOptions } from "./cli-options.js";
 import {
   configureCopilotVsCodeLogging,
   createProviders,
@@ -1297,12 +1298,6 @@ function getLimitRowKey(row: LimitWindowRow): string {
   return `${row.scope}-${row.planType}-${row.limitId}-${row.startTimeUtcIso}-${row.endTimeUtcIso}`;
 }
 
-function parseStatsOptions(argv: string[]): ProviderStatsOptions {
-  return {
-    verbose: argv.includes("-v") || argv.includes("--verbose")
-  };
-}
-
 function useViewportHeight(): number {
   const { stdout } = useStdout();
   const [viewportHeight, setViewportHeight] = useState(() => resolveViewportHeight(stdout.rows));
@@ -1334,6 +1329,13 @@ function resolveViewportHeight(rows: number | undefined): number {
 }
 
 export function main(argv: string[] = process.argv.slice(2)): void {
+  const cliOptions = parseCliOptions(argv);
+  if (cliOptions.showHelp) {
+    process.stdout.write(`${buildHelpText()}\n`);
+    return;
+  }
+
+  const statsOptions: ProviderStatsOptions = buildProviderStatsOptions(cliOptions);
   const restoreFullscreen = enterFullscreenMode(process.stdout);
   const disableMouse = enableMouseReporting(process.stdout);
   const exitHandler = () => {
@@ -1342,7 +1344,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   };
   process.once("exit", exitHandler);
 
-  const instance = render(<App statsOptions={parseStatsOptions(argv)} />, {
+  const instance = render(<App statsOptions={statsOptions} />, {
     stdout: process.stdout,
     stdin: process.stdin,
     stderr: process.stderr

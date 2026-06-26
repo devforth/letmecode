@@ -51,6 +51,18 @@ async function writeClaudeSession(root, relativePath, lines) {
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
 
+async function writeClaudeSessionAt(targetRoot, relativePath, lines) {
+  const target = path.join(targetRoot, relativePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, lines.join("\n"), "utf8");
+}
+
+async function writeExecutable(target, contents) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, contents, "utf8");
+  await fs.chmod(target, 0o755);
+}
+
 async function writeCopilotSession(root, relativePath, lines) {
   const target = path.join(root, ".copilot", "session-state", relativePath);
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -1955,6 +1967,248 @@ test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and build
   });
 });
 
+test("ClaudeUsageProvider traces binary detection and /usage output for Claude and Claude VSCode", async () => {
+  await withTempRoot(async (root) => {
+    const cliBinary = path.join(root, ".local", "bin", "claude");
+    const cliMissingBinary = path.join(root, "bin", "claude");
+    const vscodeMissingBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-1.9.0",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+    const vscodeBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-1.8.0",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+    const buildFakeClaudeBinary = (usageLines) => `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+cat <<'EOF'
+{
+  "loggedIn": true,
+  "email": "trace@example.com",
+  "orgId": "org-1",
+  "orgName": "Trace Org",
+  "subscriptionType": "team"
+}
+EOF
+exit 0
+fi
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
+cat <<'EOF'
+${usageLines.join("\n")}
+EOF
+exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`;
+
+    await writeExecutable(
+      cliBinary,
+      buildFakeClaudeBinary([
+        "Current session: 12% used · resets Jun 25, 12:30pm (UTC)",
+        "Current week (all models): 34% used · resets Jun 28, 12pm (UTC)"
+      ])
+    );
+    await fs.mkdir(path.dirname(vscodeMissingBinary), { recursive: true });
+    await writeExecutable(
+      vscodeBinary,
+      buildFakeClaudeBinary([
+        "Current session: 56% used · resets Jun 25, 1:30pm (UTC)",
+        "Current week (all models): 78% used · resets Jun 29, 3pm (UTC)"
+      ])
+    );
+
+    const logs = [];
+    const traceLogger = {
+      log(message) {
+        logs.push(message);
+      }
+    };
+
+    await new ClaudeUsageProvider({ root }).getStats({ traceLogger });
+    await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }).getStats({ traceLogger });
+
+    const combinedLogs = logs.join("\n");
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${cliBinary} -> success.`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${cliMissingBinary} -> failure (`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${cliBinary}.`), true);
+    assert.equal(combinedLogs.includes("[Claude] Usage returned:\nCurrent session: 12% used"), true);
+    assert.equal(combinedLogs.includes("Current week (all models): 34% used"), true);
+    assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeMissingBinary} -> failure (`), true);
+    assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeBinary} -> success.`), true);
+    assert.equal(combinedLogs.includes(`[Claude VSCode] Binary detection result: found ${vscodeBinary}.`), true);
+    assert.equal(combinedLogs.includes("[Claude VSCode] Usage returned:\nCurrent session: 56% used"), true);
+    assert.equal(combinedLogs.includes("Current week (all models): 78% used"), true);
+  });
+});
+
+test("ClaudeUsageProvider forces TZ=UTC for Claude command execution", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/kyiv-session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T15:30:00.000Z",
+        requestId: "req-kyiv-session",
+        messageId: "msg-kyiv-session",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 120,
+        outputTokens: 12
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-24T10:00:00.000Z",
+        requestId: "req-kyiv-week",
+        messageId: "msg-kyiv-week",
+        entrypoint: "claude-vscode",
+        model: "claude-opus-4-8",
+        inputTokens: 80,
+        outputTokens: 8
+      })
+    ]);
+
+    const vscodeBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-2.1.191-linux-x64",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+    await writeExecutable(
+      vscodeBinary,
+      `#!/bin/sh
+if [ "$TZ" != "UTC" ]; then
+  echo "TZ was not forced to UTC: ${"$"}TZ" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+cat <<'EOF'
+{
+  "loggedIn": true,
+  "email": "kyiv@example.com",
+  "orgId": "org-kyiv",
+  "orgName": "Kyiv Org",
+  "subscriptionType": "team"
+}
+EOF
+exit 0
+fi
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
+cat <<'EOF'
+Current session: 26% used · resets Jun 25, 6:50pm (UTC)
+Current week (all models): 34% used · resets Jun 28, 8pm (UTC)
+EOF
+exit 0
+fi
+echo "unexpected args: ${"$"}*" >&2
+exit 1
+`
+    );
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode",
+      now: () => new Date("2026-06-25T14:19:42.154Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].planType, "team");
+    assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 26);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 26);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 120);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 12);
+    assert.equal(stats.secondaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 34);
+    assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 34);
+    assert.equal(stats.secondaryLimitWindows[0].totals.inputTokens, 200);
+    assert.equal(stats.secondaryLimitWindows[0].totals.outputTokens, 20);
+  });
+});
+
+test("ClaudeUsageProvider finds Linux Claude sessions under ~/.config/claude/projects", async () => {
+  await withTempRoot(async (root) => {
+    const sessionsRoot = path.join(root, ".config", "claude", "projects");
+    await writeClaudeSessionAt(sessionsRoot, "ubuntu-vscode/session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-ubuntu-vscode",
+        messageId: "msg-ubuntu-vscode",
+        entrypoint: "claude-vscode",
+        model: "claude-opus-4-8",
+        inputTokens: 120,
+        outputTokens: 12
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }).getStats();
+
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 120);
+    assert.equal(stats.summary.totals.outputTokens, 12);
+    assert.equal(stats.summary.rootLabel, "~/.config/claude/projects");
+    assert.equal(stats.summary.rootPath, sessionsRoot);
+  });
+});
+
+test("ClaudeUsageProvider accepts a root that already points at a raw Claude projects dump", async () => {
+  await withTempRoot(async (root) => {
+    const projectsRoot = path.join(root, "projects");
+    await writeClaudeSessionAt(projectsRoot, "-home-vsemeniuk-Desktop-tugabet-e2e/session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-dump-vscode",
+        messageId: "msg-dump-vscode",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 90,
+        outputTokens: 9
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root: projectsRoot,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode"
+    }).getStats();
+
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 90);
+    assert.equal(stats.summary.totals.outputTokens, 9);
+    assert.equal(stats.summary.rootLabel, "projects");
+    assert.equal(stats.summary.rootPath, projectsRoot);
+  });
+});
+
 test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/unkeyed-duplicates.jsonl", [
@@ -2070,6 +2324,38 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
             estimatedCredits: 250,
             eventCount: 1
           },
+          modelUsage: [
+            {
+              modelId: "gpt-5.5",
+              totals: {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 150,
+                eventCount: 1
+              }
+            },
+            {
+              modelId: "gpt-5.4-mini",
+              totals: {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 100,
+                eventCount: 0
+              }
+            }
+          ],
           eventCount: 1
         }
       ],
@@ -2119,17 +2405,34 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
           minUsedPercent: 20,
           maxUsedPercent: 20,
           totals: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadInputTokens: 0,
-            cacheWriteInputTokens: 0,
-            cacheWrite5mInputTokens: 0,
-            cacheWrite1hInputTokens: 0,
+            inputTokens: 11,
+            outputTokens: 22,
+            cacheReadInputTokens: 33,
+            cacheWriteInputTokens: 99,
+            cacheWrite5mInputTokens: 44,
+            cacheWrite1hInputTokens: 55,
             reasoningOutputTokens: 0,
             totalTokens: 0,
             estimatedCredits: 50,
             eventCount: 1
           },
+          modelUsage: [
+            {
+              modelId: "claude-sonnet-4-6",
+              totals: {
+                inputTokens: 11,
+                outputTokens: 22,
+                cacheReadInputTokens: 33,
+                cacheWriteInputTokens: 99,
+                cacheWrite5mInputTokens: 44,
+                cacheWrite1hInputTokens: 55,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 50,
+                eventCount: 1
+              }
+            }
+          ],
           eventCount: 1
         }
       ],
@@ -2148,13 +2451,51 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
       agent: report.agent,
       used_percents: report.used_percents,
       used_exhausted: report.used_exhausted,
-      value_dollars: report.value_dollars
+      value_dollars: report.value_dollars,
+      usage_raw: report.usage_raw
     })),
     [
-      { agent: "Codex", used_percents: 97, used_exhausted: true, value_dollars: 2.5 },
-      { agent: "ClaudeVSCode", used_percents: 20, used_exhausted: false, value_dollars: 0.5 }
+      {
+        agent: "Codex",
+        used_percents: 97,
+        used_exhausted: true,
+        value_dollars: 2.5,
+        usage_raw: {
+          "gpt-5.5": {
+            output: 0,
+            input_non_cache: 0,
+            input_cache_read: 0,
+            input_cache_w5m: 0,
+            input_cache_w1h: 0
+          },
+          "gpt-5.4-mini": {
+            output: 0,
+            input_non_cache: 0,
+            input_cache_read: 0,
+            input_cache_w5m: 0,
+            input_cache_w1h: 0
+          }
+        }
+      },
+      {
+        agent: "ClaudeVSCode",
+        used_percents: 20,
+        used_exhausted: false,
+        value_dollars: 0.5,
+        usage_raw: {
+          "claude-sonnet-4-6": {
+            output: 22,
+            input_non_cache: 11,
+            input_cache_read: 33,
+            input_cache_w5m: 44,
+            input_cache_w1h: 55
+          }
+        }
+      }
     ]
   );
+  assert.equal("input_cache_w5m" in reports[0].usage_raw["gpt-5.5"], true);
+  assert.equal("input_cache_w1h" in reports[0].usage_raw["gpt-5.5"], true);
   assert.equal(reports[0].letmecode_version.length > 0, true);
 });
 
@@ -2199,9 +2540,9 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
           minUsedPercent: 3,
           maxUsedPercent: 100,
           totals: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadInputTokens: 0,
+            inputTokens: 12,
+            outputTokens: 34,
+            cacheReadInputTokens: 56,
             cacheWriteInputTokens: 0,
             cacheWrite5mInputTokens: 0,
             cacheWrite1hInputTokens: 0,
@@ -2210,6 +2551,23 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
             estimatedCredits: 250,
             eventCount: 1
           },
+          modelUsage: [
+            {
+              modelId: "gpt-5.5",
+              totals: {
+                inputTokens: 12,
+                outputTokens: 34,
+                cacheReadInputTokens: 56,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 250,
+                eventCount: 1
+              }
+            }
+          ],
           eventCount: 1
         }
       ],
@@ -2226,4 +2584,15 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   assert.equal(Array.isArray(payload.data), true);
   assert.equal(payload.data.length, 1);
   assert.equal(payload.data[0].agent, "Codex");
+  assert.deepEqual(payload.data[0].usage_raw, {
+    "gpt-5.5": {
+      output: 34,
+      input_non_cache: 12,
+      input_cache_read: 56,
+      input_cache_w5m: 0,
+      input_cache_w1h: 0
+    }
+  });
+  assert.equal("input_cache_w5m" in payload.data[0].usage_raw["gpt-5.5"], true);
+  assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
 });

@@ -460,7 +460,7 @@ async function parseSessionFile(
     const planType = typeof rateLimits?.plan_type === "string" ? rateLimits.plan_type : undefined;
 
     addDailyUsage(byDay, eventTimeMs, resolvedModelId, planType, deltaTotals);
-    applyRateLimits(windows, rateLimits, safeEventTimeMs, deltaTotals, planTypes);
+    applyRateLimits(windows, rateLimits, safeEventTimeMs, resolvedModelId, deltaTotals, planTypes);
   }
 
   return { linesRead, tokenEvents, malformedLines };
