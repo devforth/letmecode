@@ -182,6 +182,45 @@ function claudeAssistantEvent({
   });
 }
 
+function claudeOpenedFileInIdeAttachment({
+  timestamp,
+  entrypoint = "cli",
+  sessionId = "claude-session-1",
+  filePath = "/tmp/project/app.ts",
+  version = "2.1.190"
+}) {
+  return JSON.stringify({
+    type: "attachment",
+    timestamp,
+    sessionId,
+    entrypoint,
+    version,
+    attachment: {
+      type: "opened_file_in_ide",
+      filename: filePath
+    }
+  });
+}
+
+function claudeIdeToolsAttachment({
+  timestamp,
+  entrypoint = "cli",
+  sessionId = "claude-session-1",
+  version = "2.1.190"
+}) {
+  return JSON.stringify({
+    type: "attachment",
+    timestamp,
+    sessionId,
+    entrypoint,
+    version,
+    attachment: {
+      type: "deferred_tools_delta",
+      addedNames: ["mcp__ide__getDiagnostics"]
+    }
+  });
+}
+
 test("provider registry stays UI-generic", async () => {
   const providers = createProviders();
   assert.equal(providers.length, 5);
@@ -2066,7 +2105,7 @@ exit 1
 
     const combinedLogs = logs.join("\n");
     assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.claude/projects -> ${path.join(root, ".claude", "projects")} (exists).`), true);
-    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=1 entrypoints=claude-vscode:1, sdk-cli:1"), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=1 source=vscode entrypoints=claude-vscode:1, sdk-cli:1"), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${cliBinary} -> success.`), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${cliMissingBinary} -> failure (`), true);
     assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${cliBinary}.`), true);
@@ -2248,7 +2287,7 @@ test("ClaudeUsageProvider traces Linux Claude limits with zero CLI transcript ma
 
     const combinedLogs = logs.join("\n");
     assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.config/claude/projects -> ${sessionsRoot} (exists).`), true);
-    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=0 entrypoints=claude-vscode:1"), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=0 source=vscode entrypoints=claude-vscode:1"), true);
     assert.equal(combinedLogs.includes("[Claude] No transcript usage matched entrypoints [sdk-cli, claude]. Observed entrypoints=claude-vscode:1."), true);
     assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=44%"), true);
     assert.equal(combinedLogs.includes("matchedEvents=0 input=0 output=0"), true);
@@ -2284,6 +2323,93 @@ test("ClaudeUsageProvider accepts a root that already points at a raw Claude pro
     assert.equal(stats.summary.totals.outputTokens, 9);
     assert.equal(stats.summary.rootLabel, "projects");
     assert.equal(stats.summary.rootPath, projectsRoot);
+  });
+});
+
+test("ClaudeUsageProvider routes generic cli Linux sessions to CLI or VSCode by session hints", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/linux-cli-terminal.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-linux-cli-terminal",
+        messageId: "msg-linux-cli-terminal",
+        entrypoint: "cli",
+        model: "claude-sonnet-4-6",
+        inputTokens: 70,
+        outputTokens: 7
+      })
+    ]);
+    await writeClaudeSession(root, "sample-project/linux-cli-vscode.jsonl", [
+      claudeOpenedFileInIdeAttachment({
+        timestamp: "2026-06-25T08:59:00.000Z",
+        sessionId: "claude-session-1"
+      }),
+      claudeIdeToolsAttachment({
+        timestamp: "2026-06-25T08:59:30.000Z",
+        sessionId: "claude-session-1"
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:00:00.000Z",
+        requestId: "req-linux-cli-vscode-main",
+        messageId: "msg-linux-cli-vscode-main",
+        entrypoint: "cli",
+        model: "claude-opus-4-8",
+        inputTokens: 120,
+        outputTokens: 12
+      })
+    ]);
+    await writeClaudeSession(root, "sample-project/linux-cli-vscode/subagents/agent-1.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:10:00.000Z",
+        requestId: "req-linux-cli-vscode-subagent",
+        messageId: "msg-linux-cli-vscode-subagent",
+        entrypoint: "cli",
+        model: "claude-haiku-4-5-20251001",
+        inputTokens: 30,
+        outputTokens: 3
+      })
+    ]);
+
+    const readUsageCommandOutput = async () => "Current session: 26% used · resets Jun 25, 12pm (UTC)";
+    const readAuthStatusOutput = async () =>
+      JSON.stringify({
+        loggedIn: true,
+        email: "linux-cli@example.com",
+        orgId: "org-linux-cli",
+        orgName: "Linux CLI Org",
+        subscriptionType: "team"
+      });
+    const now = () => new Date("2026-06-25T10:00:00.000Z");
+
+    const cliStats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput,
+      readAuthStatusOutput,
+      now
+    }).getStats();
+    assert.equal(cliStats.summary.tokenEvents, 1);
+    assert.equal(cliStats.summary.totals.inputTokens, 70);
+    assert.equal(cliStats.summary.totals.outputTokens, 7);
+    assert.equal(cliStats.primaryLimitWindows.length, 1);
+    assert.equal(cliStats.primaryLimitWindows[0].totals.inputTokens, 70);
+    assert.equal(cliStats.primaryLimitWindows[0].totals.outputTokens, 7);
+
+    const vscodeStats = await new ClaudeUsageProvider({
+      root,
+      id: "claude-vscode",
+      label: "Claude VSCode",
+      entrypoints: ["claude-vscode"],
+      usageCommandKind: "vscode",
+      readUsageCommandOutput,
+      readAuthStatusOutput,
+      now
+    }).getStats();
+    assert.equal(vscodeStats.summary.tokenEvents, 2);
+    assert.equal(vscodeStats.summary.totals.inputTokens, 150);
+    assert.equal(vscodeStats.summary.totals.outputTokens, 15);
+    assert.equal(vscodeStats.primaryLimitWindows.length, 1);
+    assert.equal(vscodeStats.primaryLimitWindows[0].totals.inputTokens, 150);
+    assert.equal(vscodeStats.primaryLimitWindows[0].totals.outputTokens, 15);
   });
 });
 

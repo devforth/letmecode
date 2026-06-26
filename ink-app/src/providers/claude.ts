@@ -115,9 +115,23 @@ type ParsedUsageEvent = {
 
 type ParsedClaudeSessionFile = {
   filePath: string;
+  sessionGroupKey: string;
   linesRead: number;
   malformedLines: number;
+  sourceKind: ClaudeSessionSourceKind;
+  sourceReason: string;
+  signals: ParsedClaudeSessionFileSignals;
   events: ParsedUsageEvent[];
+};
+
+type ClaudeSessionSourceKind = "cli" | "vscode" | "unknown";
+
+type ParsedClaudeSessionFileSignals = {
+  assistantEntryPoints: string[];
+  hasIdeOpenedFileAttachment: boolean;
+  hasIdeOpenedFileMarker: boolean;
+  hasIdeTooling: boolean;
+  hasQueueOperations: boolean;
 };
 
 type ParsedUsageEventAccumulator = {
@@ -209,7 +223,9 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     );
 
     for (const file of parsedSessionFiles) {
-      const matchingEvents = file.events.filter((event) => this.entrypoints.has(event.entrypoint));
+      const matchingEvents = file.events.filter((event) =>
+        matchesClaudeProviderEvent(event, file, this.entrypoints, this.usageCommandKind)
+      );
       traceClaude(
         options.traceLogger,
         this.usageCommandKind,
@@ -219,6 +235,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
           `malformed=${file.malformedLines}`,
           `assistantUsageEvents=${file.events.length}`,
           `matchingEvents=${matchingEvents.length}`,
+          `source=${file.sourceKind}`,
           `entrypoints=${summarizeEventCounts(file.events.map((event) => event.entrypoint || "<empty>"))}`,
           `models=${summarizeDistinctValues(file.events.map((event) => event.modelId || "unknown"))}`
         ].join(" ")
@@ -622,8 +639,9 @@ async function loadParsedClaudeSessionFiles(
     const files: ParsedClaudeSessionFile[] = [];
     traceClaude(traceLogger, usageCommandKind, `Scanning session files under ${sessionsRoot}.`);
     for await (const filePath of walkSessionFiles(sessionsRoot)) {
-      files.push(await parseSessionFile(filePath));
+      files.push(await parseSessionFile(filePath, sessionsRoot));
     }
+    inferClaudeSessionFileSources(files);
     traceClaude(
       traceLogger,
       usageCommandKind,
@@ -637,13 +655,18 @@ async function loadParsedClaudeSessionFiles(
   return pending;
 }
 
-async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFile> {
+async function parseSessionFile(filePath: string, sessionsRoot: string): Promise<ParsedClaudeSessionFile> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   let linesRead = 0;
   let malformedLines = 0;
   const events: ParsedUsageEvent[] = [];
+  const assistantEntryPoints = new Set<string>();
+  let hasIdeOpenedFileAttachment = false;
+  let hasIdeOpenedFileMarker = false;
+  let hasIdeTooling = false;
+  let hasQueueOperations = false;
 
   for await (const line of lineReader) {
     linesRead += 1;
@@ -659,6 +682,22 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
       continue;
     }
 
+    if (payloadObject.type === "queue-operation") {
+      hasQueueOperations = true;
+    }
+
+    if (messageContainsIdeOpenedFileMarker(asRecord(payloadObject.message))) {
+      hasIdeOpenedFileMarker = true;
+    }
+
+    const attachment = asRecord(payloadObject.attachment);
+    if (attachment?.type === "opened_file_in_ide") {
+      hasIdeOpenedFileAttachment = true;
+    }
+    if (attachmentHasIdeTooling(attachment)) {
+      hasIdeTooling = true;
+    }
+
     if (payloadObject.type !== "assistant") {
       continue;
     }
@@ -671,12 +710,14 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
 
     const modelId = String(message?.model ?? "unknown");
     const eventTimeMs = Date.parse(String(payloadObject.timestamp ?? ""));
+    const entrypoint = typeof payloadObject.entrypoint === "string" ? payloadObject.entrypoint : "";
     const rateLimits = extractRateLimits(payloadObject, message);
     const normalizedUsage = normalizeUsage(usage);
     const usageKey = buildUsageEventKey(payloadObject, message);
     const usageSignature = buildUsageSignature(payloadObject, modelId, normalizedUsage);
+    assistantEntryPoints.add(entrypoint);
     events.push({
-      entrypoint: typeof payloadObject.entrypoint === "string" ? payloadObject.entrypoint : "",
+      entrypoint,
       usageKey,
       usageSignature,
       timestampMs: eventTimeMs,
@@ -686,7 +727,135 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
     });
   }
 
-  return { filePath, linesRead, malformedLines, events };
+  return {
+    filePath,
+    sessionGroupKey: buildClaudeSessionGroupKey(sessionsRoot, filePath),
+    linesRead,
+    malformedLines,
+    sourceKind: "unknown",
+    sourceReason: "unclassified",
+    signals: {
+      assistantEntryPoints: [...assistantEntryPoints].sort(),
+      hasIdeOpenedFileAttachment,
+      hasIdeOpenedFileMarker,
+      hasIdeTooling,
+      hasQueueOperations
+    },
+    events
+  };
+}
+
+function buildClaudeSessionGroupKey(sessionsRoot: string, filePath: string): string {
+  const relativePath = path.relative(sessionsRoot, filePath);
+  if (!relativePath || relativePath.startsWith("..")) {
+    return filePath;
+  }
+
+  const normalizedRelativePath = relativePath.split(path.sep).join("/");
+  const subagentMatch = normalizedRelativePath.match(/^(.*\/[^/]+)\/subagents\/[^/]+\.jsonl$/);
+  if (subagentMatch?.[1]) {
+    return subagentMatch[1];
+  }
+
+  return normalizedRelativePath.replace(/\.jsonl$/i, "");
+}
+
+function inferClaudeSessionFileSources(files: ParsedClaudeSessionFile[]): void {
+  const groups = new Map<
+    string,
+    {
+      assistantEntryPoints: Set<string>;
+      hasIdeHints: boolean;
+    }
+  >();
+
+  for (const file of files) {
+    const group = groups.get(file.sessionGroupKey) ?? {
+      assistantEntryPoints: new Set<string>(),
+      hasIdeHints: false
+    };
+
+    for (const entrypoint of file.signals.assistantEntryPoints) {
+      group.assistantEntryPoints.add(entrypoint);
+    }
+
+    group.hasIdeHints =
+      group.hasIdeHints ||
+      file.signals.hasIdeOpenedFileAttachment ||
+      file.signals.hasIdeOpenedFileMarker ||
+      file.signals.hasIdeTooling ||
+      file.signals.hasQueueOperations;
+
+    groups.set(file.sessionGroupKey, group);
+  }
+
+  for (const file of files) {
+    const group = groups.get(file.sessionGroupKey);
+    const { kind, reason } = classifyClaudeSessionGroup(group);
+    file.sourceKind = kind;
+    file.sourceReason = reason;
+  }
+}
+
+function classifyClaudeSessionGroup(
+  group:
+    | {
+        assistantEntryPoints: Set<string>;
+        hasIdeHints: boolean;
+      }
+    | undefined
+): { kind: ClaudeSessionSourceKind; reason: string } {
+  if (!group) {
+    return { kind: "unknown", reason: "missing session group signals" };
+  }
+
+  if (group.assistantEntryPoints.has("claude-vscode")) {
+    return { kind: "vscode", reason: "explicit claude-vscode entrypoint" };
+  }
+
+  if (group.assistantEntryPoints.has("sdk-cli") || group.assistantEntryPoints.has("claude")) {
+    return { kind: "cli", reason: "explicit sdk-cli/claude entrypoint" };
+  }
+
+  if (group.assistantEntryPoints.has("cli")) {
+    return group.hasIdeHints
+      ? { kind: "vscode", reason: "generic cli entrypoint with IDE session hints" }
+      : { kind: "cli", reason: "generic cli entrypoint without IDE session hints" };
+  }
+
+  return { kind: "unknown", reason: "no assistant entrypoints" };
+}
+
+function attachmentHasIdeTooling(attachment: Record<string, unknown> | null): boolean {
+  if (attachment?.type !== "deferred_tools_delta") {
+    return false;
+  }
+
+  return extractStringArray(attachment.addedNames).some((name) => name.startsWith("mcp__ide__"));
+}
+
+function messageContainsIdeOpenedFileMarker(message: Record<string, unknown> | null): boolean {
+  const content = message?.content;
+  if (typeof content === "string") {
+    return content.includes("<ide_opened_file>");
+  }
+
+  if (!Array.isArray(content)) {
+    return false;
+  }
+
+  return content.some((item) => {
+    const contentItem = asRecord(item);
+    return typeof contentItem?.text === "string" && contentItem.text.includes("<ide_opened_file>");
+  });
+}
+
+function extractStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string | null {
@@ -767,6 +936,27 @@ function shouldReplaceUsageEvent(previous: ParsedUsageEvent, next: ParsedUsageEv
   }
 
   return false;
+}
+
+function matchesClaudeProviderEvent(
+  event: ParsedUsageEvent,
+  file: ParsedClaudeSessionFile,
+  entrypoints: Set<string>,
+  usageCommandKind: ClaudeUsageCommandKind
+): boolean {
+  if (entrypoints.has(event.entrypoint)) {
+    return true;
+  }
+
+  if (event.entrypoint !== "cli") {
+    return false;
+  }
+
+  if (usageCommandKind === "vscode") {
+    return file.sourceKind === "vscode";
+  }
+
+  return file.sourceKind === "cli";
 }
 
 function normalizeTimestamp(value: number): number {
