@@ -29,6 +29,12 @@ type ScrollableLine = {
   inverse?: boolean;
 };
 
+type ScrollableLines = {
+  headerLines?: ScrollableLine[];
+  bodyLines: ScrollableLine[];
+  footerLines?: ScrollableLine[];
+};
+
 type CopilotActionId = "vscode";
 
 type MouseClick = { column: number; row: number };
@@ -53,37 +59,18 @@ const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
 
 const CODEX_CREDIT_COST_USD = 0.01;
 
-const LIMIT_TABLE_COLUMNS = [
-  { header: "Plan", width: 5 },
-  { header: "Window", width: 6 },
-  { header: "Used", width: 8 },
-  { header: "Start", width: 14 },
-  { header: "End", width: 14 },
-  { header: "API eq.", width: 8 }
-] as const;
+const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Window", "Used", "Start", "End", "API eq."] as const;
+const DAILY_TABLE_HEADERS = ["Day", "Ev", "Input", "Output", "C read", "C write", "API eq."] as const;
+const MODEL_TABLE_HEADERS = ["Model", "Input", "Output", "C read", "C write", "API eq."] as const;
 
-const DAILY_TABLE_COLUMNS = [
-  { header: "Day", width: 9 },
-  { header: "Ev", width: 5 },
-  { header: "Input", width: 8 },
-  { header: "Output", width: 7 },
-  { header: "C read", width: 8 },
-  { header: "C write", width: 7 },
-  { header: "API eq.", width: 7 }
-] as const;
+type TextTable = {
+  headers: string[];
+  widths: number[];
+};
 
-const MODEL_TABLE_COLUMNS = [
-  { header: "Model", width: 16 },
-  { header: "Input", width: 7 },
-  { header: "Output", width: 7 },
-  { header: "C read", width: 7 },
-  { header: "C write", width: 7 },
-  { header: "API eq.", width: 7 }
-] as const;
-
-type TextTableColumn = {
-  header: string;
-  width: number;
+type TextTableRow = {
+  key: string;
+  cells: string[];
 };
 
 const COPILOT_ACTIONS: Array<{ id: CopilotActionId; label: string; enabled: boolean }> = [
@@ -310,7 +297,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   return (
     <Box flexDirection="column" paddingX={1} height={viewportHeight} overflow="hidden">
       <Text bold color="cyan">
-        letmecode usage dashboard
+        LetMeCode Usage Dashboard
       </Text>
       <Box marginTop={1}>
         <Text color="gray">Provider  </Text>
@@ -578,15 +565,12 @@ function LimitWindowsPanel(props: {
   selectedRowKey?: string;
   availableHeight: number;
 }): React.JSX.Element {
-  const bodyLines = [
-    ...buildLimitWindowTableLines("primary", "Primary limits", props.stats.primaryLimitWindows, props.selectedRowKey),
-    { key: "section-gap", text: "" },
-    ...buildLimitWindowTableLines("secondary", "Secondary limits", props.stats.secondaryLimitWindows, props.selectedRowKey)
-  ];
+  const tableLines = buildLimitWindowTableLines(props.stats, props.selectedRowKey);
 
   return (
     <ScrollableLineViewport
-      bodyLines={bodyLines}
+      {...tableLines}
+      selectedBodyLineKey={props.selectedRowKey ? `limit-row:${props.selectedRowKey}` : undefined}
       availableHeight={props.availableHeight}
     />
   );
@@ -602,14 +586,14 @@ function UsageByModelPanel(props: {
   }
 
   const totals = props.stats.summary.totals;
-  const bodyLines = buildModelUsageTableLines(
+  const tableLines = buildModelUsageTableLines(
     props.stats.modelUsage,
     totals,
     props.selectedModelId
   );
   return (
     <ScrollableLineViewport
-      bodyLines={bodyLines}
+      {...tableLines}
       selectedBodyLineKey={props.selectedModelId ? `model-row:${props.selectedModelId}` : undefined}
       availableHeight={props.availableHeight}
     />
@@ -625,10 +609,10 @@ function DayToDayPanel(props: {
     return <Text color="gray">No day-by-day usage found.</Text>;
   }
 
-  const bodyLines = buildDailyUsageTableLines(props.stats.dayUsage, props.selectedDayKey);
+  const tableLines = buildDailyUsageTableLines(props.stats.dayUsage, props.selectedDayKey);
   return (
     <ScrollableLineViewport
-      bodyLines={bodyLines}
+      {...tableLines}
       selectedBodyLineKey={props.selectedDayKey ? `day-row:${props.selectedDayKey}` : undefined}
       availableHeight={props.availableHeight}
     />
@@ -706,172 +690,207 @@ function ScrollableViewportLine(props: { line: ScrollableLine }): React.JSX.Elem
   );
 }
 
+function createTextTable(
+  headers: readonly string[],
+  rows: string[][]
+): TextTable {
+  return {
+    headers: [...headers],
+    widths: headers.map((header, index) =>
+      Math.max(
+        header.length,
+        ...rows.map((row) => (row[index] ?? "").length)
+      )
+    )
+  };
+}
+
 function buildTableBorder(
-  columns: readonly TextTableColumn[],
+  table: TextTable,
   left: string,
   middle: string,
   right: string
 ): string {
-  return `${left}${columns.map((column) => "─".repeat(column.width + 2)).join(middle)}${right}`;
+  return `${left}${table.widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`;
 }
 
 function buildTableRow(
-  columns: readonly TextTableColumn[],
+  table: TextTable,
   cells: string[]
 ): string {
-  return `│${columns.map((column, index) => ` ${pad(cells[index] ?? "", column.width)} `).join("│")}│`;
+  return `│${table.widths.map((width, index) => ` ${pad(cells[index] ?? "", width)} `).join("│")}│`;
 }
 
-function buildLimitWindowTableLines(
-  scope: "primary" | "secondary",
-  title: string,
-  windows: LimitWindowRow[],
-  selectedRowKey?: string
-): ScrollableLine[] {
-  if (windows.length === 0) {
-    return [
-      { key: `${scope}-title`, text: title, bold: true },
-      { key: `${scope}-empty`, text: "No windows found.", color: "gray" }
-    ];
+function buildTextTableLines(options: {
+  title: string;
+  lineKeyPrefix: string;
+  headers: readonly string[];
+  rows: TextTableRow[];
+  selectedRowKey?: string;
+  separatorAfterRowKeys?: Set<string>;
+  totalRow?: TextTableRow;
+}): ScrollableLines {
+  if (options.rows.length === 0 && !options.totalRow) {
+    return {
+      bodyLines: [
+        { key: `${options.lineKeyPrefix}-title`, text: options.title, bold: true },
+        { key: `${options.lineKeyPrefix}-empty`, text: "No rows found.", color: "gray" }
+      ]
+    };
   }
 
-  return [
-    { key: `${scope}-title`, text: title, bold: true },
+  const tableRows = options.totalRow
+    ? [...options.rows, options.totalRow]
+    : options.rows;
+  const table = createTextTable(
+    options.headers,
+    tableRows.map((row) => row.cells)
+  );
+  const headerLines: ScrollableLine[] = [
+    { key: `${options.lineKeyPrefix}-title`, text: options.title, bold: true },
     {
-      key: `${scope}-top-border`,
-      text: buildTableBorder(LIMIT_TABLE_COLUMNS, "┌", "┬", "┐"),
+      key: `${options.lineKeyPrefix}-top-border`,
+      text: buildTableBorder(table, "┌", "┬", "┐"),
       color: "gray"
     },
     {
-      key: `${scope}-header`,
-      text: buildTableRow(LIMIT_TABLE_COLUMNS, LIMIT_TABLE_COLUMNS.map((column) => column.header)),
+      key: `${options.lineKeyPrefix}-header`,
+      text: buildTableRow(table, table.headers),
       color: "gray"
     },
     {
-      key: `${scope}-header-border`,
-      text: buildTableBorder(LIMIT_TABLE_COLUMNS, "├", "┼", "┤"),
-      color: "gray"
-    },
-    ...windows.map<ScrollableLine>((window) => {
-      const lineKey = getLimitRowKey(window);
-      const windowLabel = formatCompactWindowMinutes(window.windowMinutes);
-      const usedLabel = formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent);
-      const isSelected = selectedRowKey === lineKey;
-      return {
-        key: `limit-row:${lineKey}`,
-        text: buildTableRow(LIMIT_TABLE_COLUMNS, [
-          window.planType,
-          windowLabel,
-          usedLabel,
-          formatCompactLocalDateTime(window.startTimeUtcIso),
-          formatCompactLocalDateTime(window.endTimeUtcIso),
-          formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD)
-        ]),
-        inverse: isSelected,
-        color: isSelected ? "cyan" : undefined
-      };
-    }),
-    {
-      key: `${scope}-bottom-border`,
-      text: buildTableBorder(LIMIT_TABLE_COLUMNS, "└", "┴", "┘"),
+      key: `${options.lineKeyPrefix}-header-border`,
+      text: buildTableBorder(table, "├", "┼", "┤"),
       color: "gray"
     }
   ];
+  const bodyLines = options.rows.flatMap<ScrollableLine>((row) => {
+    const isSelected = options.selectedRowKey === row.key;
+    const lines: ScrollableLine[] = [{
+      key: row.key,
+      text: buildTableRow(table, row.cells),
+      inverse: isSelected,
+      color: isSelected ? "cyan" : undefined
+    }];
+
+    if (options.separatorAfterRowKeys?.has(row.key)) {
+      lines.push({
+        key: `${row.key}-separator`,
+        text: buildTableBorder(table, "├", "┼", "┤"),
+        color: "gray"
+      });
+    }
+
+    return lines;
+  });
+  const footerLines: ScrollableLine[] = [];
+  if (options.totalRow) {
+    footerLines.push(
+      {
+        key: `${options.lineKeyPrefix}-total-border`,
+        text: buildTableBorder(table, "├", "┼", "┤"),
+        color: "gray"
+      },
+      {
+        key: options.totalRow.key,
+        text: buildTableRow(table, options.totalRow.cells),
+        color: "cyan"
+      }
+    );
+  }
+
+  footerLines.push({
+    key: `${options.lineKeyPrefix}-bottom-border`,
+    text: buildTableBorder(table, "└", "┴", "┘"),
+    color: "gray"
+  });
+
+  return {
+    headerLines,
+    bodyLines,
+    footerLines
+  };
+}
+
+function buildLimitWindowTableLines(
+  stats: ProviderStats,
+  selectedRowKey?: string
+): ScrollableLines {
+  const primaryRows = stats.primaryLimitWindows.map((window) => buildLimitWindowTableRow(window));
+  const secondaryRows = stats.secondaryLimitWindows.map((window) => buildLimitWindowTableRow(window));
+  const separatorAfterRowKeys =
+    primaryRows.length > 0 && secondaryRows.length > 0
+      ? new Set([primaryRows[primaryRows.length - 1].key])
+      : undefined;
+
+  return buildTextTableLines({
+    title: "Limits",
+    lineKeyPrefix: "limits",
+    headers: LIMIT_TABLE_HEADERS,
+    rows: [...primaryRows, ...secondaryRows],
+    selectedRowKey: selectedRowKey ? `limit-row:${selectedRowKey}` : undefined,
+    separatorAfterRowKeys
+  });
+}
+
+function buildLimitWindowTableRow(window: LimitWindowRow): TextTableRow {
+  return {
+    key: `limit-row:${getLimitRowKey(window)}`,
+    cells: [
+      window.scope,
+      window.planType,
+      formatCompactWindowMinutes(window.windowMinutes),
+      formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent),
+      formatCompactLocalDateTime(window.startTimeUtcIso),
+      formatCompactLocalDateTime(window.endTimeUtcIso),
+      formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD)
+    ]
+  };
 }
 
 function buildDailyUsageTableLines(
   rows: DailyUsageRow[],
   selectedDayKey?: string
-): ScrollableLine[] {
-  return [
-    { key: "daily-title", text: "Daily usage", bold: true },
-    {
-      key: "daily-top-border",
-      text: buildTableBorder(DAILY_TABLE_COLUMNS, "┌", "┬", "┐"),
-      color: "gray"
-    },
-    {
-      key: "daily-header",
-      text: buildTableRow(DAILY_TABLE_COLUMNS, DAILY_TABLE_COLUMNS.map((column) => column.header)),
-      color: "gray"
-    },
-    {
-      key: "daily-header-border",
-      text: buildTableBorder(DAILY_TABLE_COLUMNS, "├", "┼", "┤"),
-      color: "gray"
-    },
-    ...rows.map<ScrollableLine>((row) => {
-      const isSelected = selectedDayKey === row.dayKey;
-      return {
-        key: `day-row:${row.dayKey}`,
-        text: buildTableRow(DAILY_TABLE_COLUMNS, [
-          formatUtcDay(row.dayKey),
-          formatCompactTokenCount(row.totals.eventCount),
-          formatCompactTokenCount(row.totals.inputTokens),
-          formatCompactTokenCount(row.totals.outputTokens),
-          formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens),
-          formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens),
-          formatUsageUsd(row.totals)
-        ]),
-        inverse: isSelected,
-        color: isSelected ? "cyan" : undefined
-      };
-    }),
-    {
-      key: "daily-bottom-border",
-      text: buildTableBorder(DAILY_TABLE_COLUMNS, "└", "┴", "┘"),
-      color: "gray"
-    }
-  ];
+): ScrollableLines {
+  return buildTextTableLines({
+    title: "Daily usage",
+    lineKeyPrefix: "daily",
+    headers: DAILY_TABLE_HEADERS,
+    rows: rows.map<TextTableRow>((row) => ({
+      key: `day-row:${row.dayKey}`,
+      cells: [
+        formatUtcDay(row.dayKey),
+        formatCompactTokenCount(row.totals.eventCount),
+        formatCompactTokenCount(row.totals.inputTokens),
+        formatCompactTokenCount(row.totals.outputTokens),
+        formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens),
+        formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens),
+        formatUsageUsd(row.totals)
+      ]
+    })),
+    selectedRowKey: selectedDayKey ? `day-row:${selectedDayKey}` : undefined
+  });
 }
 
 function buildModelUsageTableLines(
   rows: ModelUsageRow[],
   totals: UsageTotals,
   selectedModelId?: string
-): ScrollableLine[] {
-  return [
-    { key: "model-title", text: "Model usage", bold: true },
-    {
-      key: "model-top-border",
-      text: buildTableBorder(MODEL_TABLE_COLUMNS, "┌", "┬", "┐"),
-      color: "gray"
-    },
-    {
-      key: "model-header",
-      text: buildTableRow(MODEL_TABLE_COLUMNS, MODEL_TABLE_COLUMNS.map((column) => column.header)),
-      color: "gray"
-    },
-    {
-      key: "model-header-border",
-      text: buildTableBorder(MODEL_TABLE_COLUMNS, "├", "┼", "┤"),
-      color: "gray"
-    },
-    ...rows.map<ScrollableLine>((row) => {
-      const isSelected = selectedModelId === row.modelId;
-      return {
-        key: `model-row:${row.modelId}`,
-        text: formatModelUsageTableRow(row.modelId, row.totals),
-        inverse: isSelected,
-        color: isSelected ? "cyan" : undefined
-      };
-    }),
-    {
-      key: "model-total-border",
-      text: buildTableBorder(MODEL_TABLE_COLUMNS, "├", "┼", "┤"),
-      color: "gray"
-    },
-    {
+): ScrollableLines {
+  return buildTextTableLines({
+    title: "Model usage",
+    lineKeyPrefix: "model",
+    headers: MODEL_TABLE_HEADERS,
+    rows: rows.map<TextTableRow>((row) => ({
+      key: `model-row:${row.modelId}`,
+      cells: formatModelUsageTableCells(row.modelId, row.totals)
+    })),
+    selectedRowKey: selectedModelId ? `model-row:${selectedModelId}` : undefined,
+    totalRow: {
       key: "model-total",
-      text: formatModelUsageTableRow("TOTAL", totals),
-      color: "cyan"
-    },
-    {
-      key: "model-bottom-border",
-      text: buildTableBorder(MODEL_TABLE_COLUMNS, "└", "┴", "┘"),
-      color: "gray"
+      cells: formatModelUsageTableCells("TOTAL", totals)
     }
-  ];
+  });
 }
 
 function SelectionDetailsPanel(props: {
@@ -1216,16 +1235,16 @@ function pad(value: string, length: number): string {
   return value.length >= length ? value.slice(0, length) : value.padEnd(length);
 }
 
-function formatModelUsageTableRow(modelId: string, totals: UsageTotals): string {
+function formatModelUsageTableCells(modelId: string, totals: UsageTotals): string[] {
   const displayModelId = modelId === "unknown" ? "-" : modelId;
-  return buildTableRow(MODEL_TABLE_COLUMNS, [
+  return [
     displayModelId,
     formatCompactTokenCount(totals.inputTokens),
     formatCompactTokenCount(totals.outputTokens),
     formatCompactCacheTokens(totals, totals.cacheReadInputTokens),
     formatCompactCacheTokens(totals, totals.cacheWriteInputTokens),
     formatUsageUsd(totals, modelId)
-  ]);
+  ];
 }
 
 function UsageBreakdownLines(props: { totals: UsageTotals }): React.JSX.Element {
