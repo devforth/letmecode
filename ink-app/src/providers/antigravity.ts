@@ -112,18 +112,6 @@ const QUOTA_WINDOWS = {
   }
 >;
 
-const GEMINI_QUOTA_MODELS = [
-  "gemini-3.5-flash",
-  "gemini-3.1-pro",
-  "gemini-3-flash"
-];
-
-const THIRD_PARTY_QUOTA_MODELS = [
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "gpt-oss-120b"
-];
-
 const QUOTA_MODEL_GROUPS = [
   {
     pattern: /gemini/,
