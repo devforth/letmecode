@@ -893,9 +893,10 @@ function formatUsd(value: number): string {
 }
 
 function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
+  const fmt = (v: number) => `${Math.round(v)}%`;
   return minUsedPercent === maxUsedPercent
-    ? `${minUsedPercent}%`
-    : `${minUsedPercent}%->${maxUsedPercent}%`;
+    ? fmt(minUsedPercent)
+    : `${fmt(minUsedPercent)}->${fmt(maxUsedPercent)}`;
 }
 
 function buildLimitSectionSeparatorLine(): string {
