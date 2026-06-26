@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import https from "node:https";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,6 +11,8 @@ import {
   addUsageTotals,
   createEmptyUsageTotals,
   sumUsageTotals,
+  type LimitWindowRow,
+  type LimitWindowScope,
   type ModelUsageRow,
   type ProviderStats,
   type ProviderStatsOptions,
@@ -83,6 +86,26 @@ const UNPRICED_MODELS = new Set([
   "gpt-oss-120b"
 ]);
 
+const ANTIGRAVITY_PRIMARY_WINDOW_MINUTES = 5 * 60;
+const ANTIGRAVITY_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
+const ANTIGRAVITY_QUOTA_SUMMARY_PATH =
+  "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
+const ANTIGRAVITY_DEBUG_LOG_PATH =
+  process.env.LETMECODE_ANTIGRAVITY_DEBUG_LOG ??
+  path.join(os.tmpdir(), "letmecode-antigravity-debug.jsonl");
+
+const GEMINI_QUOTA_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.1-pro",
+  "gemini-3-flash"
+];
+
+const THIRD_PARTY_QUOTA_MODELS = [
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "gpt-oss-120b"
+];
+
 const MODEL_ALIASES: Record<string, string> = {
   "gemini-3-flash-a": "gemini-3-flash",
   "gemini-3-flash-preview": "gemini-3-flash",
@@ -105,31 +128,75 @@ export type AntigravityUsageRecord = {
   reasoning: number;
 };
 
-type AntigravityUsageProviderOptions = {
+export type AntigravityQuotaEntry = {
+  limitId: string;
+  modelIds: string[];
+  remainingFraction: number;
+  resetAt: number;
+  windowMinutes: number;
+  scope: LimitWindowScope;
+  planType: string;
+};
+
+export type AntigravityQuotaSnapshot = {
+  entries: AntigravityQuotaEntry[];
+  fetchedAt: number;
+};
+
+export type AntigravityUsageProviderOptions = {
   collectUsage?: () => Promise<AntigravityUsageRecord[]>;
+  collectQuota?: () => Promise<AntigravityQuotaSnapshot>;
 };
 
 export class AntigravityUsageProvider extends UsageProviderBase {
   private readonly collectUsage: () => Promise<AntigravityUsageRecord[]>;
+  private readonly collectQuota: () => Promise<AntigravityQuotaSnapshot>;
 
   constructor(options: AntigravityUsageProviderOptions = {}) {
     super("antigravity", "Antigravity");
     this.collectUsage =
       options.collectUsage ??
       collectAntigravityUsageFromTokscale;
+    this.collectQuota =
+      options.collectQuota ??
+      collectAntigravityQuotaFromLocalRpc;
   }
 
   async getStats(
     _options: ProviderStatsOptions = {}
   ): Promise<ProviderStats> {
     const warnings: string[] = [];
-    let records: AntigravityUsageRecord[] = [];
+    const [usageResult, quotaResult] = await Promise.allSettled([
+      this.collectUsage(),
+      this.collectQuota()
+    ]);
 
-    try {
-      records = await this.collectUsage();
-    } catch {
+    const records =
+      usageResult.status === "fulfilled"
+        ? usageResult.value
+        : [];
+    const quotaSnapshot =
+      quotaResult.status === "fulfilled"
+        ? quotaResult.value
+        : null;
+
+    if (usageResult.status === "rejected") {
       warnings.push(
-        "Open Antigravity IDE before running LetMeCode so token usage can be synchronized."
+        "Could not synchronize Antigravity token usage through Tokscale."
+      );
+    }
+    if (quotaResult.status === "rejected") {
+      warnings.push(
+        "Live Antigravity quota is unavailable. Ensure the Antigravity IDE is running."
+      );
+    } else if (quotaResult.value.entries.length === 0) {
+      warnings.push(
+        "Antigravity local quota RPC responded, but no recognized model quota windows were found."
+      );
+    }
+    if (isAntigravityDebugEnabled()) {
+      warnings.push(
+        `Antigravity debug log: ${ANTIGRAVITY_DEBUG_LOG_PATH}`
       );
     }
 
@@ -178,6 +245,15 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       );
     }
 
+    const limitWindows =
+      quotaSnapshot?.entries.map((quota) =>
+        buildAntigravityLimitWindow(
+          quota,
+          selectedRecords,
+          quotaSnapshot.fetchedAt
+        )
+      ) ?? [];
+
     return {
       providerId: this.id,
       providerLabel: this.label,
@@ -189,14 +265,22 @@ export class AntigravityUsageProvider extends UsageProviderBase {
           modelUsage.map((row) => row.totals)
         ),
         distinctModels: modelUsage.map((row) => row.modelId),
-        distinctPlanTypes: [],
-        rootLabel: "Antigravity IDE sync",
-        rootPath: "antigravity-ide-rpc"
+        distinctPlanTypes: [
+          ...new Set(
+            limitWindows.map((window) => window.planType)
+          )
+        ],
+        rootLabel: "Tokscale usage + Antigravity local quota",
+        rootPath: getAntigravityCacheRoot()
       },
       modelUsage,
       dayUsage: buildDailyUsageRows(byDay),
-      primaryLimitWindows: [],
-      secondaryLimitWindows: [],
+      primaryLimitWindows: limitWindows.filter(
+        (window) => window.scope === "primary"
+      ),
+      secondaryLimitWindows: limitWindows.filter(
+        (window) => window.scope === "secondary"
+      ),
       warnings
     };
   }
@@ -206,6 +290,10 @@ export async function collectAntigravityUsage(): Promise<
   AntigravityUsageRecord[]
 > {
   return collectAntigravityUsageFromTokscale();
+}
+
+export async function collectAntigravityQuota(): Promise<AntigravityQuotaSnapshot> {
+  return collectAntigravityQuotaFromLocalRpc();
 }
 
 async function collectAntigravityUsageFromTokscale(): Promise<AntigravityUsageRecord[]> {
@@ -230,10 +318,595 @@ async function runTokscale(
   );
 }
 
+async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSnapshot> {
+  const server = await findAntigravityLocalServer();
+  if (!server) {
+    throw new Error("Antigravity local language server was not found.");
+  }
+
+  const fetchedAt = Date.now();
+  const payload = await readAntigravityQuotaSummary(server);
+  const entries = parseAntigravityQuotaEntries(payload);
+  await writeAntigravityDebugEvent("quota-rpc-response", {
+    port: server.port,
+    path: ANTIGRAVITY_QUOTA_SUMMARY_PATH,
+    entries: entries.map((entry) => ({
+      limitId: entry.limitId,
+      remainingFraction: entry.remainingFraction,
+      resetAt: new Date(entry.resetAt).toISOString(),
+      windowMinutes: entry.windowMinutes,
+      scope: entry.scope,
+      modelIds: entry.modelIds
+    })),
+    ...(isAntigravityRawDebugEnabled() ? { payload } : {})
+  });
+  return {
+    entries,
+    fetchedAt
+  };
+}
+
+function recordsForQuotaWindow(
+  quota: AntigravityQuotaEntry,
+  records: AntigravityUsageRecord[]
+): AntigravityUsageRecord[] {
+  if (quota.modelIds.length === 0) {
+    return [];
+  }
+
+  const endMs = quota.resetAt;
+  const startMs = endMs - quota.windowMinutes * 60_000;
+  const modelIds = new Set(quota.modelIds.map(resolveModelId));
+
+  return records.filter((record) => {
+    const modelId = resolveModelId(record.modelId);
+
+    return (
+      record.timestamp >= startMs &&
+      record.timestamp < endMs &&
+      modelIds.has(modelId)
+    );
+  });
+}
+
+function buildAntigravityLimitWindow(
+  quota: AntigravityQuotaEntry,
+  records: AntigravityUsageRecord[],
+  fetchedAt: number
+): LimitWindowRow {
+  const matchingRecords = recordsForQuotaWindow(quota, records);
+  const totals = sumUsageTotals(
+    matchingRecords.map((record) =>
+      usageRecordToTotals(
+        resolveModelId(record.modelId),
+        record
+      )
+    )
+  );
+  const usedPercent = clampPercent((1 - quota.remainingFraction) * 100);
+
+  // Quota percentage is authoritative from Antigravity RPC. Token totals are
+  // reconstructed from locally available Tokscale events inside the same time
+  // window and may not match Antigravity's internal quota accounting exactly.
+  return {
+    scope: quota.scope,
+    planType: quota.planType,
+    limitId: quota.limitId,
+    windowMinutes: quota.windowMinutes,
+    startTimeUtcIso: new Date(
+      quota.resetAt - quota.windowMinutes * 60_000
+    ).toISOString(),
+    endTimeUtcIso: new Date(quota.resetAt).toISOString(),
+    firstSeenUtcIso: new Date(fetchedAt).toISOString(),
+    lastSeenUtcIso: new Date(fetchedAt).toISOString(),
+    minUsedPercent: usedPercent,
+    maxUsedPercent: usedPercent,
+    totals,
+    eventCount: totals.eventCount
+  };
+}
+
+type AntigravityProcess = {
+  pid: number;
+  csrfToken: string;
+};
+
+type AntigravityLocalServer = {
+  port: number;
+  csrfToken: string;
+};
+
+const antigravityHttpsAgent = new https.Agent({
+  rejectUnauthorized: false
+});
+
+async function findAntigravityLocalServer(): Promise<AntigravityLocalServer | null> {
+  const process = await findAntigravityProcess();
+  if (!process) {
+    await writeAntigravityDebugEvent("process-not-found", {});
+    return null;
+  }
+
+  const ports = await findListeningLoopbackPorts(process.pid);
+  await writeAntigravityDebugEvent("process-found", {
+    pid: process.pid,
+    ports
+  });
+  return probeAntigravityPorts(ports, process.csrfToken);
+}
+
+async function findAntigravityProcess(): Promise<AntigravityProcess | null> {
+  const fromProc = await findAntigravityProcessFromProc();
+  if (fromProc) {
+    return fromProc;
+  }
+
+  return findAntigravityProcessFromPs();
+}
+
+async function findAntigravityProcessFromProc(): Promise<AntigravityProcess | null> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir("/proc", { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) {
+      continue;
+    }
+
+    const pid = Number(entry.name);
+    const cmdline = await readProcCmdline(path.join("/proc", entry.name, "cmdline"));
+    const process = parseAntigravityProcessFromArgs(pid, cmdline);
+    if (process) {
+      return process;
+    }
+  }
+
+  return null;
+}
+
+async function readProcCmdline(filePath: string): Promise<string[]> {
+  try {
+    const content = await fs.promises.readFile(filePath);
+    return content
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function findAntigravityProcessFromPs(): Promise<AntigravityProcess | null> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid=,args="], {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 5_000
+    });
+
+    for (const line of stdout.split(/\r?\n/)) {
+      const match = line.match(/^\s*(\d+)\s+(.+)$/);
+      if (!match) {
+        continue;
+      }
+
+      const process = parseAntigravityProcessFromArgs(
+        Number(match[1]),
+        splitCommandLineForDiscovery(match[2])
+      );
+      if (process) {
+        return process;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function splitCommandLineForDiscovery(value: string): string[] {
+  return value.match(/"[^"]*"|'[^']*'|\S+/g)?.map((part) =>
+    part.replace(/^['"]|['"]$/g, "")
+  ) ?? [];
+}
+
+function parseAntigravityProcessFromArgs(pid: number, args: string[]): AntigravityProcess | null {
+  if (!Number.isInteger(pid) || pid <= 0 || !isAntigravityLanguageServerCommand(args)) {
+    return null;
+  }
+
+  const csrfToken = readNamedArg(args, "--csrf_token")?.trim();
+  if (!csrfToken) {
+    return null;
+  }
+
+  return { pid, csrfToken };
+}
+
+function isAntigravityLanguageServerCommand(args: string[]): boolean {
+  const normalized = args.join(" ").toLowerCase();
+  return (
+    normalized.includes("antigravity") &&
+    (
+      normalized.includes("language-server") ||
+      normalized.includes("language_server") ||
+      normalized.includes("extension-server") ||
+      normalized.includes("extension_server")
+    )
+  );
+}
+
+function readNamedArg(args: string[], name: string): string | null {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === name) {
+      return args[index + 1] ?? null;
+    }
+    if (arg.startsWith(`${name}=`)) {
+      return arg.slice(name.length + 1);
+    }
+  }
+
+  return null;
+}
+
+async function findListeningLoopbackPorts(pid: number): Promise<number[]> {
+  const parsers: Array<() => Promise<number[]>> = [
+    () => findListeningLoopbackPortsWithSs(pid),
+    () => findListeningLoopbackPortsWithLsof(pid)
+  ];
+
+  for (const parse of parsers) {
+    const ports = await parse();
+    if (ports.length > 0) {
+      return ports;
+    }
+  }
+
+  return [];
+}
+
+async function findListeningLoopbackPortsWithSs(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync("ss", ["-H", "-ltnp"], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000
+    });
+
+    return uniquePorts(
+      stdout
+        .split(/\r?\n/)
+        .filter((line) => line.includes(`pid=${pid},`) && isLoopbackListenLine(line))
+        .map(extractPortFromListenLine)
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function findListeningLoopbackPortsWithLsof(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-Pan", "-p", String(pid), "-iTCP", "-sTCP:LISTEN"], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000
+    });
+
+    return uniquePorts(
+      stdout
+        .split(/\r?\n/)
+        .filter(isLoopbackListenLine)
+        .map(extractPortFromListenLine)
+    );
+  } catch {
+    return [];
+  }
+}
+
+function isLoopbackListenLine(line: string): boolean {
+  return /(?:127\.0\.0\.1|localhost|\[::1\]|::1):\d+\b/.test(line);
+}
+
+function extractPortFromListenLine(line: string): number | null {
+  const matches = [...line.matchAll(/(?:127\.0\.0\.1|localhost|\[::1\]|::1):(\d+)/g)];
+  const value = matches.at(-1)?.[1];
+  const port = value ? Number(value) : NaN;
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+function uniquePorts(ports: Array<number | null>): number[] {
+  return [...new Set(ports.filter((port): port is number => port !== null))];
+}
+
+async function probeAntigravityPorts(
+  ports: number[],
+  csrfToken: string
+): Promise<AntigravityLocalServer | null> {
+  for (const port of ports) {
+    const server = { port, csrfToken };
+    try {
+      await readAntigravityQuotaSummary(server);
+      await writeAntigravityDebugEvent("port-probe-ok", { port });
+      return server;
+    } catch (error) {
+      await writeAntigravityDebugEvent("port-probe-failed", {
+        port,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Try the next loopback listener owned by the same Antigravity process.
+    }
+  }
+
+  return null;
+}
+
+async function readAntigravityQuotaSummary(server: AntigravityLocalServer): Promise<unknown> {
+  return requestAntigravityQuotaSummary(server);
+}
+
+function requestAntigravityQuotaSummary(
+  server: AntigravityLocalServer
+): Promise<unknown> {
+  const body = "{}";
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: "127.0.0.1",
+        port: server.port,
+        path: ANTIGRAVITY_QUOTA_SUMMARY_PATH,
+        method: "POST",
+        timeout: 5_000,
+        agent: antigravityHttpsAgent,
+        headers: {
+          "X-Codeium-Csrf-Token": server.csrfToken,
+          "Content-Type": "application/json",
+          "Connect-Protocol-Version": "1",
+          Accept: "application/json",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          const responseBody = Buffer.concat(chunks).toString("utf8");
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(`Unexpected Antigravity quota summary response: ${response.statusCode ?? "unknown"}`));
+            return;
+          }
+
+          try {
+            resolve(responseBody ? JSON.parse(responseBody) : {});
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy(new Error("Timed out reading Antigravity quota summary."));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+type RawQuotaSummaryBucket = {
+  bucketId?: unknown;
+  displayName?: unknown;
+  description?: unknown;
+  window?: unknown;
+  remainingFraction?: unknown;
+  resetTime?: unknown;
+};
+
+type RawQuotaSummaryGroup = {
+  displayName?: unknown;
+  description?: unknown;
+  buckets?: unknown;
+};
+
+type RawQuotaSummaryResponse = {
+  response?: {
+    groups?: unknown;
+  };
+};
+
+export function parseAntigravityQuotaEntries(payload: unknown): AntigravityQuotaEntry[] {
+  const root = asRecord(payload) as RawQuotaSummaryResponse | null;
+  const response = asRecord(root?.response);
+  const groups = asArray(response?.groups);
+  const entries: AntigravityQuotaEntry[] = [];
+
+  for (const groupValue of groups) {
+    const group = asRecord(groupValue) as RawQuotaSummaryGroup | null;
+    if (!group) {
+      continue;
+    }
+
+    const displayName = asString(group.displayName) ?? "";
+    const description = asString(group.description) ?? "";
+    const modelIds = resolveQuotaGroupModelIds(displayName, description);
+    if (modelIds.length === 0) {
+      void writeAntigravityDebugEvent("quota-group-skipped", {
+        displayName,
+        description
+      });
+      continue;
+    }
+
+    for (const bucketValue of asArray(group.buckets)) {
+      const bucket = asRecord(bucketValue) as RawQuotaSummaryBucket | null;
+      if (!bucket) {
+        continue;
+      }
+
+      const bucketId = asString(bucket.bucketId);
+      const windowConfig = resolveQuotaWindow(asString(bucket.window));
+      const remainingFraction = asFiniteNumber(bucket.remainingFraction);
+      const resetTime = asString(bucket.resetTime);
+      const resetAt = resetTime === null ? NaN : Date.parse(resetTime);
+
+      if (
+        !bucketId ||
+        remainingFraction === null ||
+        remainingFraction < 0 ||
+        remainingFraction > 1 ||
+        !Number.isFinite(resetAt) ||
+        !windowConfig
+      ) {
+        continue;
+      }
+
+      entries.push({
+        limitId: bucketId,
+        modelIds,
+        remainingFraction,
+        resetAt,
+        windowMinutes: windowConfig.windowMinutes,
+        scope: windowConfig.scope,
+        planType: "unknown"
+      });
+    }
+  }
+
+  return entries;
+}
+
+function resolveQuotaWindow(
+  window: string | null
+): { scope: LimitWindowScope; windowMinutes: number } | null {
+  switch (window) {
+    case "5h":
+      return {
+        scope: "primary",
+        windowMinutes: ANTIGRAVITY_PRIMARY_WINDOW_MINUTES
+      };
+    case "weekly":
+      return {
+        scope: "secondary",
+        windowMinutes: ANTIGRAVITY_WEEKLY_WINDOW_MINUTES
+      };
+    default:
+      return null;
+  }
+}
+
+function resolveQuotaGroupModelIds(
+  displayName: string,
+  description: string
+): string[] {
+  const text = `${displayName} ${description}`.toLowerCase();
+
+  if (text.includes("gemini")) {
+    return GEMINI_QUOTA_MODELS;
+  }
+  if (text.includes("claude") || text.includes("gpt")) {
+    return THIRD_PARTY_QUOTA_MODELS;
+  }
+
+  return [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isAntigravityDebugEnabled(): boolean {
+  const value = process.env.LETMECODE_DEBUG_ANTIGRAVITY;
+  return value === "1" || value === "true" || value === "yes";
+}
+
+function isAntigravityRawDebugEnabled(): boolean {
+  const value = process.env.LETMECODE_DEBUG_ANTIGRAVITY_RAW;
+  return value === "1" || value === "true" || value === "yes";
+}
+
+async function writeAntigravityDebugEvent(
+  event: string,
+  data: Record<string, unknown>
+): Promise<void> {
+  if (!isAntigravityDebugEnabled()) {
+    return;
+  }
+
+  const line = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event,
+    data: redactDebugValue(data)
+  });
+
+  try {
+    await fs.promises.mkdir(path.dirname(ANTIGRAVITY_DEBUG_LOG_PATH), {
+      recursive: true
+    });
+    await fs.promises.appendFile(
+      ANTIGRAVITY_DEBUG_LOG_PATH,
+      `${line}\n`,
+      "utf8"
+    );
+  } catch {
+    // Debug logging must never break provider stats collection.
+  }
+}
+
+function redactDebugValue(value: unknown, key = ""): unknown {
+  if (isSensitiveDebugKey(key)) {
+    return "[redacted]";
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactDebugValue(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactDebugValue(entryValue, entryKey)
+    ])
+  );
+}
+
+function isSensitiveDebugKey(key: string): boolean {
+  return /token|csrf|authorization|cookie|email/i.test(key);
+}
+
 function numberOrZero(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : 0;
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.min(100, Math.max(0, value));
 }
 
 async function readAntigravityUsageCache(
