@@ -1,6 +1,6 @@
 {
   "name": "letmecode",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Provider-based terminal usage dashboard for LetMeCode.",
   "author": "devforth.io",
   "license": "MIT",
@@ -38,7 +38,6 @@
     "typescript"
   ],
   "dependencies": {
-    "@tokscale/cli": "4.0.2",
     "ink": "4.4.1",
     "jsonc-parser": "^3.3.1",
     "react": "18.3.1"

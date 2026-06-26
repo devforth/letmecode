@@ -553,18 +553,20 @@ test("Antigravity quota parser rejects unsupported buckets and unknown groups", 
   assert.deepEqual(entries.map((entry) => entry.limitId), ["good"]);
 });
 
-test("Antigravity plan parser reads known user status paths", () => {
+test("Antigravity plan parser reads real user status plan name", () => {
   assert.equal(
     parseAntigravityPlanType({
-      userStatus: {
-        planStatus: {
-          planInfo: {
-            planName: "Pro"
+      response: {
+        userStatus: {
+          planStatus: {
+            planInfo: {
+              planName: "Pro"
+            }
           }
         }
       }
     }),
-    "pro"
+    "Pro"
   );
   assert.equal(
     parseAntigravityPlanType({
@@ -572,29 +574,13 @@ test("Antigravity plan parser reads known user status paths", () => {
         userStatus: {
           planStatus: {
             planInfo: {
-              planDisplayName: "Google AI Ultra"
+              planName: "Google AI Ultra"
             }
           }
         }
       }
     }),
-    "ultra"
-  );
-  assert.equal(
-    parseAntigravityPlanType({
-      response: {
-        planInfo: {
-          planName: "Premium"
-        }
-      }
-    }),
-    "pro"
-  );
-  assert.equal(
-    parseAntigravityPlanType({
-      planName: "Standard"
-    }),
-    "free"
+    "Google AI Ultra"
   );
   assert.equal(parseAntigravityPlanType({ response: {} }), "unknown");
 });
@@ -603,16 +589,17 @@ test("Antigravity user status parser builds anonymous analytics identity", () =>
   assert.equal(
     parseAntigravityUserIdHash(
       {
-        userStatus: {
-          email: "ivan@devforth.io"
+        response: {
+          userStatus: {
+            email: "ivan@devforth.io"
+          }
         }
-      },
-      "Antigravity"
+      }
     ),
-    createHash("md5").update("Antigravity-ivan@devforth.io").digest("hex")
+    createHash("md5").update("ivan@devforth.io").digest("hex")
   );
   assert.equal(
-    parseAntigravityUserIdHash({ userStatus: {} }, "Antigravity"),
+    parseAntigravityUserIdHash({ userStatus: { email: "ivan@devforth.io" } }),
     null
   );
 });
@@ -623,6 +610,7 @@ test("AntigravityUsageProvider reconstructs confirmed quota buckets by model poo
     collectQuota: async () => ({
       fetchedAt: Date.parse("2026-06-25T14:00:00.000Z"),
       entries: parseAntigravityQuotaEntries(payload),
+      planType: "pro",
       userIdHash: "antigravity-user"
     }),
     collectUsage: async () => [
@@ -701,6 +689,8 @@ test("AntigravityUsageProvider reconstructs live quota windows from quota snapsh
   const stats = await new AntigravityUsageProvider({
     collectQuota: async () => ({
       fetchedAt,
+      planType: "google-ai-pro",
+      userIdHash: null,
       entries: [
         {
           limitId: "gemini-primary",
@@ -708,8 +698,7 @@ test("AntigravityUsageProvider reconstructs live quota windows from quota snapsh
           remainingFraction: 0.25,
           resetAt,
           windowMinutes: 300,
-          scope: "primary",
-          planType: "google-ai-pro"
+          scope: "primary"
         }
       ]
     }),
@@ -782,6 +771,8 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
     },
     collectQuota: async () => ({
       fetchedAt: Date.parse("2026-06-24T12:45:00.000Z"),
+      planType: "unknown",
+      userIdHash: null,
       entries: [
         {
           limitId: "shared-primary",
@@ -789,8 +780,7 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
           remainingFraction: 0.6,
           resetAt,
           windowMinutes: 300,
-          scope: "primary",
-          planType: "unknown"
+          scope: "primary"
         }
       ]
     })
@@ -801,7 +791,7 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
   assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 40);
   assert.equal(stats.primaryLimitWindows[0].eventCount, 0);
   assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 0);
-  assert.equal(stats.warnings.some((warning) => warning.includes("Tokscale")), true);
+  assert.equal(stats.warnings.some((warning) => warning.includes("Antigravity token usage")), true);
 });
 
 test("AntigravityUsageProvider returns historical usage when quota collection fails", async () => {
@@ -2951,7 +2941,7 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
 });
 
-test("buildAnonymousUsagePayload reports Antigravity model pools as model_type", async () => {
+test("buildAnonymousUsagePayload does not report Antigravity data", async () => {
   const totals = (overrides = {}) => ({
     inputTokens: 0,
     outputTokens: 0,
@@ -3012,28 +3002,7 @@ test("buildAnonymousUsagePayload reports Antigravity model pools as model_type",
     }
   ]);
 
-  assert.deepEqual(
-    payload.data.map((report) => ({
-      agent: report.agent,
-      model_type: report.model_type,
-      plan_id: report.plan_id,
-      window_duration_seconds: report.window_duration_seconds
-    })),
-    [
-      {
-        agent: "Antigravity",
-        model_type: "gemini",
-        plan_id: "pro",
-        window_duration_seconds: 18000
-      },
-      {
-        agent: "Antigravity",
-        model_type: "third-party",
-        plan_id: "pro",
-        window_duration_seconds: 604800
-      }
-    ]
-  );
+  assert.deepEqual(payload.data, []);
 });
 
 test("buildAnonymousUsageReports prefers explicit limit-window model types", async () => {

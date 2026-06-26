@@ -14,7 +14,7 @@ import {
 } from "./providers/index.js";
 import { reportAnonymousUsage } from "./reporting.js";
 
-type VerticalTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
+type DetailTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 
 type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
@@ -44,47 +44,47 @@ const DISABLE_MOUSE_TRACKING = `${ESC}[?1006l${ESC}[?1000l`;
 // SGR mouse report: ESC [ < button ; column ; row, ending in M (press) or m (release).
 const SGR_MOUSE_SEQUENCE = new RegExp(`${ESC}\\[<(\\d+);(\\d+);(\\d+)([Mm])`, "g");
 
-const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
+const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
   { id: "limit-windows", label: "Limits" },
   { id: "summary", label: "Summary" },
-  { id: "day-to-day-analyses", label: "day to day" },
-  { id: "usage-by-model", label: "by model" }
+  { id: "day-to-day-analyses", label: "Daily" },
+  { id: "usage-by-model", label: "Models" }
 ];
 
 const CODEX_CREDIT_COST_USD = 0.01;
-const VERTICAL_TAB_WIDTH = 12;
 
-const LIMIT_WINDOW_COLUMNS = {
-  plan: 8,
-  window: 8,
-  used: 10,
-  date: 17,
-  value: 10
-} as const;
+const LIMIT_TABLE_COLUMNS = [
+  { header: "Plan", width: 5 },
+  { header: "Window", width: 6 },
+  { header: "Used", width: 8 },
+  { header: "Start", width: 14 },
+  { header: "End", width: 14 },
+  { header: "API eq.", width: 8 }
+] as const;
 
-const MODEL_USAGE_COLUMNS = {
-  model: 17,
-  input: 11,
-  output: 10,
-  cacheRead: 11,
-  cacheWrite: 11,
-  cacheWrite5m: 10,
-  cacheWrite1h: 10,
-  credits: 12,
-  value: 12
-} as const;
+const DAILY_TABLE_COLUMNS = [
+  { header: "Day", width: 9 },
+  { header: "Ev", width: 5 },
+  { header: "Input", width: 8 },
+  { header: "Output", width: 7 },
+  { header: "C read", width: 8 },
+  { header: "C write", width: 7 },
+  { header: "API eq.", width: 7 }
+] as const;
 
-const DAY_USAGE_COLUMNS = {
-  day: 11,
-  events: 6,
-  input: 11,
-  output: 10,
-  cacheRead: 11,
-  cacheWrite: 11,
-  cacheWrite5m: 10,
-  cacheWrite1h: 10,
-  value: 10
-} as const;
+const MODEL_TABLE_COLUMNS = [
+  { header: "Model", width: 16 },
+  { header: "Input", width: 7 },
+  { header: "Output", width: 7 },
+  { header: "C read", width: 7 },
+  { header: "C write", width: 7 },
+  { header: "API eq.", width: 7 }
+] as const;
+
+type TextTableColumn = {
+  header: string;
+  width: number;
+};
 
 const COPILOT_ACTIONS: Array<{ id: CopilotActionId; label: string; enabled: boolean }> = [
   { id: "vscode", label: "Start logging VS Code", enabled: true }
@@ -106,7 +106,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   );
   const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id ?? "");
   const [hasUserSelectedProvider, setHasUserSelectedProvider] = useState(false);
-  const [selectedVerticalTabIndex, setSelectedVerticalTabIndex] = useState(0);
+  const [selectedDetailTabIndex, setSelectedDetailTabIndex] = useState(0);
   const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState(0);
   const [selectedDayRowIndex, setSelectedDayRowIndex] = useState(0);
   const [selectedModelRowIndex, setSelectedModelRowIndex] = useState(0);
@@ -120,7 +120,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     sortedProviderStates.findIndex((state) => state.provider.id === selectedProviderId)
   );
   const selectedProvider = sortedProviderStates[selectedProviderIndex];
-  const selectedVerticalTab = VERTICAL_TABS[selectedVerticalTabIndex];
+  const selectedDetailTab = DETAIL_TABS[selectedDetailTabIndex];
   const limitRows = getLimitRows(selectedProvider);
   const dayRows = getDayRows(selectedProvider);
   const modelRows = getModelRows(selectedProvider);
@@ -212,9 +212,33 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if (regionId.startsWith("vtab:")) {
-      setSelectedVerticalTabIndex(Number(regionId.slice("vtab:".length)));
+      setSelectedDetailTabIndex(Number(regionId.slice("vtab:".length)));
     }
   });
+
+  const moveSelectedTableRow = useCallback((delta: number) => {
+    if (selectedDetailTab.id === "limit-windows") {
+      setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + delta, limitRows.length));
+      return;
+    }
+
+    if (selectedDetailTab.id === "usage-by-model") {
+      setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex + delta, modelRows.length));
+      return;
+    }
+
+    if (selectedDetailTab.id === "day-to-day-analyses") {
+      setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex + delta, dayRows.length));
+    }
+  }, [
+    activeDayRowIndex,
+    activeLimitRowIndex,
+    activeModelRowIndex,
+    dayRows.length,
+    limitRows.length,
+    modelRows.length,
+    selectedDetailTab.id
+  ]);
 
   useInput((input, key) => {
     // Mouse reports arrive as SGR escape sequences and are handled by useMouseClick.
@@ -249,37 +273,13 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if (key.rightArrow) {
-      if (selectedVerticalTab.id === "limit-windows") {
-        setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + 1, limitRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "usage-by-model") {
-        setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex + 1, modelRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "day-to-day-analyses") {
-        setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex + 1, dayRows.length));
-        return;
-      }
+      setSelectedDetailTabIndex((current) => (current + 1) % DETAIL_TABS.length);
+      return;
     }
 
     if (key.leftArrow) {
-      if (selectedVerticalTab.id === "limit-windows") {
-        setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex - 1, limitRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "usage-by-model") {
-        setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex - 1, modelRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "day-to-day-analyses") {
-        setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex - 1, dayRows.length));
-        return;
-      }
+      setSelectedDetailTabIndex((current) => (current - 1 + DETAIL_TABS.length) % DETAIL_TABS.length);
+      return;
     }
 
     if ((key.tab && !key.shift) || input === "]") {
@@ -298,12 +298,12 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if (key.downArrow || input === "j") {
-      setSelectedVerticalTabIndex((current) => (current + 1) % VERTICAL_TABS.length);
+      moveSelectedTableRow(1);
       return;
     }
 
     if (key.upArrow || input === "k") {
-      setSelectedVerticalTabIndex((current) => (current - 1 + VERTICAL_TABS.length) % VERTICAL_TABS.length);
+      moveSelectedTableRow(-1);
     }
   });
 
@@ -312,10 +312,8 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       <Text bold color="cyan">
         letmecode usage dashboard
       </Text>
-      <Text color="gray">
-        [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, enter for actions, click tabs to switch, q to quit
-      </Text>
       <Box marginTop={1}>
+        <Text color="gray">Provider  </Text>
         {sortedProviderStates.map((state) => (
           <ProviderTab
             key={state.provider.id}
@@ -326,23 +324,24 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           />
         ))}
       </Box>
+      <Box>
+        <Text color="gray">View      </Text>
+        {DETAIL_TABS.map((tab, index) => (
+          <DetailTab
+            key={tab.id}
+            label={tab.label}
+            active={index === selectedDetailTabIndex}
+            regionRef={getRegionRef(`vtab:${index}`)}
+          />
+        ))}
+      </Box>
 
       <Box marginTop={1} flexDirection="column" flexGrow={1} overflow="hidden">
         <Box flexGrow={1} overflow="hidden">
-          <Box flexDirection="column" width={VERTICAL_TAB_WIDTH} marginRight={2} overflow="hidden">
-            {VERTICAL_TABS.map((tab, index) => (
-              <VerticalTab
-                key={tab.id}
-                label={tab.label}
-                active={index === selectedVerticalTabIndex}
-                regionRef={getRegionRef(`vtab:${index}`)}
-              />
-            ))}
-          </Box>
           <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
             <ContentPanel
               providerState={selectedProvider}
-              tabId={selectedVerticalTab.id}
+              tabId={selectedDetailTab.id}
               selectedLimitRowKey={selectedLimitRow ? getLimitRowKey(selectedLimitRow) : undefined}
               selectedDayKey={selectedDayRow?.dayKey}
               selectedModelId={selectedModelRow?.modelId}
@@ -353,7 +352,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
 
         <SelectionDetailsPanel
           providerState={selectedProvider}
-          tabId={selectedVerticalTab.id}
+          tabId={selectedDetailTab.id}
           selectedLimitRow={selectedLimitRow}
           selectedDayRow={selectedDayRow}
           selectedModelRow={selectedModelRow}
@@ -374,6 +373,9 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           </Box>
         ) : null}
       </Box>
+      <Text color="gray">
+        Tab provider · ←/→ view · ↑/↓ row · q quit
+      </Text>
     </Box>
   );
 }
@@ -448,25 +450,27 @@ function ProviderTab(props: {
   regionRef?: (node: DOMElement | null) => void;
 }): React.JSX.Element {
   const statusColor = props.status === "error" ? "red" : props.status === "loading" ? "yellow" : "green";
-  const tabLabel = props.active ? ` ${props.label} ` : `[${props.label}]`;
+  const tabLabel = props.active ? `[${props.label}]` : ` ${props.label} `;
   return (
-    <Box marginRight={1} ref={props.regionRef}>
-      <Text inverse={props.active} color={statusColor}>
+    <Box marginRight={2} ref={props.regionRef}>
+      <Text color={statusColor} bold={props.active}>
         {tabLabel}
       </Text>
     </Box>
   );
 }
 
-function VerticalTab(props: {
+function DetailTab(props: {
   label: string;
   active: boolean;
   regionRef?: (node: DOMElement | null) => void;
 }): React.JSX.Element {
+  const tabLabel = props.active ? `[${props.label}]` : ` ${props.label} `;
+
   return (
-    <Box width={VERTICAL_TAB_WIDTH} ref={props.regionRef}>
-      <Text wrap="truncate-end" inverse={props.active}>
-        {props.active ? ` ${props.label} ` : ` ${props.label}`}
+    <Box marginRight={2} ref={props.regionRef}>
+      <Text wrap="truncate-end" bold={props.active}>
+        {tabLabel}
       </Text>
     </Box>
   );
@@ -474,38 +478,55 @@ function VerticalTab(props: {
 
 function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
   const { summary } = props.stats;
-  const isCodexProvider = props.stats.providerId === "codex";
+  const totals = summary.totals;
+  const period = resolveSummaryPeriod(props.stats.dayUsage);
+  const cacheRatio = resolveCacheRatio(totals);
+  const averageTokensPerEvent =
+    totals.eventCount > 0 ? totals.totalTokens / totals.eventCount : 0;
+  const costPerEvent =
+    totals.eventCount > 0
+      ? (totals.estimatedCredits * CODEX_CREDIT_COST_USD) / totals.eventCount
+      : 0;
+
   return (
     <Box flexDirection="column">
-      <Text bold>{props.stats.providerLabel}</Text>
-      <Text>
-        root: {summary.rootLabel} ({summary.rootPath})
-      </Text>
-      <Text>
-        files: {formatInteger(summary.filesScanned)}  lines: {formatInteger(summary.linesRead)}  token events: {formatInteger(summary.tokenEvents)}
-      </Text>
-      <UsageBreakdownLines totals={summary.totals} />
-      {isCodexProvider ? (
-        <Text>Burned tokens for: {formatUsageUsd(summary.totals)}</Text>
-      ) : (
-        <Text>
-          estimated credits: {formatUsageCredits(summary.totals)}
-        </Text>
-      )}
-      <Text>IpO: {formatInputPerOutput(summary.totals)}</Text>
-      <Text>
-        models: {summary.distinctModels.join(", ") || "none"}
-      </Text>
-      <Text>
-        plans: {summary.distinctPlanTypes.join(", ") || "none"}
-      </Text>
+      <Text bold>{props.stats.providerLabel} overview</Text>
+      <Text> </Text>
+      <Box>
+        <Box flexDirection="column" width={45}>
+          <DetailRow label="Plan" value={summary.distinctPlanTypes.join(", ") || "none"} />
+          <DetailRow label="Models" value={summary.distinctModels.join(", ") || "none"} />
+          <DetailRow label="Period" value={period} />
+          <Text> </Text>
+          <Text color="cyan">Usage</Text>
+          <DetailRow label="Events" value={formatInteger(totals.eventCount)} />
+          <DetailRow label="Input" value={formatOverviewTokenCount(totals.inputTokens)} />
+          <DetailRow label="Output" value={formatOverviewTokenCount(totals.outputTokens)} />
+          <DetailRow label="Cache read" value={formatCacheOverviewTokenCount(totals, totals.cacheReadInputTokens)} />
+          <DetailRow label="Reasoning" value={formatOverviewTokenCount(totals.reasoningOutputTokens)} />
+          <DetailRow label="Total" value={formatOverviewTokenCount(totals.totalTokens)} />
+          <DetailRow label="API equiv." value={formatUsageUsd(totals)} />
+        </Box>
+        <Box flexDirection="column">
+          <Text color="cyan">Efficiency</Text>
+          <DetailRow label="Cache ratio" value={formatPercent(cacheRatio)} />
+          <DetailRow label="Input/output" value={formatInputOutputRatio(totals)} />
+          <DetailRow label="Avg/event" value={`${formatOverviewTokenCount(averageTokensPerEvent)} tokens`} />
+          <DetailRow label="Cost/event" value={formatUnitUsd(costPerEvent)} />
+          <Text> </Text>
+          <Text color="cyan">Data source</Text>
+          <DetailRow label="Files" value={formatInteger(summary.filesScanned)} />
+          <DetailRow label="Lines" value={formatInteger(summary.linesRead)} />
+          <DetailRow label="Path" value={summary.rootPath} />
+        </Box>
+      </Box>
     </Box>
   );
 }
 
 function ContentPanel(props: {
   providerState: ProviderLoadState;
-  tabId: VerticalTabId;
+  tabId: DetailTabId;
   selectedLimitRowKey?: string;
   selectedDayKey?: string;
   selectedModelId?: string;
@@ -557,21 +578,15 @@ function LimitWindowsPanel(props: {
   selectedRowKey?: string;
   availableHeight: number;
 }): React.JSX.Element {
-  const hasPrimaryWindows = props.stats.primaryLimitWindows.length > 0;
   const bodyLines = [
-    { key: "primary-title", text: "Primary Limit Windows", bold: true },
-    ...buildLimitWindowSectionLines("primary", props.stats.primaryLimitWindows, props.selectedRowKey),
-    ...(hasPrimaryWindows
-      ? [{ key: "section-separator", text: buildLimitSectionSeparatorLine(), color: "gray" as const }]
-      : [{ key: "section-gap", text: "" }]),
-    { key: "secondary-title", text: "Secondary Limit Windows", bold: true },
-    ...buildLimitWindowSectionLines("secondary", props.stats.secondaryLimitWindows, props.selectedRowKey)
+    ...buildLimitWindowTableLines("primary", "Primary limits", props.stats.primaryLimitWindows, props.selectedRowKey),
+    { key: "section-gap", text: "" },
+    ...buildLimitWindowTableLines("secondary", "Secondary limits", props.stats.secondaryLimitWindows, props.selectedRowKey)
   ];
 
   return (
     <ScrollableLineViewport
       bodyLines={bodyLines}
-      selectedBodyLineKey={props.selectedRowKey ? `limit-row:${props.selectedRowKey}` : undefined}
       availableHeight={props.availableHeight}
     />
   );
@@ -587,31 +602,14 @@ function UsageByModelPanel(props: {
   }
 
   const totals = props.stats.summary.totals;
-  const isCodexProvider = props.stats.providerId === "codex";
+  const bodyLines = buildModelUsageTableLines(
+    props.stats.modelUsage,
+    totals,
+    props.selectedModelId
+  );
   return (
     <ScrollableLineViewport
-      headerLines={[
-        {
-          key: "model-header",
-          text: isCodexProvider
-            ? `${pad("model", MODEL_USAGE_COLUMNS.model)} ${pad("input", MODEL_USAGE_COLUMNS.input)} ${pad("output", MODEL_USAGE_COLUMNS.output)} ${pad("cacheRead", MODEL_USAGE_COLUMNS.cacheRead)} ${pad("cacheWrite", MODEL_USAGE_COLUMNS.cacheWrite)} ${pad("cacheW5m", MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", MODEL_USAGE_COLUMNS.cacheWrite1h)} value`
-            : `${pad("model", MODEL_USAGE_COLUMNS.model)} ${pad("input", MODEL_USAGE_COLUMNS.input)} ${pad("output", MODEL_USAGE_COLUMNS.output)} ${pad("cacheRead", MODEL_USAGE_COLUMNS.cacheRead)} ${pad("cacheWrite", MODEL_USAGE_COLUMNS.cacheWrite)} ${pad("cacheW5m", MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", MODEL_USAGE_COLUMNS.cacheWrite1h)} ${pad("credits", MODEL_USAGE_COLUMNS.credits)} value`,
-          color: "gray"
-        }
-      ]}
-      bodyLines={props.stats.modelUsage.map((row) => ({
-        key: `model-row:${row.modelId}`,
-        text: formatModelUsageRow(row.modelId, row.totals, isCodexProvider),
-        inverse: props.selectedModelId === row.modelId,
-        color: props.selectedModelId === row.modelId ? "cyan" : undefined
-      }))}
-      footerLines={[
-        {
-          key: "model-total",
-          text: formatModelUsageRow("TOTAL", totals, isCodexProvider),
-          color: "cyan"
-        }
-      ]}
+      bodyLines={bodyLines}
       selectedBodyLineKey={props.selectedModelId ? `model-row:${props.selectedModelId}` : undefined}
       availableHeight={props.availableHeight}
     />
@@ -627,22 +625,10 @@ function DayToDayPanel(props: {
     return <Text color="gray">No day-by-day usage found.</Text>;
   }
 
-  const totals = props.stats.summary.totals;
+  const bodyLines = buildDailyUsageTableLines(props.stats.dayUsage, props.selectedDayKey);
   return (
     <ScrollableLineViewport
-      headerLines={[
-        {
-          key: "day-header",
-          text: `${pad("day", DAY_USAGE_COLUMNS.day)} ${pad("events", DAY_USAGE_COLUMNS.events)} ${pad("input", DAY_USAGE_COLUMNS.input)} ${pad("output", DAY_USAGE_COLUMNS.output)} ${pad("cacheRead", DAY_USAGE_COLUMNS.cacheRead)} ${pad("cacheWrite", DAY_USAGE_COLUMNS.cacheWrite)} ${pad("cacheW5m", DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad("cacheW1h", DAY_USAGE_COLUMNS.cacheWrite1h)} value`,
-          color: "gray"
-        }
-      ]}
-      bodyLines={props.stats.dayUsage.map((row) => ({
-        key: `day-row:${row.dayKey}`,
-        text: `${pad(formatUtcDay(row.dayKey), DAY_USAGE_COLUMNS.day)} ${pad(formatCompactTokenCount(row.totals.eventCount), DAY_USAGE_COLUMNS.events)} ${pad(formatCompactTokenCount(row.totals.inputTokens), DAY_USAGE_COLUMNS.input)} ${pad(formatCompactTokenCount(row.totals.outputTokens), DAY_USAGE_COLUMNS.output)} ${pad(formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens), DAY_USAGE_COLUMNS.cacheRead)} ${pad(formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens), DAY_USAGE_COLUMNS.cacheWrite)} ${pad(formatOptionalCompactTokens(row.totals.cacheWrite5mInputTokens), DAY_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatOptionalCompactTokens(row.totals.cacheWrite1hInputTokens), DAY_USAGE_COLUMNS.cacheWrite1h)} ${pad(formatUsageUsd(row.totals), DAY_USAGE_COLUMNS.value)}`,
-        inverse: props.selectedDayKey === row.dayKey,
-        color: props.selectedDayKey === row.dayKey ? "cyan" : undefined
-      }))}
+      bodyLines={bodyLines}
       selectedBodyLineKey={props.selectedDayKey ? `day-row:${props.selectedDayKey}` : undefined}
       availableHeight={props.availableHeight}
     />
@@ -720,39 +706,177 @@ function ScrollableViewportLine(props: { line: ScrollableLine }): React.JSX.Elem
   );
 }
 
-function buildLimitWindowSectionLines(
+function buildTableBorder(
+  columns: readonly TextTableColumn[],
+  left: string,
+  middle: string,
+  right: string
+): string {
+  return `${left}${columns.map((column) => "─".repeat(column.width + 2)).join(middle)}${right}`;
+}
+
+function buildTableRow(
+  columns: readonly TextTableColumn[],
+  cells: string[]
+): string {
+  return `│${columns.map((column, index) => ` ${pad(cells[index] ?? "", column.width)} `).join("│")}│`;
+}
+
+function buildLimitWindowTableLines(
   scope: "primary" | "secondary",
+  title: string,
   windows: LimitWindowRow[],
   selectedRowKey?: string
 ): ScrollableLine[] {
   if (windows.length === 0) {
-    return [{ key: `${scope}-empty`, text: "No windows found.", color: "gray" }];
+    return [
+      { key: `${scope}-title`, text: title, bold: true },
+      { key: `${scope}-empty`, text: "No windows found.", color: "gray" }
+    ];
   }
 
   return [
+    { key: `${scope}-title`, text: title, bold: true },
+    {
+      key: `${scope}-top-border`,
+      text: buildTableBorder(LIMIT_TABLE_COLUMNS, "┌", "┬", "┐"),
+      color: "gray"
+    },
     {
       key: `${scope}-header`,
-      text: `${pad("plan", LIMIT_WINDOW_COLUMNS.plan)} ${pad("window", LIMIT_WINDOW_COLUMNS.window)} ${pad("used", LIMIT_WINDOW_COLUMNS.used)} ${pad("start", LIMIT_WINDOW_COLUMNS.date)} ${pad("end", LIMIT_WINDOW_COLUMNS.date)} value`,
+      text: buildTableRow(LIMIT_TABLE_COLUMNS, LIMIT_TABLE_COLUMNS.map((column) => column.header)),
+      color: "gray"
+    },
+    {
+      key: `${scope}-header-border`,
+      text: buildTableBorder(LIMIT_TABLE_COLUMNS, "├", "┼", "┤"),
       color: "gray"
     },
     ...windows.map<ScrollableLine>((window) => {
       const lineKey = getLimitRowKey(window);
-      const windowLabel = formatWindowMinutes(window.windowMinutes);
+      const windowLabel = formatCompactWindowMinutes(window.windowMinutes);
       const usedLabel = formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent);
       const isSelected = selectedRowKey === lineKey;
       return {
         key: `limit-row:${lineKey}`,
-        text: `${pad(window.planType, LIMIT_WINDOW_COLUMNS.plan)} ${pad(windowLabel, LIMIT_WINDOW_COLUMNS.window)} ${pad(usedLabel, LIMIT_WINDOW_COLUMNS.used)} ${pad(formatLocalDateTime(window.startTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} ${pad(formatLocalDateTime(window.endTimeUtcIso), LIMIT_WINDOW_COLUMNS.date)} ${pad(formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD), LIMIT_WINDOW_COLUMNS.value)}`,
+        text: buildTableRow(LIMIT_TABLE_COLUMNS, [
+          window.planType,
+          windowLabel,
+          usedLabel,
+          formatCompactLocalDateTime(window.startTimeUtcIso),
+          formatCompactLocalDateTime(window.endTimeUtcIso),
+          formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD)
+        ]),
         inverse: isSelected,
         color: isSelected ? "cyan" : undefined
       };
-    })
+    }),
+    {
+      key: `${scope}-bottom-border`,
+      text: buildTableBorder(LIMIT_TABLE_COLUMNS, "└", "┴", "┘"),
+      color: "gray"
+    }
+  ];
+}
+
+function buildDailyUsageTableLines(
+  rows: DailyUsageRow[],
+  selectedDayKey?: string
+): ScrollableLine[] {
+  return [
+    { key: "daily-title", text: "Daily usage", bold: true },
+    {
+      key: "daily-top-border",
+      text: buildTableBorder(DAILY_TABLE_COLUMNS, "┌", "┬", "┐"),
+      color: "gray"
+    },
+    {
+      key: "daily-header",
+      text: buildTableRow(DAILY_TABLE_COLUMNS, DAILY_TABLE_COLUMNS.map((column) => column.header)),
+      color: "gray"
+    },
+    {
+      key: "daily-header-border",
+      text: buildTableBorder(DAILY_TABLE_COLUMNS, "├", "┼", "┤"),
+      color: "gray"
+    },
+    ...rows.map<ScrollableLine>((row) => {
+      const isSelected = selectedDayKey === row.dayKey;
+      return {
+        key: `day-row:${row.dayKey}`,
+        text: buildTableRow(DAILY_TABLE_COLUMNS, [
+          formatUtcDay(row.dayKey),
+          formatCompactTokenCount(row.totals.eventCount),
+          formatCompactTokenCount(row.totals.inputTokens),
+          formatCompactTokenCount(row.totals.outputTokens),
+          formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens),
+          formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens),
+          formatUsageUsd(row.totals)
+        ]),
+        inverse: isSelected,
+        color: isSelected ? "cyan" : undefined
+      };
+    }),
+    {
+      key: "daily-bottom-border",
+      text: buildTableBorder(DAILY_TABLE_COLUMNS, "└", "┴", "┘"),
+      color: "gray"
+    }
+  ];
+}
+
+function buildModelUsageTableLines(
+  rows: ModelUsageRow[],
+  totals: UsageTotals,
+  selectedModelId?: string
+): ScrollableLine[] {
+  return [
+    { key: "model-title", text: "Model usage", bold: true },
+    {
+      key: "model-top-border",
+      text: buildTableBorder(MODEL_TABLE_COLUMNS, "┌", "┬", "┐"),
+      color: "gray"
+    },
+    {
+      key: "model-header",
+      text: buildTableRow(MODEL_TABLE_COLUMNS, MODEL_TABLE_COLUMNS.map((column) => column.header)),
+      color: "gray"
+    },
+    {
+      key: "model-header-border",
+      text: buildTableBorder(MODEL_TABLE_COLUMNS, "├", "┼", "┤"),
+      color: "gray"
+    },
+    ...rows.map<ScrollableLine>((row) => {
+      const isSelected = selectedModelId === row.modelId;
+      return {
+        key: `model-row:${row.modelId}`,
+        text: formatModelUsageTableRow(row.modelId, row.totals),
+        inverse: isSelected,
+        color: isSelected ? "cyan" : undefined
+      };
+    }),
+    {
+      key: "model-total-border",
+      text: buildTableBorder(MODEL_TABLE_COLUMNS, "├", "┼", "┤"),
+      color: "gray"
+    },
+    {
+      key: "model-total",
+      text: formatModelUsageTableRow("TOTAL", totals),
+      color: "cyan"
+    },
+    {
+      key: "model-bottom-border",
+      text: buildTableBorder(MODEL_TABLE_COLUMNS, "└", "┴", "┘"),
+      color: "gray"
+    }
   ];
 }
 
 function SelectionDetailsPanel(props: {
   providerState: ProviderLoadState;
-  tabId: VerticalTabId;
+  tabId: DetailTabId;
   selectedLimitRow?: LimitWindowRow;
   selectedDayRow?: DailyUsageRow;
   selectedModelRow?: ModelUsageRow;
@@ -764,24 +888,35 @@ function SelectionDetailsPanel(props: {
   if (props.tabId === "limit-windows" && props.selectedLimitRow) {
     const row = props.selectedLimitRow;
     return (
-      <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
-        <Text color="cyan">Limit details</Text>
-        <Text>
-          {row.scope}  plan: {row.planType}  window: {formatWindowMinutes(row.windowMinutes)}  used: {formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)}  limit: {row.limitId}
-        </Text>
-        <Text>
-          range: {formatLocalDateTime(row.startTimeUtcIso)} {"->"} {formatLocalDateTime(row.endTimeUtcIso)}  events: {formatInteger(row.eventCount)}
-        </Text>
-        <UsageTotalsDetails totals={row.totals} />
-      </Box>
+      <DetailsPanelFrame>
+        <Box>
+          <Box flexDirection="column" width={25}>
+            <DetailRow label="Plan" value={row.planType} />
+            <DetailRow label="Window" value={formatCompactWindowMinutes(row.windowMinutes)} />
+            <DetailRow label="Usage" value={formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)} />
+            <DetailRow label="Events" value={formatInteger(row.eventCount)} />
+            <DetailRow label="API eq." value={formatUsageUsd(row.totals)} />
+          </Box>
+          <Box flexDirection="column">
+            <DetailRow
+              label="Period"
+              value={`${formatCompactLocalDateTime(row.startTimeUtcIso)} → ${formatCompactLocalDateTime(row.endTimeUtcIso)}`}
+            />
+            <DetailRow label="Input" value={formatInteger(row.totals.inputTokens)} />
+            <DetailRow label="Cache read" value={formatCacheTokens(row.totals, row.totals.cacheReadInputTokens)} />
+            <DetailRow label="Cache write" value={formatCacheTokens(row.totals, row.totals.cacheWriteInputTokens)} />
+            <DetailRow label="Output" value={formatInteger(row.totals.outputTokens)} />
+            <DetailRow label="Total" value={formatInteger(row.totals.totalTokens)} />
+          </Box>
+        </Box>
+      </DetailsPanelFrame>
     );
   }
 
   if (props.tabId === "day-to-day-analyses" && props.selectedDayRow) {
     const row = props.selectedDayRow;
     return (
-      <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
-        <Text color="cyan">Day details</Text>
+      <DetailsPanelFrame>
         <Text>
           day: {formatUtcDay(row.dayKey)}  events: {formatInteger(row.totals.eventCount)}  models: {formatInteger(row.distinctModels.length)}  plans: {formatInteger(row.distinctPlanTypes.length)}
         </Text>
@@ -789,23 +924,40 @@ function SelectionDetailsPanel(props: {
         <Text>models: {row.distinctModels.join(", ") || "none"}</Text>
         <Text>plans: {row.distinctPlanTypes.join(", ") || "none"}</Text>
         <UsageTotalsDetails totals={row.totals} />
-      </Box>
+      </DetailsPanelFrame>
     );
   }
 
   if (props.tabId === "usage-by-model" && props.selectedModelRow) {
     return (
-      <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
-        <Text color="cyan">Model details</Text>
+      <DetailsPanelFrame>
         <Text>
           model: {props.selectedModelRow.modelId}  events: {formatInteger(props.selectedModelRow.totals.eventCount)}
         </Text>
         <UsageTotalsDetails totals={props.selectedModelRow.totals} modelId={props.selectedModelRow.modelId} />
-      </Box>
+      </DetailsPanelFrame>
     );
   }
 
   return null;
+}
+
+function DetailsPanelFrame(props: { children: React.ReactNode }): React.JSX.Element {
+  return (
+    <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
+      <Text color="cyan">Details</Text>
+      {props.children}
+    </Box>
+  );
+}
+
+function DetailRow(props: { label: string; value: string }): React.JSX.Element {
+  return (
+    <Text>
+      {pad(props.label, 14)}
+      {props.value}
+    </Text>
+  );
 }
 
 function UsageTotalsDetails(props: { totals: UsageTotals; modelId?: string }): React.JSX.Element {
@@ -821,6 +973,32 @@ function UsageTotalsDetails(props: { totals: UsageTotals; modelId?: string }): R
 
 function formatInteger(value: number): string {
   return Math.round(value).toLocaleString("en-US");
+}
+
+function formatOverviewTokenCount(value: number): string {
+  const roundedValue = Math.round(value);
+  if (roundedValue >= 1_000_000_000) {
+    return `${formatFixedCompactNumber(roundedValue / 1_000_000_000)}B`;
+  }
+  if (roundedValue >= 1_000_000) {
+    return `${formatFixedCompactNumber(roundedValue / 1_000_000)}M`;
+  }
+  if (roundedValue >= 1_000) {
+    return `${formatFixedCompactNumber(roundedValue / 1_000)}K`;
+  }
+
+  return formatInteger(roundedValue);
+}
+
+function formatCacheOverviewTokenCount(totals: UsageTotals, value: number): string {
+  return totals.cacheStatus === "unavailable" ? "-" : formatOverviewTokenCount(value);
+}
+
+function formatFixedCompactNumber(value: number): string {
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: value < 10 ? 2 : 1,
+    minimumFractionDigits: 0
+  });
 }
 
 function formatCompactTokenCount(value: number): string {
@@ -892,21 +1070,61 @@ function formatUsd(value: number): string {
   });
 }
 
-function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
-  return minUsedPercent === maxUsedPercent
-    ? `${minUsedPercent}%`
-    : `${minUsedPercent}%->${maxUsedPercent}%`;
+function formatUnitUsd(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return value.toLocaleString("en-US", {
+    currency: "USD",
+    style: "currency",
+    minimumFractionDigits: value < 0.01 && value > 0 ? 4 : 3,
+    maximumFractionDigits: value < 0.01 && value > 0 ? 4 : 3
+  });
 }
 
-function buildLimitSectionSeparatorLine(): string {
-  return "─".repeat(
-    LIMIT_WINDOW_COLUMNS.plan +
-      LIMIT_WINDOW_COLUMNS.window +
-      LIMIT_WINDOW_COLUMNS.used +
-      LIMIT_WINDOW_COLUMNS.date * 2 +
-      LIMIT_WINDOW_COLUMNS.value +
-      5
-  );
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return `${value.toLocaleString("en-US", {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 0
+  })}%`;
+}
+
+function resolveCacheRatio(totals: UsageTotals): number {
+  if (totals.cacheStatus === "unavailable") {
+    return NaN;
+  }
+
+  const inputPool =
+    totals.inputTokens +
+    totals.cacheReadInputTokens +
+    totals.cacheWriteInputTokens;
+
+  return inputPool > 0
+    ? (totals.cacheReadInputTokens / inputPool) * 100
+    : 0;
+}
+
+function formatInputOutputRatio(totals: UsageTotals): string {
+  if (totals.outputTokens <= 0) {
+    return "-";
+  }
+
+  return `${(totals.inputTokens / totals.outputTokens).toLocaleString("en-US", {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 0
+  })} : 1`;
+}
+
+function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
+  const fmt = (v: number) => `${Math.round(v)}%`;
+  return minUsedPercent === maxUsedPercent
+    ? fmt(minUsedPercent)
+    : `${fmt(minUsedPercent)}–${fmt(maxUsedPercent)}`;
 }
 
 function formatWindowMinutes(value: number): string {
@@ -916,6 +1134,15 @@ function formatWindowMinutes(value: number): string {
   }
 
   return `${hours.toFixed(2)}h`;
+}
+
+function formatCompactWindowMinutes(value: number): string {
+  const hours = value / 60;
+  if (hours >= 24) {
+    return `${formatCompactNumber(hours / 24)}d`;
+  }
+
+  return `${formatCompactNumber(hours)}h`;
 }
 
 function formatLocalDateTime(value: string): string {
@@ -931,6 +1158,34 @@ function formatLocalDateTime(value: string): string {
 
   const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${lookup.day} ${lookup.month} ${lookup.year} ${lookup.hour}:${lookup.minute}`;
+}
+
+function formatCompactLocalDateTime(value: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23"
+  }).formatToParts(new Date(value));
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.day} ${lookup.month} ${lookup.hour}:${lookup.minute}`;
+}
+
+function resolveSummaryPeriod(dayUsage: DailyUsageRow[]): string {
+  const timestamps = dayUsage.flatMap((row) => [
+    row.firstEventUtcIso,
+    row.lastEventUtcIso
+  ]).filter((value): value is string => Boolean(value));
+
+  if (timestamps.length === 0) {
+    return "-";
+  }
+
+  const sortedTimestamps = timestamps.sort();
+  return `${formatCompactLocalDateTime(sortedTimestamps[0])} → ${formatCompactLocalDateTime(sortedTimestamps[sortedTimestamps.length - 1])}`;
 }
 
 function formatUtcDay(value: string): string {
@@ -961,13 +1216,16 @@ function pad(value: string, length: number): string {
   return value.length >= length ? value.slice(0, length) : value.padEnd(length);
 }
 
-function formatModelUsageRow(modelId: string, totals: UsageTotals, isCodexProvider: boolean): string {
+function formatModelUsageTableRow(modelId: string, totals: UsageTotals): string {
   const displayModelId = modelId === "unknown" ? "-" : modelId;
-  const prefix = `${pad(displayModelId, MODEL_USAGE_COLUMNS.model)} ${pad(formatCompactTokenCount(totals.inputTokens), MODEL_USAGE_COLUMNS.input)} ${pad(formatCompactTokenCount(totals.outputTokens), MODEL_USAGE_COLUMNS.output)} ${pad(formatCompactCacheTokens(totals, totals.cacheReadInputTokens), MODEL_USAGE_COLUMNS.cacheRead)} ${pad(formatCompactCacheTokens(totals, totals.cacheWriteInputTokens), MODEL_USAGE_COLUMNS.cacheWrite)} ${pad(formatOptionalCompactTokens(totals.cacheWrite5mInputTokens), MODEL_USAGE_COLUMNS.cacheWrite5m)} ${pad(formatOptionalCompactTokens(totals.cacheWrite1hInputTokens), MODEL_USAGE_COLUMNS.cacheWrite1h)}`;
-
-  return isCodexProvider
-    ? `${prefix} ${pad(formatUsageUsd(totals, modelId), MODEL_USAGE_COLUMNS.value)}`
-    : `${prefix} ${pad(formatUsageCredits(totals, modelId), MODEL_USAGE_COLUMNS.credits)} ${pad(formatUsageUsd(totals, modelId), MODEL_USAGE_COLUMNS.value)}`;
+  return buildTableRow(MODEL_TABLE_COLUMNS, [
+    displayModelId,
+    formatCompactTokenCount(totals.inputTokens),
+    formatCompactTokenCount(totals.outputTokens),
+    formatCompactCacheTokens(totals, totals.cacheReadInputTokens),
+    formatCompactCacheTokens(totals, totals.cacheWriteInputTokens),
+    formatUsageUsd(totals, modelId)
+  ]);
 }
 
 function UsageBreakdownLines(props: { totals: UsageTotals }): React.JSX.Element {

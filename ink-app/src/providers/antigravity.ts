@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import https from "node:https";
-import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +25,6 @@ import {
 } from "./daily.js";
 import { resolveUsageRate, type UsageRate, type UsageRateValue } from "./pricing.js";
 
-const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 
 const RATE_CARD: Record<string, UsageRate> = {
@@ -87,26 +85,50 @@ const UNPRICED_MODELS = new Set([
   "gpt-oss-120b"
 ]);
 
-const ANTIGRAVITY_PRIMARY_WINDOW_MINUTES = 5 * 60;
-const ANTIGRAVITY_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const ANTIGRAVITY_QUOTA_SUMMARY_PATH =
   "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 const ANTIGRAVITY_USER_STATUS_PATH =
   "/exa.language_server_pb.LanguageServerService/GetUserStatus";
-const ANTIGRAVITY_DEBUG_LOG_PATH =
-  process.env.LETMECODE_ANTIGRAVITY_DEBUG_LOG ??
-  path.join(os.tmpdir(), "letmecode-antigravity-debug.jsonl");
+const ANTIGRAVITY_CACHE_ROOT = path.join(
+  os.homedir(),
+  ".config",
+  "tokscale",
+  "antigravity-cache"
+);
+const QUOTA_WINDOWS = {
+  "5h": {
+    scope: "primary",
+    windowMinutes: 300
+  },
+  weekly: {
+    scope: "secondary",
+    windowMinutes: 10_080
+  }
+} satisfies Record<
+  string,
+  {
+    scope: LimitWindowScope;
+    windowMinutes: number;
+  }
+>;
 
-const GEMINI_QUOTA_MODELS = [
-  "gemini-3.5-flash",
-  "gemini-3.1-pro",
-  "gemini-3-flash"
-];
-
-const THIRD_PARTY_QUOTA_MODELS = [
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "gpt-oss-120b"
+const QUOTA_MODEL_GROUPS = [
+  {
+    pattern: /gemini/,
+    models: [
+      "gemini-3.5-flash",
+      "gemini-3.1-pro",
+      "gemini-3-flash"
+    ]
+  },
+  {
+    pattern: /claude|gpt/,
+    models: [
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "gpt-oss-120b"
+    ]
+  }
 ];
 
 const MODEL_ALIASES: Record<string, string> = {
@@ -116,6 +138,25 @@ const MODEL_ALIASES: Record<string, string> = {
   "gemini-3.5-flash-preview": "gemini-3.5-flash",
   "claude-sonnet-4-6-20251201": "claude-sonnet-4-6",
   "claude-opus-4-6-20251201": "claude-opus-4-6"
+};
+
+type QuotaBucket = {
+  bucketId?: string;
+  window?: keyof typeof QUOTA_WINDOWS;
+  remainingFraction?: number;
+  resetTime?: string;
+};
+
+type QuotaGroup = {
+  displayName?: string;
+  description?: string;
+  buckets?: QuotaBucket[];
+};
+
+type QuotaPayload = {
+  response?: {
+    groups?: QuotaGroup[];
+  };
 };
 
 export type AntigravityUsageRecord = {
@@ -138,13 +179,13 @@ export type AntigravityQuotaEntry = {
   resetAt: number;
   windowMinutes: number;
   scope: LimitWindowScope;
-  planType: string;
 };
 
 export type AntigravityQuotaSnapshot = {
   entries: AntigravityQuotaEntry[];
   fetchedAt: number;
-  userIdHash?: string | null;
+  planType: string;
+  userIdHash: string | null;
 };
 
 export type AntigravityUsageProviderOptions = {
@@ -159,8 +200,7 @@ export class AntigravityUsageProvider extends UsageProviderBase {
   constructor(options: AntigravityUsageProviderOptions = {}) {
     super("antigravity", "Antigravity");
     this.collectUsage =
-      options.collectUsage ??
-      collectAntigravityUsageFromTokscale;
+      options.collectUsage ?? readAntigravityUsageCache;
     this.collectQuota =
       options.collectQuota ??
       collectAntigravityQuotaFromLocalRpc;
@@ -186,7 +226,7 @@ export class AntigravityUsageProvider extends UsageProviderBase {
 
     if (usageResult.status === "rejected") {
       warnings.push(
-        "Could not synchronize Antigravity token usage through Tokscale."
+        "Could not read Antigravity token usage cache."
       );
     }
     if (quotaResult.status === "rejected") {
@@ -198,12 +238,6 @@ export class AntigravityUsageProvider extends UsageProviderBase {
         "Antigravity local quota RPC responded, but no recognized model quota windows were found."
       );
     }
-    if (isAntigravityDebugEnabled()) {
-      warnings.push(
-        `Antigravity debug log: ${ANTIGRAVITY_DEBUG_LOG_PATH}`
-      );
-    }
-
     const selectedRecords = deduplicateRecords(records);
     const duplicateEvents =
       records.length - selectedRecords.length;
@@ -253,6 +287,7 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       quotaSnapshot?.entries.map((quota) =>
         buildAntigravityLimitWindow(
           quota,
+          quotaSnapshot.planType,
           selectedRecords,
           quotaSnapshot.fetchedAt
         )
@@ -275,7 +310,7 @@ export class AntigravityUsageProvider extends UsageProviderBase {
           )
         ],
         rootLabel: "Tokscale usage + Antigravity local quota",
-        rootPath: getAntigravityCacheRoot()
+        rootPath: ANTIGRAVITY_CACHE_ROOT
       },
       modelUsage,
       dayUsage: buildDailyUsageRows(byDay),
@@ -288,44 +323,12 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       warnings,
       analytics: quotaSnapshot?.userIdHash
         ? {
-            agentName: normalizeAnalyticsAgentName(this.label),
+            agentName: this.label.replace(/\s/g, ""),
             userIdHash: quotaSnapshot.userIdHash
           }
         : undefined
     };
   }
-}
-
-export async function collectAntigravityUsage(): Promise<
-  AntigravityUsageRecord[]
-> {
-  return collectAntigravityUsageFromTokscale();
-}
-
-export async function collectAntigravityQuota(): Promise<AntigravityQuotaSnapshot> {
-  return collectAntigravityQuotaFromLocalRpc();
-}
-
-async function collectAntigravityUsageFromTokscale(): Promise<AntigravityUsageRecord[]> {
-  await runTokscale([
-    "antigravity",
-    "sync"
-  ]);
-
-  return readAntigravityUsageCache(getAntigravityCacheRoot());
-}
-
-async function runTokscale(
-  args: string[]
-): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync(
-    process.execPath,
-    [require.resolve("@tokscale/cli/dist/index.js"), ...args],
-    {
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024
-    }
-  );
 }
 
 async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSnapshot> {
@@ -334,126 +337,51 @@ async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSn
     throw new Error("Antigravity local language server was not found.");
   }
 
-  const fetchedAt = Date.now();
-  const [quotaResult, statusResult] = await Promise.allSettled([
-    readAntigravityQuotaSummary(server),
-    readAntigravityUserStatus(server)
+  const [quota, status] = await Promise.all([
+    rpc(server, ANTIGRAVITY_QUOTA_SUMMARY_PATH),
+    rpc(server, ANTIGRAVITY_USER_STATUS_PATH, {
+      metadata: {
+        ideName: "antigravity",
+        extensionName: "antigravity",
+        ideVersion: "unknown",
+        locale: "en"
+      }
+    }).catch(() => null)
   ]);
-  printAntigravityUserStatusResponse(statusResult);
-
-  if (quotaResult.status === "rejected") {
-    throw quotaResult.reason;
-  }
-
-  const entries = parseAntigravityQuotaEntries(quotaResult.value);
-  const planType =
-    statusResult.status === "fulfilled"
-      ? parseAntigravityPlanType(statusResult.value)
-      : "unknown";
-  const userIdHash =
-    statusResult.status === "fulfilled"
-      ? parseAntigravityUserIdHash(
-          statusResult.value,
-          normalizeAnalyticsAgentName("Antigravity")
-        )
-      : null;
-
-  for (const entry of entries) {
-    entry.planType = planType;
-  }
-
-  await writeAntigravityDebugEvent("quota-rpc-response", {
-    port: server.port,
-    quotaPath: ANTIGRAVITY_QUOTA_SUMMARY_PATH,
-    userStatusPath: ANTIGRAVITY_USER_STATUS_PATH,
-    planType,
-    entries: entries.map((entry) => ({
-      limitId: entry.limitId,
-      remainingFraction: entry.remainingFraction,
-      resetAt: new Date(entry.resetAt).toISOString(),
-      windowMinutes: entry.windowMinutes,
-      scope: entry.scope,
-      modelIds: entry.modelIds
-    })),
-    ...(isAntigravityRawDebugEnabled()
-      ? {
-          quotaPayload: quotaResult.value,
-          userStatusPayload:
-            statusResult.status === "fulfilled"
-              ? statusResult.value
-              : {
-                  error:
-                    statusResult.reason instanceof Error
-                      ? statusResult.reason.message
-                      : String(statusResult.reason)
-                }
-        }
-      : {})
-  });
+  
   return {
-    entries,
-    fetchedAt,
-    userIdHash
+    entries: parseAntigravityQuotaEntries(quota),
+    fetchedAt: Date.now(),
+    planType: status.userStatus.planStatus.planInfo.planName ?? "unknown",
+    userIdHash:  createHash("md5").update(status.userStatus.email).digest("hex")
   };
-}
-
-function printAntigravityUserStatusResponse(
-  statusResult: PromiseSettledResult<unknown>
-): void {
-  try {
-    if (statusResult.status === "fulfilled") {
-      console.error(
-        "Antigravity user status response:",
-        JSON.stringify(statusResult.value, null, 2)
-      );
-      return;
-    }
-
-    console.error(
-      "Antigravity user status response error:",
-      statusResult.reason instanceof Error
-        ? statusResult.reason.message
-        : String(statusResult.reason)
-    );
-  } catch {
-    // Debug printing must never disturb usage collection.
-  }
-}
-
-function recordsForQuotaWindow(
-  quota: AntigravityQuotaEntry,
-  records: AntigravityUsageRecord[]
-): AntigravityUsageRecord[] {
-  if (quota.modelIds.length === 0) {
-    return [];
-  }
-
-  const endMs = quota.resetAt;
-  const startMs = endMs - quota.windowMinutes * 60_000;
-  const modelIds = new Set(quota.modelIds.map(resolveModelId));
-
-  return records.filter((record) => {
-    const modelId = resolveModelId(record.modelId);
-
-    return (
-      record.timestamp >= startMs &&
-      record.timestamp < endMs &&
-      modelIds.has(modelId)
-    );
-  });
 }
 
 function buildAntigravityLimitWindow(
   quota: AntigravityQuotaEntry,
+  planType: string,
   records: AntigravityUsageRecord[],
   fetchedAt: number
 ): LimitWindowRow {
-  const matchingRecords = recordsForQuotaWindow(quota, records);
+  const startAt = quota.resetAt - quota.windowMinutes * 60_000;
+  const modelIds = new Set(quota.modelIds.map(resolveModelId));
   const byModel = new Map<string, UsageTotals>();
 
-  for (const record of matchingRecords) {
+  for (const record of records) {
     const modelId = resolveModelId(record.modelId);
-    addModelUsage(byModel, modelId, usageRecordToTotals(modelId, record));
+    if (
+      record.timestamp < startAt ||
+      record.timestamp >= quota.resetAt ||
+      !modelIds.has(modelId)
+    ) {
+      continue;
+    }
+
+    addModelUsage(
+      byModel,
+      modelId,
+      usageRecordToTotals(modelId, record)
+    );
   }
 
   const modelUsage = [...byModel.entries()]
@@ -474,7 +402,7 @@ function buildAntigravityLimitWindow(
   // window and may not match Antigravity's internal quota accounting exactly.
   return {
     scope: quota.scope,
-    planType: quota.planType,
+    planType,
     limitId: quota.limitId,
     windowMinutes: quota.windowMinutes,
     startTimeUtcIso: new Date(
@@ -501,229 +429,22 @@ type AntigravityLocalServer = {
   csrfToken: string;
 };
 
-const antigravityHttpsAgent = new https.Agent({
-  rejectUnauthorized: false
-});
-
 async function findAntigravityLocalServer(): Promise<AntigravityLocalServer | null> {
   const process = await findAntigravityProcess();
   if (!process) {
-    await writeAntigravityDebugEvent("process-not-found", {});
     return null;
   }
 
-  const ports = await findListeningLoopbackPorts(process.pid);
-  await writeAntigravityDebugEvent("process-found", {
-    pid: process.pid,
-    ports
-  });
-  return probeAntigravityPorts(ports, process.csrfToken);
-}
+  for (const port of await findListeningPorts(process.pid)) {
+    const server = {
+      port,
+      csrfToken: process.csrfToken
+    };
 
-async function findAntigravityProcess(): Promise<AntigravityProcess | null> {
-  const fromProc = await findAntigravityProcessFromProc();
-  if (fromProc) {
-    return fromProc;
-  }
-
-  return findAntigravityProcessFromPs();
-}
-
-async function findAntigravityProcessFromProc(): Promise<AntigravityProcess | null> {
-  let entries: fs.Dirent[];
-  try {
-    entries = await fs.promises.readdir("/proc", { withFileTypes: true });
-  } catch {
-    return null;
-  }
-
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) {
-      continue;
-    }
-
-    const pid = Number(entry.name);
-    const cmdline = await readProcCmdline(path.join("/proc", entry.name, "cmdline"));
-    const process = parseAntigravityProcessFromArgs(pid, cmdline);
-    if (process) {
-      return process;
-    }
-  }
-
-  return null;
-}
-
-async function readProcCmdline(filePath: string): Promise<string[]> {
-  try {
-    const content = await fs.promises.readFile(filePath);
-    return content
-      .toString("utf8")
-      .split("\0")
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-async function findAntigravityProcessFromPs(): Promise<AntigravityProcess | null> {
-  try {
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid=,args="], {
-      encoding: "utf8",
-      maxBuffer: 4 * 1024 * 1024,
-      timeout: 5_000
-    });
-
-    for (const line of stdout.split(/\r?\n/)) {
-      const match = line.match(/^\s*(\d+)\s+(.+)$/);
-      if (!match) {
-        continue;
-      }
-
-      const process = parseAntigravityProcessFromArgs(
-        Number(match[1]),
-        splitCommandLineForDiscovery(match[2])
-      );
-      if (process) {
-        return process;
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function splitCommandLineForDiscovery(value: string): string[] {
-  return value.match(/"[^"]*"|'[^']*'|\S+/g)?.map((part) =>
-    part.replace(/^['"]|['"]$/g, "")
-  ) ?? [];
-}
-
-function parseAntigravityProcessFromArgs(pid: number, args: string[]): AntigravityProcess | null {
-  if (!Number.isInteger(pid) || pid <= 0 || !isAntigravityLanguageServerCommand(args)) {
-    return null;
-  }
-
-  const csrfToken = readNamedArg(args, "--csrf_token")?.trim();
-  if (!csrfToken) {
-    return null;
-  }
-
-  return { pid, csrfToken };
-}
-
-function isAntigravityLanguageServerCommand(args: string[]): boolean {
-  const normalized = args.join(" ").toLowerCase();
-  return (
-    normalized.includes("antigravity") &&
-    (
-      normalized.includes("language-server") ||
-      normalized.includes("language_server") ||
-      normalized.includes("extension-server") ||
-      normalized.includes("extension_server")
-    )
-  );
-}
-
-function readNamedArg(args: string[], name: string): string | null {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === name) {
-      return args[index + 1] ?? null;
-    }
-    if (arg.startsWith(`${name}=`)) {
-      return arg.slice(name.length + 1);
-    }
-  }
-
-  return null;
-}
-
-async function findListeningLoopbackPorts(pid: number): Promise<number[]> {
-  const parsers: Array<() => Promise<number[]>> = [
-    () => findListeningLoopbackPortsWithSs(pid),
-    () => findListeningLoopbackPortsWithLsof(pid)
-  ];
-
-  for (const parse of parsers) {
-    const ports = await parse();
-    if (ports.length > 0) {
-      return ports;
-    }
-  }
-
-  return [];
-}
-
-async function findListeningLoopbackPortsWithSs(pid: number): Promise<number[]> {
-  try {
-    const { stdout } = await execFileAsync("ss", ["-H", "-ltnp"], {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      timeout: 5_000
-    });
-
-    return uniquePorts(
-      stdout
-        .split(/\r?\n/)
-        .filter((line) => line.includes(`pid=${pid},`) && isLoopbackListenLine(line))
-        .map(extractPortFromListenLine)
-    );
-  } catch {
-    return [];
-  }
-}
-
-async function findListeningLoopbackPortsWithLsof(pid: number): Promise<number[]> {
-  try {
-    const { stdout } = await execFileAsync("lsof", ["-Pan", "-p", String(pid), "-iTCP", "-sTCP:LISTEN"], {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      timeout: 5_000
-    });
-
-    return uniquePorts(
-      stdout
-        .split(/\r?\n/)
-        .filter(isLoopbackListenLine)
-        .map(extractPortFromListenLine)
-    );
-  } catch {
-    return [];
-  }
-}
-
-function isLoopbackListenLine(line: string): boolean {
-  return /(?:127\.0\.0\.1|localhost|\[::1\]|::1):\d+\b/.test(line);
-}
-
-function extractPortFromListenLine(line: string): number | null {
-  const matches = [...line.matchAll(/(?:127\.0\.0\.1|localhost|\[::1\]|::1):(\d+)/g)];
-  const value = matches.at(-1)?.[1];
-  const port = value ? Number(value) : NaN;
-  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
-}
-
-function uniquePorts(ports: Array<number | null>): number[] {
-  return [...new Set(ports.filter((port): port is number => port !== null))];
-}
-
-async function probeAntigravityPorts(
-  ports: number[],
-  csrfToken: string
-): Promise<AntigravityLocalServer | null> {
-  for (const port of ports) {
-    const server = { port, csrfToken };
     try {
-      await readAntigravityQuotaSummary(server);
-      await writeAntigravityDebugEvent("port-probe-ok", { port });
+      await rpc(server, ANTIGRAVITY_QUOTA_SUMMARY_PATH);
       return server;
-    } catch (error) {
-      await writeAntigravityDebugEvent("port-probe-failed", {
-        port,
-        error: error instanceof Error ? error.message : String(error)
-      });
+    } catch {
       // Try the next loopback listener owned by the same Antigravity process.
     }
   }
@@ -731,38 +452,71 @@ async function probeAntigravityPorts(
   return null;
 }
 
-async function readAntigravityQuotaSummary(server: AntigravityLocalServer): Promise<unknown> {
-  return requestAntigravityQuotaSummary(server);
-}
+async function findAntigravityProcess(): Promise<AntigravityProcess | null> {
+  const entries = await fs.promises.readdir("/proc").catch(() => []);
 
-async function readAntigravityUserStatus(server: AntigravityLocalServer): Promise<unknown> {
-  return requestAntigravityUserStatus(server);
-}
-
-function requestAntigravityQuotaSummary(
-  server: AntigravityLocalServer
-): Promise<unknown> {
-  return requestAntigravityRpc(server, ANTIGRAVITY_QUOTA_SUMMARY_PATH, {});
-}
-
-function requestAntigravityUserStatus(
-  server: AntigravityLocalServer
-): Promise<unknown> {
-  return requestAntigravityRpc(server, ANTIGRAVITY_USER_STATUS_PATH, {
-    metadata: {
-      ideName: "antigravity",
-      extensionName: "antigravity",
-      ideVersion: "unknown",
-      locale: "en"
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
     }
-  });
+
+    const args = await fs.promises
+      .readFile(`/proc/${entry}/cmdline`, "utf8")
+      .then((value) => value.split("\0").filter(Boolean))
+      .catch((): string[] => []);
+    const command = args.join(" ").toLowerCase();
+
+    if (
+      !command.includes("antigravity") ||
+      !/(language|extension)[_-]server/.test(command)
+    ) {
+      continue;
+    }
+
+    const tokenArg = args.find((arg) =>
+      arg.startsWith("--csrf_token=")
+    );
+    const tokenIndex = args.indexOf("--csrf_token");
+    const csrfToken =
+      tokenArg?.slice("--csrf_token=".length) ??
+      args[tokenIndex + 1];
+
+    if (csrfToken) {
+      return {
+        pid: Number(entry),
+        csrfToken
+      };
+    }
+  }
+
+  return null;
 }
 
-function requestAntigravityRpc(
+async function findListeningPorts(pid: number): Promise<number[]> {
+  const { stdout } = await execFileAsync(
+    "ss",
+    ["-H", "-ltnp"],
+    { encoding: "utf8", timeout: 5_000 }
+  );
+
+  return [
+    ...new Set(
+      stdout
+        .split("\n")
+        .filter((line) => line.includes(`pid=${pid},`))
+        .flatMap((line) => [
+          ...line.matchAll(/(?:127\.0\.0\.1|\[::1\]):(\d+)/g)
+        ])
+        .map((match) => Number(match[1]))
+    )
+  ];
+}
+
+function rpc(
   server: AntigravityLocalServer,
-  rpcPath: string,
-  payload: unknown
-): Promise<unknown> {
+  endpoint: string,
+  payload: unknown = {}
+): Promise<any> {
   const body = JSON.stringify(payload);
 
   return new Promise((resolve, reject) => {
@@ -770,16 +524,14 @@ function requestAntigravityRpc(
       {
         hostname: "127.0.0.1",
         port: server.port,
-        path: rpcPath,
+        path: endpoint,
         method: "POST",
+        rejectUnauthorized: false,
         timeout: 5_000,
-        agent: antigravityHttpsAgent,
         headers: {
           "X-Codeium-Csrf-Token": server.csrfToken,
           "Content-Type": "application/json",
-          "Connect-Protocol-Version": "1",
-          Accept: "application/json",
-          "Content-Length": Buffer.byteLength(body)
+          "Connect-Protocol-Version": "1"
         }
       },
       (response) => {
@@ -787,8 +539,8 @@ function requestAntigravityRpc(
         response.on("data", (chunk: Buffer) => chunks.push(chunk));
         response.on("end", () => {
           const responseBody = Buffer.concat(chunks).toString("utf8");
-          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-            reject(new Error(`Unexpected Antigravity RPC response from ${rpcPath}: ${response.statusCode ?? "unknown"}`));
+          if (!response.statusCode || response.statusCode >= 300) {
+            reject(new Error(`RPC failed: ${response.statusCode ?? "unknown"}`));
             return;
           }
 
@@ -802,338 +554,62 @@ function requestAntigravityRpc(
     );
 
     request.on("timeout", () => {
-      request.destroy(new Error(`Timed out reading Antigravity RPC ${rpcPath}.`));
+      request.destroy(new Error(`Timed out reading Antigravity RPC ${endpoint}.`));
     });
     request.on("error", reject);
     request.end(body);
   });
 }
 
-type RawQuotaSummaryBucket = {
-  bucketId?: unknown;
-  displayName?: unknown;
-  description?: unknown;
-  window?: unknown;
-  remainingFraction?: unknown;
-  resetTime?: unknown;
-};
+export function parseAntigravityQuotaEntries(
+  payload: unknown
+): AntigravityQuotaEntry[] {
+  const groups = (payload as QuotaPayload).response?.groups ?? [];
 
-type RawQuotaSummaryGroup = {
-  displayName?: unknown;
-  description?: unknown;
-  buckets?: unknown;
-};
+  return groups.flatMap((group) => {
+    const modelIds = resolveQuotaGroupModelIds(
+      `${group.displayName ?? ""} ${group.description ?? ""}`
+    );
 
-type RawQuotaSummaryResponse = {
-  response?: {
-    groups?: unknown;
-  };
-};
-
-export function parseAntigravityQuotaEntries(payload: unknown): AntigravityQuotaEntry[] {
-  const root = asRecord(payload) as RawQuotaSummaryResponse | null;
-  const response = asRecord(root?.response);
-  const groups = asArray(response?.groups);
-  const entries: AntigravityQuotaEntry[] = [];
-
-  for (const groupValue of groups) {
-    const group = asRecord(groupValue) as RawQuotaSummaryGroup | null;
-    if (!group) {
-      continue;
+    if (!modelIds.length) {
+      return [];
     }
 
-    const displayName = asString(group.displayName) ?? "";
-    const description = asString(group.description) ?? "";
-    const modelIds = resolveQuotaGroupModelIds(displayName, description);
-    if (modelIds.length === 0) {
-      void writeAntigravityDebugEvent("quota-group-skipped", {
-        displayName,
-        description
-      });
-      continue;
-    }
-
-    for (const bucketValue of asArray(group.buckets)) {
-      const bucket = asRecord(bucketValue) as RawQuotaSummaryBucket | null;
-      if (!bucket) {
-        continue;
-      }
-
-      const bucketId = asString(bucket.bucketId);
-      const windowConfig = resolveQuotaWindow(asString(bucket.window));
-      const remainingFraction = asFiniteNumber(bucket.remainingFraction);
-      const resetTime = asString(bucket.resetTime);
-      const resetAt = resetTime === null ? NaN : Date.parse(resetTime);
+    return (group.buckets ?? []).flatMap((bucket) => {
+      const window = bucket.window
+        ? QUOTA_WINDOWS[bucket.window]
+        : undefined;
+      const resetAt = Date.parse(bucket.resetTime ?? "");
 
       if (
-        !bucketId ||
-        remainingFraction === null ||
-        remainingFraction < 0 ||
-        remainingFraction > 1 ||
+        !bucket.bucketId ||
+        window === undefined ||
         !Number.isFinite(resetAt) ||
-        !windowConfig
+        typeof bucket.remainingFraction !== "number" ||
+        bucket.remainingFraction < 0 ||
+        bucket.remainingFraction > 1
       ) {
-        continue;
+        return [];
       }
 
-      entries.push({
-        limitId: bucketId,
+      return [{
+        limitId: bucket.bucketId,
         modelIds,
-        remainingFraction,
+        remainingFraction: bucket.remainingFraction,
         resetAt,
-        windowMinutes: windowConfig.windowMinutes,
-        scope: windowConfig.scope,
-        planType: "unknown"
-      });
-    }
-  }
-
-  return entries;
-}
-
-export function parseAntigravityPlanType(payload: unknown): string {
-  const root = asRecord(payload);
-  const response = asRecord(root?.response);
-  const candidates = [
-    readNestedString(root, [
-      "userStatus",
-      "planStatus",
-      "planInfo",
-      "planName"
-    ]),
-    readNestedString(root, [
-      "userStatus",
-      "planStatus",
-      "planInfo",
-      "planDisplayName"
-    ]),
-    readNestedString(root, [
-      "userStatus",
-      "planStatus",
-      "planName"
-    ]),
-    readNestedString(root, [
-      "userStatus",
-      "planName"
-    ]),
-    readNestedString(response, [
-      "userStatus",
-      "planStatus",
-      "planInfo",
-      "planName"
-    ]),
-    readNestedString(response, [
-      "userStatus",
-      "planStatus",
-      "planInfo",
-      "planDisplayName"
-    ]),
-    readNestedString(response, [
-      "userStatus",
-      "planStatus",
-      "planName"
-    ]),
-    readNestedString(response, [
-      "userStatus",
-      "planName"
-    ]),
-    readNestedString(response, [
-      "planStatus",
-      "planInfo",
-      "planName"
-    ]),
-    readNestedString(response, [
-      "planInfo",
-      "planName"
-    ]),
-    readNestedString(response, ["planName"]),
-    readNestedString(root, ["planName"])
-  ];
-  const rawPlan = candidates.find(
-    (value): value is string => Boolean(value)
-  );
-
-  return normalizeAntigravityPlanType(rawPlan ?? null);
-}
-
-export function parseAntigravityUserIdHash(
-  payload: unknown,
-  agentName: string
-): string | null {
-  const root = asRecord(payload);
-  const response = asRecord(root?.response);
-  const email =
-    readNestedString(root, ["userStatus", "email"]) ??
-    readNestedString(response, ["userStatus", "email"]) ??
-    readNestedString(root, ["email"]) ??
-    readNestedString(response, ["email"]);
-
-  return buildUserIdHash([agentName, email ?? ""]);
-}
-
-function readNestedString(
-  value: unknown,
-  pathParts: string[]
-): string | null {
-  let current: unknown = value;
-
-  for (const part of pathParts) {
-    const record = asRecord(current);
-    if (!record) {
-      return null;
-    }
-
-    current = record[part];
-  }
-
-  return asString(current);
-}
-
-function normalizeAntigravityPlanType(value: string | null): string {
-  if (!value) {
-    return "unknown";
-  }
-
-  const normalized = value.toLowerCase();
-
-  if (normalized.includes("ultra")) {
-    return "ultra";
-  }
-  if (normalized.includes("pro") || normalized.includes("premium")) {
-    return "pro";
-  }
-  if (normalized.includes("free") || normalized.includes("standard")) {
-    return "free";
-  }
-
-  return value;
-}
-
-function normalizeAnalyticsAgentName(label: string): string {
-  return label.replace(/\s+/g, "");
-}
-
-function buildUserIdHash(parts: string[]): string | null {
-  if (parts.some((part) => !part)) {
-    return null;
-  }
-
-  return createHash("md5").update(parts.join("-")).digest("hex");
-}
-
-function resolveQuotaWindow(
-  window: string | null
-): { scope: LimitWindowScope; windowMinutes: number } | null {
-  switch (window) {
-    case "5h":
-      return {
-        scope: "primary",
-        windowMinutes: ANTIGRAVITY_PRIMARY_WINDOW_MINUTES
-      };
-    case "weekly":
-      return {
-        scope: "secondary",
-        windowMinutes: ANTIGRAVITY_WEEKLY_WINDOW_MINUTES
-      };
-    default:
-      return null;
-  }
-}
-
-function resolveQuotaGroupModelIds(
-  displayName: string,
-  description: string
-): string[] {
-  const text = `${displayName} ${description}`.toLowerCase();
-
-  if (text.includes("gemini")) {
-    return GEMINI_QUOTA_MODELS;
-  }
-  if (text.includes("claude") || text.includes("gpt")) {
-    return THIRD_PARTY_QUOTA_MODELS;
-  }
-
-  return [];
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function asFiniteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function isAntigravityDebugEnabled(): boolean {
-  const value = process.env.LETMECODE_DEBUG_ANTIGRAVITY;
-  return value === "1" || value === "true" || value === "yes";
-}
-
-function isAntigravityRawDebugEnabled(): boolean {
-  const value = process.env.LETMECODE_DEBUG_ANTIGRAVITY_RAW;
-  return value === "1" || value === "true" || value === "yes";
-}
-
-async function writeAntigravityDebugEvent(
-  event: string,
-  data: Record<string, unknown>
-): Promise<void> {
-  if (!isAntigravityDebugEnabled()) {
-    return;
-  }
-
-  const line = JSON.stringify({
-    timestamp: new Date().toISOString(),
-    event,
-    data: redactDebugValue(data)
-  });
-
-  try {
-    await fs.promises.mkdir(path.dirname(ANTIGRAVITY_DEBUG_LOG_PATH), {
-      recursive: true
+        ...window
+      }];
     });
-    await fs.promises.appendFile(
-      ANTIGRAVITY_DEBUG_LOG_PATH,
-      `${line}\n`,
-      "utf8"
-    );
-  } catch {
-    // Debug logging must never break provider stats collection.
-  }
+  });
 }
 
-function redactDebugValue(value: unknown, key = ""): unknown {
-  if (isSensitiveDebugKey(key)) {
-    return "[redacted]";
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactDebugValue(item));
-  }
-  if (!value || typeof value !== "object") {
-    return value;
-  }
 
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
-      entryKey,
-      redactDebugValue(entryValue, entryKey)
-    ])
+function resolveQuotaGroupModelIds(text: string): string[] {
+  return (
+    QUOTA_MODEL_GROUPS.find(({ pattern }) => pattern.test(text.toLowerCase()))?.models ?? []
   );
 }
 
-function isSensitiveDebugKey(key: string): boolean {
-  return /token|csrf|authorization|cookie|email/i.test(key);
-}
 
 function numberOrZero(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
@@ -1149,10 +625,11 @@ function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
-async function readAntigravityUsageCache(
-  cacheRoot: string
-): Promise<AntigravityUsageRecord[]> {
-  const sessionsRoot = path.join(cacheRoot, "sessions");
+async function readAntigravityUsageCache(): Promise<AntigravityUsageRecord[]> {
+  const sessionsRoot = path.join(
+    ANTIGRAVITY_CACHE_ROOT,
+    "sessions"
+  );
   const records: AntigravityUsageRecord[] = [];
 
   for await (const filePath of walkJsonlFiles(sessionsRoot)) {
@@ -1220,15 +697,6 @@ function usageRecordFromCacheEntry(
     output: numberOrZero(entry.output),
     reasoning: numberOrZero(entry.reasoning)
   };
-}
-
-function getAntigravityCacheRoot(): string {
-  return path.join(
-    os.homedir(),
-    ".config",
-    "tokscale",
-    "antigravity-cache"
-  );
 }
 
 async function* walkJsonlFiles(
