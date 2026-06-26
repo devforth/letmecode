@@ -5,7 +5,10 @@ import { parse as parseJsonc } from "jsonc-parser";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { AntigravityUsageProvider } from "../dist/providers/antigravity.js";
+import {
+  AntigravityUsageProvider,
+  parseAntigravityQuotaEntries
+} from "../dist/providers/antigravity.js";
 import { ClaudeUsageProvider } from "../dist/providers/claude.js";
 import { CodexUsageProvider } from "../dist/providers/codex.js";
 import { buildAnonymousUsagePayload, buildAnonymousUsageReports } from "../dist/reporting.js";
@@ -370,6 +373,341 @@ test("AntigravityUsageProvider does not warn that IDE is closed after empty succ
   assert.equal(stats.summary.filesScanned, 0);
   assert.equal(stats.summary.totals.eventCount, 0);
   assert.equal(stats.warnings.some((warning) => warning.includes("Open Antigravity IDE")), false);
+});
+
+function antigravityQuotaSummaryPayload(overrides = {}) {
+  return {
+    response: {
+      groups: [
+        {
+          displayName: "Gemini Models",
+          description: "Models within this group: Gemini Flash, Gemini Pro",
+          buckets: [
+            {
+              bucketId: "gemini-weekly",
+              displayName: "Weekly Limit",
+              window: "weekly",
+              remainingFraction: 0.9623046,
+              resetTime: "2026-07-02T10:34:04Z"
+            },
+            {
+              bucketId: "gemini-5h",
+              displayName: "Five Hour Limit",
+              window: "5h",
+              remainingFraction: 0.7738277,
+              resetTime: "2026-06-25T15:34:04Z"
+            }
+          ]
+        },
+        {
+          displayName: "Claude and GPT models",
+          description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+          buckets: [
+            {
+              bucketId: "3p-weekly",
+              displayName: "Weekly Limit",
+              window: "weekly",
+              remainingFraction: 1,
+              resetTime: "2026-07-02T13:04:14Z"
+            },
+            {
+              bucketId: "3p-5h",
+              displayName: "Five Hour Limit",
+              window: "5h",
+              remainingFraction: 1,
+              resetTime: "2026-06-25T18:04:14Z"
+            }
+          ]
+        }
+      ],
+      ...overrides
+    }
+  };
+}
+
+test("Antigravity quota parser reads confirmed RetrieveUserQuotaSummary buckets", () => {
+  const entries = parseAntigravityQuotaEntries(antigravityQuotaSummaryPayload());
+  const byId = new Map(entries.map((entry) => [entry.limitId, entry]));
+
+  assert.equal(entries.length, 4);
+  assert.equal(byId.get("gemini-5h")?.scope, "primary");
+  assert.equal(byId.get("gemini-5h")?.windowMinutes, 300);
+  assert.equal(byId.get("gemini-weekly")?.scope, "secondary");
+  assert.equal(byId.get("gemini-weekly")?.windowMinutes, 10080);
+  assert.equal(byId.get("gemini-weekly")?.resetAt, Date.parse("2026-07-02T10:34:04Z"));
+  assert.equal(byId.get("gemini-weekly")?.remainingFraction, 0.9623046);
+  assert.deepEqual(byId.get("gemini-5h")?.modelIds, [
+    "gemini-3.5-flash",
+    "gemini-3.1-pro",
+    "gemini-3-flash"
+  ]);
+  assert.deepEqual(byId.get("3p-5h")?.modelIds, [
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "gpt-oss-120b"
+  ]);
+  assert.equal(byId.get("3p-5h")?.remainingFraction, 1);
+});
+
+test("Antigravity quota parser rejects unsupported buckets and unknown groups", () => {
+  const entries = parseAntigravityQuotaEntries({
+    response: {
+      groups: [
+        {
+          displayName: "Gemini Models",
+          description: "Models within this group: Gemini Flash",
+          buckets: [
+            {
+              bucketId: "bad-window",
+              window: "monthly",
+              remainingFraction: 0.5,
+              resetTime: "2026-07-02T10:34:04Z"
+            },
+            {
+              bucketId: "bad-fraction",
+              window: "5h",
+              remainingFraction: 2,
+              resetTime: "2026-07-02T10:34:04Z"
+            },
+            {
+              bucketId: "bad-reset",
+              window: "5h",
+              remainingFraction: 0.5,
+              resetTime: "not-a-date"
+            },
+            {
+              bucketId: "good",
+              window: "5h",
+              remainingFraction: 0.5,
+              resetTime: "2026-07-02T10:34:04Z"
+            }
+          ]
+        },
+        {
+          displayName: "Autocomplete",
+          description: "Non-agent quota",
+          buckets: [
+            {
+              bucketId: "autocomplete-5h",
+              window: "5h",
+              remainingFraction: 0.1,
+              resetTime: "2026-07-02T10:34:04Z"
+            }
+          ]
+        }
+      ]
+    }
+  });
+
+  assert.deepEqual(entries.map((entry) => entry.limitId), ["good"]);
+});
+
+test("AntigravityUsageProvider reconstructs confirmed quota buckets by model pool and window", async () => {
+  const payload = antigravityQuotaSummaryPayload();
+  const stats = await new AntigravityUsageProvider({
+    collectQuota: async () => ({
+      fetchedAt: Date.parse("2026-06-25T14:00:00.000Z"),
+      entries: parseAntigravityQuotaEntries(payload)
+    }),
+    collectUsage: async () => [
+      {
+        type: "usage",
+        sessionId: "s1",
+        responseId: "gemini-in-5h",
+        timestamp: Date.parse("2026-06-25T12:00:00.000Z"),
+        modelId: "gemini-3-flash-a",
+        input: 100,
+        cacheRead: 10,
+        cacheWrite: 5,
+        output: 20,
+        reasoning: 3
+      },
+      {
+        type: "usage",
+        sessionId: "s2",
+        responseId: "gemini-out-5h",
+        timestamp: Date.parse("2026-06-25T10:00:00.000Z"),
+        modelId: "gemini-3-flash-a",
+        input: 1000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 10,
+        reasoning: 0
+      },
+      {
+        type: "usage",
+        sessionId: "s3",
+        responseId: "claude-in-3p",
+        timestamp: Date.parse("2026-06-25T14:00:00.000Z"),
+        modelId: "claude-sonnet-4-6",
+        input: 200,
+        cacheRead: 20,
+        cacheWrite: 10,
+        output: 30,
+        reasoning: 5
+      },
+      {
+        type: "usage",
+        sessionId: "s4",
+        responseId: "gpt-in-3p",
+        timestamp: Date.parse("2026-06-25T15:00:00.000Z"),
+        modelId: "gpt-oss-120b",
+        input: 300,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 40,
+        reasoning: 0
+      }
+    ]
+  }).getStats();
+  const primary = new Map(stats.primaryLimitWindows.map((row) => [row.limitId, row]));
+  const secondary = new Map(stats.secondaryLimitWindows.map((row) => [row.limitId, row]));
+
+  assert.deepEqual([...primary.keys()].sort(), ["3p-5h", "gemini-5h"]);
+  assert.deepEqual([...secondary.keys()].sort(), ["3p-weekly", "gemini-weekly"]);
+  assert.ok(Math.abs((primary.get("gemini-5h")?.maxUsedPercent ?? 0) - 22.61723) < 0.00001);
+  assert.equal(primary.get("3p-5h")?.maxUsedPercent, 0);
+  assert.equal(primary.get("gemini-5h")?.totals.inputTokens, 100);
+  assert.equal(primary.get("gemini-5h")?.eventCount, 1);
+  assert.equal(primary.get("3p-5h")?.totals.inputTokens, 500);
+  assert.equal(primary.get("3p-5h")?.eventCount, 2);
+  assert.equal(secondary.get("gemini-weekly")?.totals.inputTokens, 100);
+  assert.equal(secondary.get("3p-weekly")?.totals.inputTokens, 500);
+});
+
+test("AntigravityUsageProvider reconstructs live quota windows from quota snapshot and usage records", async () => {
+  const resetAt = Date.parse("2026-06-24T15:00:00.000Z");
+  const fetchedAt = Date.parse("2026-06-24T12:45:00.000Z");
+  const stats = await new AntigravityUsageProvider({
+    collectQuota: async () => ({
+      fetchedAt,
+      entries: [
+        {
+          limitId: "gemini-primary",
+          modelIds: ["gemini-3-flash"],
+          remainingFraction: 0.25,
+          resetAt,
+          windowMinutes: 300,
+          scope: "primary",
+          planType: "google-ai-pro"
+        }
+      ]
+    }),
+    collectUsage: async () => [
+      {
+        type: "usage",
+        sessionId: "s1",
+        responseId: "in-window",
+        timestamp: Date.parse("2026-06-24T11:00:00.000Z"),
+        modelId: "gemini-3-flash-a",
+        input: 100,
+        cacheRead: 20,
+        cacheWrite: 5,
+        output: 10,
+        reasoning: 3
+      },
+      {
+        type: "usage",
+        sessionId: "s2",
+        responseId: "outside-window",
+        timestamp: Date.parse("2026-06-24T09:59:59.000Z"),
+        modelId: "gemini-3-flash-a",
+        input: 1000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 10,
+        reasoning: 0
+      },
+      {
+        type: "usage",
+        sessionId: "s3",
+        responseId: "wrong-model",
+        timestamp: Date.parse("2026-06-24T11:30:00.000Z"),
+        modelId: "claude-sonnet-4-6",
+        input: 500,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 10,
+        reasoning: 0
+      }
+    ]
+  }).getStats();
+
+  assert.equal(stats.primaryLimitWindows.length, 1);
+  assert.equal(stats.secondaryLimitWindows.length, 0);
+  const row = stats.primaryLimitWindows[0];
+  assert.equal(row.limitId, "gemini-primary");
+  assert.equal(row.planType, "google-ai-pro");
+  assert.equal(row.windowMinutes, 300);
+  assert.equal(row.startTimeUtcIso, "2026-06-24T10:00:00.000Z");
+  assert.equal(row.endTimeUtcIso, "2026-06-24T15:00:00.000Z");
+  assert.equal(row.firstSeenUtcIso, "2026-06-24T12:45:00.000Z");
+  assert.equal(row.lastSeenUtcIso, "2026-06-24T12:45:00.000Z");
+  assert.equal(row.minUsedPercent, 75);
+  assert.equal(row.maxUsedPercent, 75);
+  assert.equal(row.eventCount, 1);
+  assert.equal(row.totals.eventCount, 1);
+  assert.equal(row.totals.inputTokens, 100);
+  assert.equal(row.totals.cacheReadInputTokens, 20);
+  assert.equal(row.totals.cacheWriteInputTokens, 5);
+  assert.equal(row.totals.outputTokens, 10);
+  assert.deepEqual(stats.summary.distinctPlanTypes, ["google-ai-pro"]);
+});
+
+test("AntigravityUsageProvider returns live quota windows when usage collection fails", async () => {
+  const resetAt = Date.parse("2026-06-24T15:00:00.000Z");
+  const stats = await new AntigravityUsageProvider({
+    collectUsage: async () => {
+      throw new Error("sync failed");
+    },
+    collectQuota: async () => ({
+      fetchedAt: Date.parse("2026-06-24T12:45:00.000Z"),
+      entries: [
+        {
+          limitId: "shared-primary",
+          modelIds: ["*"],
+          remainingFraction: 0.6,
+          resetAt,
+          windowMinutes: 300,
+          scope: "primary",
+          planType: "unknown"
+        }
+      ]
+    })
+  }).getStats();
+
+  assert.equal(stats.summary.tokenEvents, 0);
+  assert.equal(stats.primaryLimitWindows.length, 1);
+  assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 40);
+  assert.equal(stats.primaryLimitWindows[0].eventCount, 0);
+  assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 0);
+  assert.equal(stats.warnings.some((warning) => warning.includes("Tokscale")), true);
+});
+
+test("AntigravityUsageProvider returns historical usage when quota collection fails", async () => {
+  const stats = await new AntigravityUsageProvider({
+    collectQuota: async () => {
+      throw new Error("quota failed");
+    },
+    collectUsage: async () => [
+      {
+        type: "usage",
+        sessionId: "s1",
+        responseId: "r1",
+        timestamp: 1782304784564,
+        modelId: "gemini-3-flash-a",
+        input: 10,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 1,
+        reasoning: 0
+      }
+    ]
+  }).getStats();
+
+  assert.equal(stats.summary.tokenEvents, 1);
+  assert.equal(stats.primaryLimitWindows.length, 0);
+  assert.equal(stats.warnings.some((warning) => warning.includes("Live Antigravity quota is unavailable")), true);
 });
 
 test("AntigravityUsageProvider does not import Tokscale cache as IDE sync", async () => {

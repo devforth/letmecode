@@ -19,7 +19,17 @@ export function createProviders(): UsageProviderBase[] {
   ];
 }
 
-export { AntigravityUsageProvider } from "./antigravity.js";
+export {
+  AntigravityUsageProvider,
+  collectAntigravityQuota,
+  collectAntigravityUsage
+} from "./antigravity.js";
+export type {
+  AntigravityQuotaEntry,
+  AntigravityQuotaSnapshot,
+  AntigravityUsageProviderOptions,
+  AntigravityUsageRecord
+} from "./antigravity.js";
 export { ClaudeUsageProvider } from "./claude.js";
 export { CodexUsageProvider } from "./codex.js";
 export {
