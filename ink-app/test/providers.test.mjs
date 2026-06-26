@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import {
   AntigravityUsageProvider,
+  parseAntigravityPlanType,
+  parseAntigravityUserIdHash,
   parseAntigravityQuotaEntries
 } from "../dist/providers/antigravity.js";
 import { ClaudeUsageProvider } from "../dist/providers/claude.js";
@@ -553,12 +555,77 @@ test("Antigravity quota parser rejects unsupported buckets and unknown groups", 
   assert.deepEqual(entries.map((entry) => entry.limitId), ["good"]);
 });
 
+test("Antigravity plan parser reads known user status paths", () => {
+  assert.equal(
+    parseAntigravityPlanType({
+      userStatus: {
+        planStatus: {
+          planInfo: {
+            planName: "Pro"
+          }
+        }
+      }
+    }),
+    "pro"
+  );
+  assert.equal(
+    parseAntigravityPlanType({
+      response: {
+        userStatus: {
+          planStatus: {
+            planInfo: {
+              planDisplayName: "Google AI Ultra"
+            }
+          }
+        }
+      }
+    }),
+    "ultra"
+  );
+  assert.equal(
+    parseAntigravityPlanType({
+      response: {
+        planInfo: {
+          planName: "Premium"
+        }
+      }
+    }),
+    "pro"
+  );
+  assert.equal(
+    parseAntigravityPlanType({
+      planName: "Standard"
+    }),
+    "free"
+  );
+  assert.equal(parseAntigravityPlanType({ response: {} }), "unknown");
+});
+
+test("Antigravity user status parser builds anonymous analytics identity", () => {
+  assert.equal(
+    parseAntigravityUserIdHash(
+      {
+        userStatus: {
+          email: "ivan@devforth.io"
+        }
+      },
+      "Antigravity"
+    ),
+    createHash("md5").update("Antigravity-ivan@devforth.io").digest("hex")
+  );
+  assert.equal(
+    parseAntigravityUserIdHash({ userStatus: {} }, "Antigravity"),
+    null
+  );
+});
+
 test("AntigravityUsageProvider reconstructs confirmed quota buckets by model pool and window", async () => {
   const payload = antigravityQuotaSummaryPayload();
   const stats = await new AntigravityUsageProvider({
     collectQuota: async () => ({
       fetchedAt: Date.parse("2026-06-25T14:00:00.000Z"),
-      entries: parseAntigravityQuotaEntries(payload)
+      entries: parseAntigravityQuotaEntries(payload),
+      userIdHash: "antigravity-user"
     }),
     collectUsage: async () => [
       {
@@ -614,6 +681,10 @@ test("AntigravityUsageProvider reconstructs confirmed quota buckets by model poo
   const primary = new Map(stats.primaryLimitWindows.map((row) => [row.limitId, row]));
   const secondary = new Map(stats.secondaryLimitWindows.map((row) => [row.limitId, row]));
 
+  assert.deepEqual(stats.analytics, {
+    agentName: "Antigravity",
+    userIdHash: "antigravity-user"
+  });
   assert.deepEqual([...primary.keys()].sort(), ["3p-5h", "gemini-5h"]);
   assert.deepEqual([...secondary.keys()].sort(), ["3p-weekly", "gemini-weekly"]);
   assert.ok(Math.abs((primary.get("gemini-5h")?.maxUsedPercent ?? 0) - 22.61723) < 0.00001);
@@ -2514,7 +2585,7 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
           endTimeUtcIso: "2026-06-25T12:30:00Z",
           firstSeenUtcIso: "2026-06-25T07:35:00Z",
           lastSeenUtcIso: "2026-06-25T12:25:00Z",
-          minUsedPercent: 3,
+          minUsedPercent: 3.123456,
           maxUsedPercent: 100,
           totals: {
             inputTokens: 0,
@@ -2606,8 +2677,8 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
           endTimeUtcIso: "2026-06-25T12:30:00Z",
           firstSeenUtcIso: "2026-06-25T07:30:00Z",
           lastSeenUtcIso: "2026-06-25T10:00:00Z",
-          minUsedPercent: 20,
-          maxUsedPercent: 20,
+          minUsedPercent: 20.25,
+          maxUsedPercent: 20.25,
           totals: {
             inputTokens: 11,
             outputTokens: 22,
@@ -2653,6 +2724,7 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
   assert.deepEqual(
     reports.map((report) => ({
       agent: report.agent,
+      model_type: report.model_type,
       used_percents: report.used_percents,
       used_exhausted: report.used_exhausted,
       value_dollars: report.value_dollars,
@@ -2661,7 +2733,8 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
     [
       {
         agent: "Codex",
-        used_percents: 97,
+        model_type: "codex",
+        used_percents: 96.876544,
         used_exhausted: true,
         value_dollars: 2.5,
         usage_raw: {
@@ -2683,7 +2756,8 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
       },
       {
         agent: "ClaudeVSCode",
-        used_percents: 20,
+        model_type: "current-session",
+        used_percents: 20.25,
         used_exhausted: false,
         value_dollars: 0.5,
         usage_raw: {
@@ -2788,6 +2862,8 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   assert.equal(Array.isArray(payload.data), true);
   assert.equal(payload.data.length, 1);
   assert.equal(payload.data[0].agent, "Codex");
+  assert.equal(payload.data[0].model_type, "codex");
+  assert.equal("modelType" in payload.data[0], false);
   assert.deepEqual(payload.data[0].usage_raw, {
     "gpt-5.5": {
       output: 34,
@@ -2799,4 +2875,89 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   });
   assert.equal("input_cache_w5m" in payload.data[0].usage_raw["gpt-5.5"], true);
   assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
+});
+
+test("buildAnonymousUsagePayload reports Antigravity model pools as model_type", async () => {
+  const totals = (overrides = {}) => ({
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    cacheWrite5mInputTokens: 0,
+    cacheWrite1hInputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+    estimatedCredits: 0,
+    eventCount: 0,
+    ...overrides
+  });
+  const window = (limitId, scope) => ({
+    scope,
+    planType: "pro",
+    limitId,
+    windowMinutes: scope === "primary" ? 300 : 10080,
+    startTimeUtcIso: "2026-06-25T07:30:00Z",
+    endTimeUtcIso: "2026-06-25T12:30:00Z",
+    firstSeenUtcIso: "2026-06-25T07:35:00Z",
+    lastSeenUtcIso: "2026-06-25T12:25:00Z",
+    minUsedPercent: 0,
+    maxUsedPercent: 10,
+    totals: totals({ estimatedCredits: 100, eventCount: 1 }),
+    modelUsage: [
+      {
+        modelId: limitId.startsWith("3p") ? "claude-sonnet-4-6" : "gemini-3.5-flash",
+        totals: totals({ estimatedCredits: 100, eventCount: 1 })
+      }
+    ],
+    eventCount: 1
+  });
+
+  const payload = await buildAnonymousUsagePayload([
+    {
+      providerId: "antigravity",
+      providerLabel: "Antigravity",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: totals(),
+        distinctModels: [],
+        distinctPlanTypes: ["pro"],
+        rootLabel: "Tokscale usage + Antigravity local quota",
+        rootPath: "/tmp/antigravity"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [window("gemini-5h", "primary")],
+      secondaryLimitWindows: [window("3p-weekly", "secondary")],
+      warnings: [],
+      analytics: {
+        agentName: "Antigravity",
+        userIdHash: "antigravity-user"
+      }
+    }
+  ]);
+
+  assert.deepEqual(
+    payload.data.map((report) => ({
+      agent: report.agent,
+      model_type: report.model_type,
+      plan_id: report.plan_id,
+      window_duration_seconds: report.window_duration_seconds
+    })),
+    [
+      {
+        agent: "Antigravity",
+        model_type: "gemini",
+        plan_id: "pro",
+        window_duration_seconds: 18000
+      },
+      {
+        agent: "Antigravity",
+        model_type: "third-party",
+        plan_id: "pro",
+        window_duration_seconds: 604800
+      }
+    ]
+  );
 });

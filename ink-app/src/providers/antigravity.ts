@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import https from "node:https";
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -90,6 +91,8 @@ const ANTIGRAVITY_PRIMARY_WINDOW_MINUTES = 5 * 60;
 const ANTIGRAVITY_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const ANTIGRAVITY_QUOTA_SUMMARY_PATH =
   "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
+const ANTIGRAVITY_USER_STATUS_PATH =
+  "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const ANTIGRAVITY_DEBUG_LOG_PATH =
   process.env.LETMECODE_ANTIGRAVITY_DEBUG_LOG ??
   path.join(os.tmpdir(), "letmecode-antigravity-debug.jsonl");
@@ -141,6 +144,7 @@ export type AntigravityQuotaEntry = {
 export type AntigravityQuotaSnapshot = {
   entries: AntigravityQuotaEntry[];
   fetchedAt: number;
+  userIdHash?: string | null;
 };
 
 export type AntigravityUsageProviderOptions = {
@@ -281,7 +285,13 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       secondaryLimitWindows: limitWindows.filter(
         (window) => window.scope === "secondary"
       ),
-      warnings
+      warnings,
+      analytics: quotaSnapshot?.userIdHash
+        ? {
+            agentName: normalizeAnalyticsAgentName(this.label),
+            userIdHash: quotaSnapshot.userIdHash
+          }
+        : undefined
     };
   }
 }
@@ -325,11 +335,38 @@ async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSn
   }
 
   const fetchedAt = Date.now();
-  const payload = await readAntigravityQuotaSummary(server);
-  const entries = parseAntigravityQuotaEntries(payload);
+  const [quotaResult, statusResult] = await Promise.allSettled([
+    readAntigravityQuotaSummary(server),
+    readAntigravityUserStatus(server)
+  ]);
+  printAntigravityUserStatusResponse(statusResult);
+
+  if (quotaResult.status === "rejected") {
+    throw quotaResult.reason;
+  }
+
+  const entries = parseAntigravityQuotaEntries(quotaResult.value);
+  const planType =
+    statusResult.status === "fulfilled"
+      ? parseAntigravityPlanType(statusResult.value)
+      : "unknown";
+  const userIdHash =
+    statusResult.status === "fulfilled"
+      ? parseAntigravityUserIdHash(
+          statusResult.value,
+          normalizeAnalyticsAgentName("Antigravity")
+        )
+      : null;
+
+  for (const entry of entries) {
+    entry.planType = planType;
+  }
+
   await writeAntigravityDebugEvent("quota-rpc-response", {
     port: server.port,
-    path: ANTIGRAVITY_QUOTA_SUMMARY_PATH,
+    quotaPath: ANTIGRAVITY_QUOTA_SUMMARY_PATH,
+    userStatusPath: ANTIGRAVITY_USER_STATUS_PATH,
+    planType,
     entries: entries.map((entry) => ({
       limitId: entry.limitId,
       remainingFraction: entry.remainingFraction,
@@ -338,12 +375,49 @@ async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSn
       scope: entry.scope,
       modelIds: entry.modelIds
     })),
-    ...(isAntigravityRawDebugEnabled() ? { payload } : {})
+    ...(isAntigravityRawDebugEnabled()
+      ? {
+          quotaPayload: quotaResult.value,
+          userStatusPayload:
+            statusResult.status === "fulfilled"
+              ? statusResult.value
+              : {
+                  error:
+                    statusResult.reason instanceof Error
+                      ? statusResult.reason.message
+                      : String(statusResult.reason)
+                }
+        }
+      : {})
   });
   return {
     entries,
-    fetchedAt
+    fetchedAt,
+    userIdHash
   };
+}
+
+function printAntigravityUserStatusResponse(
+  statusResult: PromiseSettledResult<unknown>
+): void {
+  try {
+    if (statusResult.status === "fulfilled") {
+      console.error(
+        "Antigravity user status response:",
+        JSON.stringify(statusResult.value, null, 2)
+      );
+      return;
+    }
+
+    console.error(
+      "Antigravity user status response error:",
+      statusResult.reason instanceof Error
+        ? statusResult.reason.message
+        : String(statusResult.reason)
+    );
+  } catch {
+    // Debug printing must never disturb usage collection.
+  }
 }
 
 function recordsForQuotaWindow(
@@ -661,17 +735,42 @@ async function readAntigravityQuotaSummary(server: AntigravityLocalServer): Prom
   return requestAntigravityQuotaSummary(server);
 }
 
+async function readAntigravityUserStatus(server: AntigravityLocalServer): Promise<unknown> {
+  return requestAntigravityUserStatus(server);
+}
+
 function requestAntigravityQuotaSummary(
   server: AntigravityLocalServer
 ): Promise<unknown> {
-  const body = "{}";
+  return requestAntigravityRpc(server, ANTIGRAVITY_QUOTA_SUMMARY_PATH, {});
+}
+
+function requestAntigravityUserStatus(
+  server: AntigravityLocalServer
+): Promise<unknown> {
+  return requestAntigravityRpc(server, ANTIGRAVITY_USER_STATUS_PATH, {
+    metadata: {
+      ideName: "antigravity",
+      extensionName: "antigravity",
+      ideVersion: "unknown",
+      locale: "en"
+    }
+  });
+}
+
+function requestAntigravityRpc(
+  server: AntigravityLocalServer,
+  rpcPath: string,
+  payload: unknown
+): Promise<unknown> {
+  const body = JSON.stringify(payload);
 
   return new Promise((resolve, reject) => {
     const request = https.request(
       {
         hostname: "127.0.0.1",
         port: server.port,
-        path: ANTIGRAVITY_QUOTA_SUMMARY_PATH,
+        path: rpcPath,
         method: "POST",
         timeout: 5_000,
         agent: antigravityHttpsAgent,
@@ -689,7 +788,7 @@ function requestAntigravityQuotaSummary(
         response.on("end", () => {
           const responseBody = Buffer.concat(chunks).toString("utf8");
           if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-            reject(new Error(`Unexpected Antigravity quota summary response: ${response.statusCode ?? "unknown"}`));
+            reject(new Error(`Unexpected Antigravity RPC response from ${rpcPath}: ${response.statusCode ?? "unknown"}`));
             return;
           }
 
@@ -703,7 +802,7 @@ function requestAntigravityQuotaSummary(
     );
 
     request.on("timeout", () => {
-      request.destroy(new Error("Timed out reading Antigravity quota summary."));
+      request.destroy(new Error(`Timed out reading Antigravity RPC ${rpcPath}.`));
     });
     request.on("error", reject);
     request.end(body);
@@ -790,6 +889,136 @@ export function parseAntigravityQuotaEntries(payload: unknown): AntigravityQuota
   }
 
   return entries;
+}
+
+export function parseAntigravityPlanType(payload: unknown): string {
+  const root = asRecord(payload);
+  const response = asRecord(root?.response);
+  const candidates = [
+    readNestedString(root, [
+      "userStatus",
+      "planStatus",
+      "planInfo",
+      "planName"
+    ]),
+    readNestedString(root, [
+      "userStatus",
+      "planStatus",
+      "planInfo",
+      "planDisplayName"
+    ]),
+    readNestedString(root, [
+      "userStatus",
+      "planStatus",
+      "planName"
+    ]),
+    readNestedString(root, [
+      "userStatus",
+      "planName"
+    ]),
+    readNestedString(response, [
+      "userStatus",
+      "planStatus",
+      "planInfo",
+      "planName"
+    ]),
+    readNestedString(response, [
+      "userStatus",
+      "planStatus",
+      "planInfo",
+      "planDisplayName"
+    ]),
+    readNestedString(response, [
+      "userStatus",
+      "planStatus",
+      "planName"
+    ]),
+    readNestedString(response, [
+      "userStatus",
+      "planName"
+    ]),
+    readNestedString(response, [
+      "planStatus",
+      "planInfo",
+      "planName"
+    ]),
+    readNestedString(response, [
+      "planInfo",
+      "planName"
+    ]),
+    readNestedString(response, ["planName"]),
+    readNestedString(root, ["planName"])
+  ];
+  const rawPlan = candidates.find(
+    (value): value is string => Boolean(value)
+  );
+
+  return normalizeAntigravityPlanType(rawPlan ?? null);
+}
+
+export function parseAntigravityUserIdHash(
+  payload: unknown,
+  agentName: string
+): string | null {
+  const root = asRecord(payload);
+  const response = asRecord(root?.response);
+  const email =
+    readNestedString(root, ["userStatus", "email"]) ??
+    readNestedString(response, ["userStatus", "email"]) ??
+    readNestedString(root, ["email"]) ??
+    readNestedString(response, ["email"]);
+
+  return buildUserIdHash([agentName, email ?? ""]);
+}
+
+function readNestedString(
+  value: unknown,
+  pathParts: string[]
+): string | null {
+  let current: unknown = value;
+
+  for (const part of pathParts) {
+    const record = asRecord(current);
+    if (!record) {
+      return null;
+    }
+
+    current = record[part];
+  }
+
+  return asString(current);
+}
+
+function normalizeAntigravityPlanType(value: string | null): string {
+  if (!value) {
+    return "unknown";
+  }
+
+  const normalized = value.toLowerCase();
+
+  if (normalized.includes("ultra")) {
+    return "ultra";
+  }
+  if (normalized.includes("pro") || normalized.includes("premium")) {
+    return "pro";
+  }
+  if (normalized.includes("free") || normalized.includes("standard")) {
+    return "free";
+  }
+
+  return value;
+}
+
+function normalizeAnalyticsAgentName(label: string): string {
+  return label.replace(/\s+/g, "");
+}
+
+function buildUserIdHash(parts: string[]): string | null {
+  if (parts.some((part) => !part)) {
+    return null;
+  }
+
+  return createHash("md5").update(parts.join("-")).digest("hex");
 }
 
 function resolveQuotaWindow(
