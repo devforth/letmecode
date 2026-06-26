@@ -8,12 +8,6 @@ export function createProviders(): UsageProviderBase[] {
   return [
     new CodexUsageProvider(),
     new ClaudeUsageProvider(),
-    new ClaudeUsageProvider({
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode"
-    }),
     new CopilotUsageProvider(),
     new AntigravityUsageProvider()
   ];
