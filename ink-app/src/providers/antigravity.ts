@@ -375,14 +375,24 @@ function buildAntigravityLimitWindow(
   fetchedAt: number
 ): LimitWindowRow {
   const matchingRecords = recordsForQuotaWindow(quota, records);
-  const totals = sumUsageTotals(
-    matchingRecords.map((record) =>
-      usageRecordToTotals(
-        resolveModelId(record.modelId),
-        record
-      )
-    )
-  );
+  const byModel = new Map<string, UsageTotals>();
+
+  for (const record of matchingRecords) {
+    const modelId = resolveModelId(record.modelId);
+    addModelUsage(byModel, modelId, usageRecordToTotals(modelId, record));
+  }
+
+  const modelUsage = [...byModel.entries()]
+    .map<ModelUsageRow>(([modelId, totals]) => ({
+      modelId,
+      totals
+    }))
+    .sort(
+      (left, right) =>
+        right.totals.estimatedCredits -
+        left.totals.estimatedCredits
+    );
+  const totals = sumUsageTotals(modelUsage.map((row) => row.totals));
   const usedPercent = clampPercent((1 - quota.remainingFraction) * 100);
 
   // Quota percentage is authoritative from Antigravity RPC. Token totals are
@@ -402,6 +412,7 @@ function buildAntigravityLimitWindow(
     minUsedPercent: usedPercent,
     maxUsedPercent: usedPercent,
     totals,
+    modelUsage,
     eventCount: totals.eventCount
   };
 }
