@@ -145,6 +145,9 @@ type ParsedUsageEventAccumulator = {
 type LiveUsageWindowSnapshot = {
   scope: "primary" | "secondary";
   label: "session" | "week";
+  limitId: string;
+  modelScope: "all-models" | "sonnet-only";
+  modelType?: string;
   usedPercent: number;
   resetsAtMs: number;
   windowMinutes: number;
@@ -1006,7 +1009,7 @@ async function buildLiveLimitWindows(options: {
   if (snapshots.length === 0) {
     traceClaude(options.traceLogger, "No live usage snapshots matched the expected /usage format.");
   }
-  const resolvedPlanType = subscriptionType || "live";
+  const resolvedPlanType = resolveClaudeLivePlanType(subscriptionType, snapshots);
   traceClaude(options.traceLogger, `Resolved live plan type ${resolvedPlanType}.`);
 
   const primaryLimitWindows = snapshots
@@ -1020,8 +1023,8 @@ async function buildLiveLimitWindows(options: {
     const snapshot = snapshots[index];
     const row =
       snapshot.scope === "primary"
-        ? primaryLimitWindows.filter((window) => window.limitId === `current-${snapshot.label}`)[0]
-        : secondaryLimitWindows.filter((window) => window.limitId === `current-${snapshot.label}`)[0];
+        ? primaryLimitWindows.find((window) => window.limitId === snapshot.limitId)
+        : secondaryLimitWindows.find((window) => window.limitId === snapshot.limitId);
     if (!row) {
       continue;
     }
@@ -1031,6 +1034,7 @@ async function buildLiveLimitWindows(options: {
       [
         `Live window ${snapshot.scope}/${snapshot.label}:`,
         `used=${snapshot.usedPercent}%`,
+        `limit=${snapshot.limitId}`,
         `range=${row.startTimeUtcIso}->${row.endTimeUtcIso}`,
         `matchedEvents=${row.eventCount}`,
         `input=${row.totals.inputTokens}`,
@@ -1045,6 +1049,17 @@ async function buildLiveLimitWindows(options: {
     primaryLimitWindows,
     secondaryLimitWindows
   };
+}
+
+function resolveClaudeLivePlanType(
+  subscriptionType: string | null,
+  snapshots: LiveUsageWindowSnapshot[]
+): string {
+  if (snapshots.some((snapshot) => snapshot.modelScope === "sonnet-only")) {
+    return "team_premium";
+  }
+
+  return subscriptionType || "live";
 }
 
 async function readClaudeSubscriptionType(
@@ -1385,35 +1400,43 @@ function parseLiveUsageWindowSnapshots(usageOutput: string | null, now: Date): L
     return [];
   }
 
-  const snapshots = new Map<LiveUsageWindowSnapshot["label"], LiveUsageWindowSnapshot>();
+  const snapshots = new Map<string, LiveUsageWindowSnapshot>();
   const normalizedOutput = usageOutput.replace(ANSI_ESCAPE_SEQUENCE, "");
 
   for (const line of normalizedOutput.split(/\r?\n/)) {
     const match = line
       .trim()
-      .match(/^Current\s+(session|week)(?:\s+\([^)]+\))?:\s+(\d+)%\s+used\b.*?\bresets\s+(.+)$/i);
+      .match(/^Current\s+(session|week)(?:\s+\(([^)]+)\))?:\s+(\d+)%\s+used\b.*?\bresets\s+(.+)$/i);
     if (!match) {
       continue;
     }
 
     const label = match[1].toLowerCase() === "session" ? "session" : "week";
-    const usedPercent = Number(match[2]);
+    const windowQualifier = (match[2] ?? "").trim().toLowerCase();
+    const usedPercent = Number(match[3]);
     const windowMinutes = label === "session" ? CLAUDE_SESSION_WINDOW_MINUTES : CLAUDE_WEEK_WINDOW_MINUTES;
-    const resetsAtMs = parseResetTimestampUtc(match[3], now.getTime(), windowMinutes);
+    const resetsAtMs = parseResetTimestampUtc(match[4], now.getTime(), windowMinutes);
     if (!Number.isFinite(usedPercent) || !resetsAtMs) {
       continue;
     }
 
-    snapshots.set(label, {
+    const isSonnetOnlyWeek = label === "week" && windowQualifier === "sonnet only";
+    const limitId = isSonnetOnlyWeek ? "current-week-sonnet-only" : `current-${label}`;
+    snapshots.set(limitId, {
       scope: label === "session" ? "primary" : "secondary",
       label,
+      limitId,
+      modelScope: isSonnetOnlyWeek ? "sonnet-only" : "all-models",
+      modelType: isSonnetOnlyWeek ? "sonnet only" : undefined,
       usedPercent,
       resetsAtMs,
       windowMinutes
     });
   }
 
-  return [...snapshots.values()].sort((left, right) => left.windowMinutes - right.windowMinutes);
+  return [...snapshots.values()].sort(
+    (left, right) => left.windowMinutes - right.windowMinutes || left.limitId.localeCompare(right.limitId)
+  );
 }
 
 function parseResetTimestampUtc(value: string, nowMs: number, windowMinutes: number): number | null {
@@ -1486,7 +1509,8 @@ function buildLiveLimitWindowRow(
     (event) =>
       Number.isFinite(event.timestampMs) &&
       event.timestampMs >= startTimeMs &&
-      event.timestampMs < snapshot.resetsAtMs
+      event.timestampMs < snapshot.resetsAtMs &&
+      matchesClaudeLiveSnapshotModelScope(snapshot, event.modelId)
   );
   const totals = sumUsageTotals(inWindowEvents.map((event) => event.totals));
   const fallbackLastSeenMs = Math.min(now.getTime(), snapshot.resetsAtMs);
@@ -1504,7 +1528,8 @@ function buildLiveLimitWindowRow(
   return {
     scope: snapshot.scope,
     planType,
-    limitId: `current-${snapshot.label}`,
+    limitId: snapshot.limitId,
+    modelType: snapshot.modelType,
     windowMinutes: snapshot.windowMinutes,
     startTimeUtcIso: toUtcIso(startTimeMs),
     endTimeUtcIso: toUtcIso(snapshot.resetsAtMs),
@@ -1516,6 +1541,17 @@ function buildLiveLimitWindowRow(
     modelUsage: buildModelUsageRowsForEvents(inWindowEvents),
     eventCount: totals.eventCount
   };
+}
+
+function matchesClaudeLiveSnapshotModelScope(
+  snapshot: LiveUsageWindowSnapshot,
+  modelId: string
+): boolean {
+  if (snapshot.modelScope !== "sonnet-only") {
+    return true;
+  }
+
+  return modelId.toLowerCase().includes("sonnet");
 }
 
 function buildModelUsageRowsForEvents(events: ParsedUsageEvent[]): ModelUsageRow[] {

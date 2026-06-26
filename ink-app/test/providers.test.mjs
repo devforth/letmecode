@@ -2049,6 +2049,86 @@ test("ClaudeUsageProvider aggregates Claude entrypoints and builds live usage wi
   });
 });
 
+test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/team-premium.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-premium-sonnet-session",
+        messageId: "msg-premium-sonnet-session",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        outputTokens: 10
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:00:00.000Z",
+        requestId: "req-premium-opus-session",
+        messageId: "msg-premium-opus-session",
+        entrypoint: "sdk-cli",
+        model: "claude-opus-4-8",
+        inputTokens: 80,
+        outputTokens: 8
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-20T10:00:00.000Z",
+        requestId: "req-premium-sonnet-week",
+        messageId: "msg-premium-sonnet-week",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-5",
+        inputTokens: 50,
+        outputTokens: 5
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 2% used · resets Jun 25, 12:30pm (UTC)",
+          "Current week (all models): 9% used · resets Jun 25, 12pm (UTC)",
+          "Current week (Sonnet only): 4% used · resets Jun 25, 12pm (UTC)"
+        ].join("\n"),
+      readAuthStatusOutput: async () =>
+        JSON.stringify({
+          loggedIn: true,
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+          email: "premium@devforth.io",
+          orgId: "premium-org",
+          orgName: "Premium Org",
+          subscriptionType: "team"
+        }),
+      now: () => new Date("2026-06-25T10:00:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].planType, "team_premium");
+    assert.equal(stats.primaryLimitWindows[0].limitId, "current-session");
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 180);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 18);
+
+    assert.equal(stats.secondaryLimitWindows.length, 2);
+
+    const allModelsWeek = stats.secondaryLimitWindows.find((row) => row.limitId === "current-week");
+    assert.equal(allModelsWeek?.planType, "team_premium");
+    assert.equal(allModelsWeek?.totals.inputTokens, 230);
+    assert.equal(allModelsWeek?.totals.outputTokens, 23);
+
+    const sonnetOnlyWeek = stats.secondaryLimitWindows.find(
+      (row) => row.limitId === "current-week-sonnet-only"
+    );
+    assert.equal(sonnetOnlyWeek?.planType, "team_premium");
+    assert.equal(sonnetOnlyWeek?.modelType, "sonnet only");
+    assert.equal(sonnetOnlyWeek?.totals.inputTokens, 150);
+    assert.equal(sonnetOnlyWeek?.totals.outputTokens, 15);
+    assert.deepEqual(
+      sonnetOnlyWeek?.modelUsage.map((row) => row.modelId).sort(),
+      ["claude-sonnet-4-5", "claude-sonnet-4-6"]
+    );
+  });
+});
+
 test("ClaudeUsageProvider prefers VSCode Claude binaries before falling back to other locations", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "trace-project/mixed.jsonl", [
@@ -2954,4 +3034,91 @@ test("buildAnonymousUsagePayload reports Antigravity model pools as model_type",
       }
     ]
   );
+});
+
+test("buildAnonymousUsageReports prefers explicit limit-window model types", async () => {
+  const reports = await buildAnonymousUsageReports([
+    {
+      providerId: "claude",
+      providerLabel: "Claude",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          cacheWrite5mInputTokens: 0,
+          cacheWrite1hInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 0,
+          estimatedCredits: 0,
+          eventCount: 0
+        },
+        distinctModels: [],
+        distinctPlanTypes: ["team_premium"],
+        rootLabel: "~/.claude/projects",
+        rootPath: "/tmp/.claude/projects"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [],
+      secondaryLimitWindows: [
+        {
+          scope: "secondary",
+          planType: "team_premium",
+          limitId: "current-week-sonnet-only",
+          modelType: "sonnet only",
+          windowMinutes: 10080,
+          startTimeUtcIso: "2026-06-19T12:00:00Z",
+          endTimeUtcIso: "2026-06-26T12:00:00Z",
+          firstSeenUtcIso: "2026-06-20T10:00:00Z",
+          lastSeenUtcIso: "2026-06-25T08:00:00Z",
+          minUsedPercent: 0,
+          maxUsedPercent: 4,
+          totals: {
+            inputTokens: 150,
+            outputTokens: 15,
+            cacheReadInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            cacheWrite5mInputTokens: 0,
+            cacheWrite1hInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: 0,
+            estimatedCredits: 75,
+            eventCount: 2
+          },
+          modelUsage: [
+            {
+              modelId: "claude-sonnet-4-6",
+              totals: {
+                inputTokens: 150,
+                outputTokens: 15,
+                cacheReadInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                cacheWrite5mInputTokens: 0,
+                cacheWrite1hInputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 0,
+                estimatedCredits: 75,
+                eventCount: 2
+              }
+            }
+          ],
+          eventCount: 2
+        }
+      ],
+      warnings: [],
+      analytics: {
+        agentName: "Claude",
+        userIdHash: "claude-user"
+      }
+    }
+  ]);
+
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].plan_id, "team_premium");
+  assert.equal(reports[0].model_type, "sonnet only");
 });

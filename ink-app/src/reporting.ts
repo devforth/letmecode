@@ -95,6 +95,10 @@ function resolveReportModelType(stats: ProviderStats, window: LimitWindowRow): s
     return resolveAntigravityReportModelType(stats, window);
   }
 
+  if (window.modelType) {
+    return truncateSchemaString(window.modelType, 128);
+  }
+
   if (window.limitId && window.limitId !== "unknown") {
     return truncateSchemaString(window.limitId, 128);
   }
