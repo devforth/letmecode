@@ -14,7 +14,7 @@ import {
 } from "./providers/index.js";
 import { reportAnonymousUsage } from "./reporting.js";
 
-type VerticalTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
+type DetailTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 
 type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
@@ -44,7 +44,7 @@ const DISABLE_MOUSE_TRACKING = `${ESC}[?1006l${ESC}[?1000l`;
 // SGR mouse report: ESC [ < button ; column ; row, ending in M (press) or m (release).
 const SGR_MOUSE_SEQUENCE = new RegExp(`${ESC}\\[<(\\d+);(\\d+);(\\d+)([Mm])`, "g");
 
-const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
+const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
   { id: "limit-windows", label: "Limits" },
   { id: "summary", label: "Summary" },
   { id: "day-to-day-analyses", label: "day to day" },
@@ -52,7 +52,6 @@ const VERTICAL_TABS: Array<{ id: VerticalTabId; label: string }> = [
 ];
 
 const CODEX_CREDIT_COST_USD = 0.01;
-const VERTICAL_TAB_WIDTH = 12;
 
 const LIMIT_WINDOW_COLUMNS = {
   plan: 8,
@@ -106,7 +105,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   );
   const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id ?? "");
   const [hasUserSelectedProvider, setHasUserSelectedProvider] = useState(false);
-  const [selectedVerticalTabIndex, setSelectedVerticalTabIndex] = useState(0);
+  const [selectedDetailTabIndex, setSelectedDetailTabIndex] = useState(0);
   const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState(0);
   const [selectedDayRowIndex, setSelectedDayRowIndex] = useState(0);
   const [selectedModelRowIndex, setSelectedModelRowIndex] = useState(0);
@@ -120,7 +119,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     sortedProviderStates.findIndex((state) => state.provider.id === selectedProviderId)
   );
   const selectedProvider = sortedProviderStates[selectedProviderIndex];
-  const selectedVerticalTab = VERTICAL_TABS[selectedVerticalTabIndex];
+  const selectedDetailTab = DETAIL_TABS[selectedDetailTabIndex];
   const limitRows = getLimitRows(selectedProvider);
   const dayRows = getDayRows(selectedProvider);
   const modelRows = getModelRows(selectedProvider);
@@ -212,9 +211,33 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if (regionId.startsWith("vtab:")) {
-      setSelectedVerticalTabIndex(Number(regionId.slice("vtab:".length)));
+      setSelectedDetailTabIndex(Number(regionId.slice("vtab:".length)));
     }
   });
+
+  const moveSelectedTableRow = useCallback((delta: number) => {
+    if (selectedDetailTab.id === "limit-windows") {
+      setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + delta, limitRows.length));
+      return;
+    }
+
+    if (selectedDetailTab.id === "usage-by-model") {
+      setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex + delta, modelRows.length));
+      return;
+    }
+
+    if (selectedDetailTab.id === "day-to-day-analyses") {
+      setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex + delta, dayRows.length));
+    }
+  }, [
+    activeDayRowIndex,
+    activeLimitRowIndex,
+    activeModelRowIndex,
+    dayRows.length,
+    limitRows.length,
+    modelRows.length,
+    selectedDetailTab.id
+  ]);
 
   useInput((input, key) => {
     // Mouse reports arrive as SGR escape sequences and are handled by useMouseClick.
@@ -249,37 +272,13 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if (key.rightArrow) {
-      if (selectedVerticalTab.id === "limit-windows") {
-        setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + 1, limitRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "usage-by-model") {
-        setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex + 1, modelRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "day-to-day-analyses") {
-        setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex + 1, dayRows.length));
-        return;
-      }
+      setSelectedDetailTabIndex((current) => (current + 1) % DETAIL_TABS.length);
+      return;
     }
 
     if (key.leftArrow) {
-      if (selectedVerticalTab.id === "limit-windows") {
-        setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex - 1, limitRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "usage-by-model") {
-        setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex - 1, modelRows.length));
-        return;
-      }
-
-      if (selectedVerticalTab.id === "day-to-day-analyses") {
-        setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex - 1, dayRows.length));
-        return;
-      }
+      setSelectedDetailTabIndex((current) => (current - 1 + DETAIL_TABS.length) % DETAIL_TABS.length);
+      return;
     }
 
     if ((key.tab && !key.shift) || input === "]") {
@@ -298,12 +297,12 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     }
 
     if (key.downArrow || input === "j") {
-      setSelectedVerticalTabIndex((current) => (current + 1) % VERTICAL_TABS.length);
+      moveSelectedTableRow(1);
       return;
     }
 
     if (key.upArrow || input === "k") {
-      setSelectedVerticalTabIndex((current) => (current - 1 + VERTICAL_TABS.length) % VERTICAL_TABS.length);
+      moveSelectedTableRow(-1);
     }
   });
 
@@ -313,7 +312,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         letmecode usage dashboard
       </Text>
       <Text color="gray">
-        [/]/tab to switch providers, j/k or up/down for details, left/right to select a row, enter for actions, click tabs to switch, q to quit
+        [/]/tab to switch providers, left/right for sections, up/down or j/k for rows, enter for actions, click tabs to switch, q to quit
       </Text>
       <Box marginTop={1}>
         {sortedProviderStates.map((state) => (
@@ -328,21 +327,22 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
       </Box>
 
       <Box marginTop={1} flexDirection="column" flexGrow={1} overflow="hidden">
+        <Box marginBottom={1}>
+          {DETAIL_TABS.map((tab, index) => (
+            <DetailTab
+              key={tab.id}
+              label={tab.label}
+              active={index === selectedDetailTabIndex}
+              showSeparator={index > 0}
+              regionRef={getRegionRef(`vtab:${index}`)}
+            />
+          ))}
+        </Box>
         <Box flexGrow={1} overflow="hidden">
-          <Box flexDirection="column" width={VERTICAL_TAB_WIDTH} marginRight={2} overflow="hidden">
-            {VERTICAL_TABS.map((tab, index) => (
-              <VerticalTab
-                key={tab.id}
-                label={tab.label}
-                active={index === selectedVerticalTabIndex}
-                regionRef={getRegionRef(`vtab:${index}`)}
-              />
-            ))}
-          </Box>
           <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
             <ContentPanel
               providerState={selectedProvider}
-              tabId={selectedVerticalTab.id}
+              tabId={selectedDetailTab.id}
               selectedLimitRowKey={selectedLimitRow ? getLimitRowKey(selectedLimitRow) : undefined}
               selectedDayKey={selectedDayRow?.dayKey}
               selectedModelId={selectedModelRow?.modelId}
@@ -353,7 +353,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
 
         <SelectionDetailsPanel
           providerState={selectedProvider}
-          tabId={selectedVerticalTab.id}
+          tabId={selectedDetailTab.id}
           selectedLimitRow={selectedLimitRow}
           selectedDayRow={selectedDayRow}
           selectedModelRow={selectedModelRow}
@@ -458,15 +458,17 @@ function ProviderTab(props: {
   );
 }
 
-function VerticalTab(props: {
+function DetailTab(props: {
   label: string;
   active: boolean;
+  showSeparator: boolean;
   regionRef?: (node: DOMElement | null) => void;
 }): React.JSX.Element {
   return (
-    <Box width={VERTICAL_TAB_WIDTH} ref={props.regionRef}>
+    <Box ref={props.regionRef}>
+      {props.showSeparator ? <Text color="gray"> | </Text> : null}
       <Text wrap="truncate-end" inverse={props.active}>
-        {props.active ? ` ${props.label} ` : ` ${props.label}`}
+        {` ${props.label} `}
       </Text>
     </Box>
   );
@@ -505,7 +507,7 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
 
 function ContentPanel(props: {
   providerState: ProviderLoadState;
-  tabId: VerticalTabId;
+  tabId: DetailTabId;
   selectedLimitRowKey?: string;
   selectedDayKey?: string;
   selectedModelId?: string;
@@ -752,7 +754,7 @@ function buildLimitWindowSectionLines(
 
 function SelectionDetailsPanel(props: {
   providerState: ProviderLoadState;
-  tabId: VerticalTabId;
+  tabId: DetailTabId;
   selectedLimitRow?: LimitWindowRow;
   selectedDayRow?: DailyUsageRow;
   selectedModelRow?: ModelUsageRow;
