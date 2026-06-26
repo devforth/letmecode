@@ -23,6 +23,7 @@ export type UsageRawByModel = {
 
 export type AnonymousUsageReport = {
   agent: string;
+  model_type: string;
   userid_hash: string;
   plan_id: string;
   window_duration_seconds: number;
@@ -75,6 +76,7 @@ function buildAnonymousUsageReport(
 ): AnonymousUsageReport {
   return {
     agent: stats.analytics?.agentName ?? stats.providerLabel.replace(/\s+/g, ""),
+    model_type: resolveReportModelType(stats, window),
     userid_hash: stats.analytics?.userIdHash ?? "",
     plan_id: window.planType,
     window_duration_seconds: window.windowMinutes * 60,
@@ -86,6 +88,41 @@ function buildAnonymousUsageReport(
     usage_raw: buildUsageRaw(window.modelUsage),
     letmecode_version: letmecodeVersion
   };
+}
+
+function resolveReportModelType(stats: ProviderStats, window: LimitWindowRow): string {
+  if (stats.providerId === "antigravity") {
+    return resolveAntigravityReportModelType(stats, window);
+  }
+
+  if (window.limitId && window.limitId !== "unknown") {
+    return truncateSchemaString(window.limitId, 128);
+  }
+
+  if (window.modelUsage.length === 1) {
+    return truncateSchemaString(window.modelUsage[0]?.modelId ?? stats.providerId, 128);
+  }
+
+  return truncateSchemaString(stats.providerId, 128);
+}
+
+function resolveAntigravityReportModelType(
+  stats: ProviderStats,
+  window: LimitWindowRow
+): string {
+  const limitId = window.limitId.toLowerCase();
+  if (limitId.includes("gemini")) {
+    return "gemini";
+  }
+  if (limitId.startsWith("3p") || limitId.includes("third-party")) {
+    return "third-party";
+  }
+
+  return truncateSchemaString(window.limitId || stats.providerId, 128);
+}
+
+function truncateSchemaString(value: string, maxLength: number): string {
+  return value.length > maxLength ? value.slice(0, maxLength) : value;
 }
 
 function buildUsageRaw(modelUsage: ModelUsageRow[]): UsageRawByModel {
@@ -113,7 +150,11 @@ function resolveReportedUsedPercents(window: LimitWindowRow): number {
 }
 
 function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, value));
 }
 
 function roundDollars(value: number): number {
