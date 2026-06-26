@@ -225,17 +225,15 @@ function claudeIdeToolsAttachment({
 
 test("provider registry stays UI-generic", async () => {
   const providers = createProviders();
-  assert.equal(providers.length, 5);
+  assert.equal(providers.length, 4);
   assert.equal(providers[0].id, "codex");
   assert.equal(providers[1].id, "claude");
-  assert.equal(providers[2].id, "claude-vscode");
-  assert.equal(providers[3].id, "copilot");
-  assert.equal(providers[4].id, "antigravity");
+  assert.equal(providers[2].id, "copilot");
+  assert.equal(providers[3].id, "antigravity");
   assert.equal(typeof providers[0].getStats, "function");
   assert.equal(typeof providers[1].getStats, "function");
   assert.equal(typeof providers[2].getStats, "function");
   assert.equal(typeof providers[3].getStats, "function");
-  assert.equal(typeof providers[4].getStats, "function");
 });
 
 test("AntigravityUsageProvider parses one normalized usage record", async () => {
@@ -1952,7 +1950,7 @@ test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of firs
   });
 });
 
-test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and builds live usage windows", async () => {
+test("ClaudeUsageProvider aggregates Claude entrypoints and builds live usage windows", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/mixed-entrypoints.jsonl", [
       claudeAssistantEvent({
@@ -2014,70 +2012,44 @@ test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and build
       );
     const now = () => new Date("2026-06-25T10:00:00.000Z");
 
-    const vscodeStats = await new ClaudeUsageProvider({
+    const stats = await new ClaudeUsageProvider({
       root,
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode",
       readUsageCommandOutput,
       readAuthStatusOutput,
       now
     }).getStats();
 
-    assert.equal(vscodeStats.summary.filesScanned, 1);
-    assert.equal(vscodeStats.summary.tokenEvents, 2);
-    assert.equal(vscodeStats.summary.totals.inputTokens, 140);
-    assert.equal(vscodeStats.summary.totals.outputTokens, 15);
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 4);
+    assert.equal(stats.summary.totals.inputTokens, 1209);
+    assert.equal(stats.summary.totals.outputTokens, 121);
     assert.deepEqual(
-      vscodeStats.modelUsage.map((row) => row.modelId).sort(),
-      ["claude-opus-4-8", "claude-sonnet-4-6"]
+      stats.modelUsage.map((row) => row.modelId).sort(),
+      ["claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6"]
     );
-    assert.equal(vscodeStats.primaryLimitWindows.length, 1);
-    assert.equal(vscodeStats.primaryLimitWindows[0].planType, "team");
-    assert.equal(vscodeStats.primaryLimitWindows[0].windowMinutes, 300);
-    assert.equal(vscodeStats.primaryLimitWindows[0].minUsedPercent, 20);
-    assert.equal(vscodeStats.primaryLimitWindows[0].maxUsedPercent, 20);
-    assert.equal(vscodeStats.primaryLimitWindows[0].totals.inputTokens, 100);
-    assert.equal(vscodeStats.primaryLimitWindows[0].totals.outputTokens, 10);
-    assert.equal(vscodeStats.secondaryLimitWindows.length, 1);
-    assert.equal(vscodeStats.secondaryLimitWindows[0].planType, "team");
-    assert.equal(vscodeStats.secondaryLimitWindows[0].windowMinutes, 10080);
-    assert.equal(vscodeStats.secondaryLimitWindows[0].minUsedPercent, 63);
-    assert.equal(vscodeStats.secondaryLimitWindows[0].maxUsedPercent, 63);
-    assert.equal(vscodeStats.secondaryLimitWindows[0].totals.inputTokens, 140);
-    assert.equal(vscodeStats.secondaryLimitWindows[0].totals.outputTokens, 15);
-    assert.deepEqual(vscodeStats.analytics, {
-      agentName: "ClaudeVSCode",
-      userIdHash: createHash("md5").update("ClaudeVSCode-ivan@devforth.io-6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c-Devforth").digest("hex")
-    });
-
-    const cliStats = await new ClaudeUsageProvider({
-      root,
-      readUsageCommandOutput,
-      readAuthStatusOutput,
-      now
-    }).getStats();
-
-    assert.equal(cliStats.summary.filesScanned, 1);
-    assert.equal(cliStats.summary.tokenEvents, 1);
-    assert.equal(cliStats.summary.totals.inputTokens, 70);
-    assert.equal(cliStats.summary.totals.outputTokens, 7);
-    assert.equal(cliStats.primaryLimitWindows.length, 1);
-    assert.equal(cliStats.primaryLimitWindows[0].planType, "team");
-    assert.equal(cliStats.primaryLimitWindows[0].totals.inputTokens, 70);
-    assert.equal(cliStats.secondaryLimitWindows.length, 1);
-    assert.equal(cliStats.secondaryLimitWindows[0].planType, "team");
-    assert.equal(cliStats.secondaryLimitWindows[0].totals.inputTokens, 70);
-    assert.equal(cliStats.warnings.some((warning) => warning.includes("mystery-cli")), false);
-    assert.deepEqual(cliStats.analytics, {
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].planType, "team");
+    assert.equal(stats.primaryLimitWindows[0].windowMinutes, 300);
+    assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 20);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 20);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 1169);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 116);
+    assert.equal(stats.secondaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(stats.secondaryLimitWindows[0].windowMinutes, 10080);
+    assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 63);
+    assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 63);
+    assert.equal(stats.secondaryLimitWindows[0].totals.inputTokens, 1209);
+    assert.equal(stats.secondaryLimitWindows[0].totals.outputTokens, 121);
+    assert.equal(stats.warnings.some((warning) => warning.includes("mystery-cli")), false);
+    assert.deepEqual(stats.analytics, {
       agentName: "Claude",
       userIdHash: createHash("md5").update("Claude-ivan@devforth.io-6688e4cf-c09a-4dc6-ba4a-20ffe66aa43c-Devforth").digest("hex")
     });
   });
 });
 
-test("ClaudeUsageProvider traces binary detection and /usage output for Claude and Claude VSCode", async () => {
+test("ClaudeUsageProvider prefers VSCode Claude binaries before falling back to other locations", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "trace-project/mixed.jsonl", [
       claudeAssistantEvent({
@@ -2100,7 +2072,6 @@ test("ClaudeUsageProvider traces binary detection and /usage output for Claude a
       })
     ]);
     const cliBinary = path.join(root, ".local", "bin", "claude");
-    const cliMissingBinary = path.join(root, "bin", "claude");
     const vscodeMissingBinary = path.join(
       root,
       ".vscode",
@@ -2114,7 +2085,7 @@ test("ClaudeUsageProvider traces binary detection and /usage output for Claude a
       root,
       ".vscode",
       "extensions",
-      "anthropic.claude-code-1.8.0",
+      "anthropic.claude-code-1.8.1",
       "resources",
       "native-binary",
       "claude"
@@ -2166,29 +2137,86 @@ exit 1
     };
 
     await new ClaudeUsageProvider({ root }).getStats({ traceLogger });
-    await new ClaudeUsageProvider({
-      root,
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode"
-    }).getStats({ traceLogger });
 
     const combinedLogs = logs.join("\n");
     assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.claude/projects -> ${path.join(root, ".claude", "projects")} (exists).`), true);
-    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=1 source=vscode entrypoints=claude-vscode:1, sdk-cli:1"), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=2 source=vscode entrypoints=claude-vscode:1, sdk-cli:1"), true);
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${vscodeMissingBinary} -> failure (`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${vscodeBinary} -> success.`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${vscodeBinary}.`), true);
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${cliBinary} -> success.`), false);
+    assert.equal(combinedLogs.includes("[Claude] Usage returned:\nCurrent session: 56% used"), true);
+    assert.equal(combinedLogs.includes("Current week (all models): 78% used"), true);
+    assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=56%"), true);
+  });
+});
+
+test("ClaudeUsageProvider falls back to direct Claude binaries when VSCode extension binaries are unavailable", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "trace-project/cli-fallback.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:00:00.000Z",
+        requestId: "req-trace-cli-only",
+        messageId: "msg-trace-cli-only",
+        entrypoint: "cli",
+        model: "claude-sonnet-4-5",
+        inputTokens: 70,
+        outputTokens: 7
+      })
+    ]);
+    const cliBinary = path.join(root, ".local", "bin", "claude");
+    const vscodeMissingBinary = path.join(
+      root,
+      ".vscode",
+      "extensions",
+      "anthropic.claude-code-2.1.191-linux-x64",
+      "resources",
+      "native-binary",
+      "claude"
+    );
+
+    await fs.mkdir(path.dirname(vscodeMissingBinary), { recursive: true });
+    await writeExecutable(
+      cliBinary,
+      `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+cat <<'EOF'
+{
+  "loggedIn": true,
+  "email": "trace@example.com",
+  "orgId": "org-1",
+  "orgName": "Trace Org",
+  "subscriptionType": "team"
+}
+EOF
+exit 0
+fi
+if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
+cat <<'EOF'
+Current session: 12% used · resets Jun 25, 12:30pm (UTC)
+Current week (all models): 34% used · resets Jun 28, 12pm (UTC)
+EOF
+exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`
+    );
+
+    const logs = [];
+    const traceLogger = {
+      log(message) {
+        logs.push(message);
+      }
+    };
+
+    await new ClaudeUsageProvider({ root }).getStats({ traceLogger });
+
+    const combinedLogs = logs.join("\n");
+    assert.equal(combinedLogs.includes(`[Claude] Checked ${vscodeMissingBinary} -> failure (`), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${cliBinary} -> success.`), true);
-    assert.equal(combinedLogs.includes(`[Claude] Checked ${cliMissingBinary} -> failure (`), true);
     assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${cliBinary}.`), true);
     assert.equal(combinedLogs.includes("[Claude] Usage returned:\nCurrent session: 12% used"), true);
-    assert.equal(combinedLogs.includes("Current week (all models): 34% used"), true);
-    assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=12%"), true);
-    assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeMissingBinary} -> failure (`), true);
-    assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeBinary} -> success.`), true);
-    assert.equal(combinedLogs.includes(`[Claude VSCode] Binary detection result: found ${vscodeBinary}.`), true);
-    assert.equal(combinedLogs.includes("[Claude VSCode] Usage returned:\nCurrent session: 56% used"), true);
-    assert.equal(combinedLogs.includes("Current week (all models): 78% used"), true);
-    assert.equal(combinedLogs.includes("[Claude VSCode] Live window primary/session: used=56%"), true);
   });
 });
 
@@ -2257,10 +2285,6 @@ exit 1
 
     const stats = await new ClaudeUsageProvider({
       root,
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode",
       now: () => new Date("2026-06-25T14:19:42.154Z")
     }).getStats();
 
@@ -2294,13 +2318,7 @@ test("ClaudeUsageProvider finds Linux Claude sessions under ~/.config/claude/pro
       })
     ]);
 
-    const stats = await new ClaudeUsageProvider({
-      root,
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode"
-    }).getStats();
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
 
     assert.equal(stats.summary.filesScanned, 1);
     assert.equal(stats.summary.tokenEvents, 1);
@@ -2311,7 +2329,7 @@ test("ClaudeUsageProvider finds Linux Claude sessions under ~/.config/claude/pro
   });
 });
 
-test("ClaudeUsageProvider traces Linux Claude limits with zero CLI transcript matches", async () => {
+test("ClaudeUsageProvider traces Linux Claude limits from shared Claude transcripts", async () => {
   await withTempRoot(async (root) => {
     const sessionsRoot = path.join(root, ".config", "claude", "projects");
     await writeClaudeSessionAt(sessionsRoot, "ubuntu-cli/session.jsonl", [
@@ -2350,18 +2368,17 @@ test("ClaudeUsageProvider traces Linux Claude limits with zero CLI transcript ma
       now: () => new Date("2026-06-25T19:15:00.000Z")
     }).getStats({ traceLogger });
 
-    assert.equal(stats.summary.filesScanned, 0);
-    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(stats.summary.filesScanned, 1);
+    assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].eventCount, 0);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 0);
+    assert.equal(stats.primaryLimitWindows[0].eventCount, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 120);
 
     const combinedLogs = logs.join("\n");
     assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.config/claude/projects -> ${sessionsRoot} (exists).`), true);
-    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=0 source=vscode entrypoints=claude-vscode:1"), true);
-    assert.equal(combinedLogs.includes("[Claude] No transcript usage matched entrypoints [sdk-cli, claude]. Observed entrypoints=claude-vscode:1."), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=1 source=vscode entrypoints=claude-vscode:1"), true);
     assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=44%"), true);
-    assert.equal(combinedLogs.includes("matchedEvents=0 input=0 output=0"), true);
+    assert.equal(combinedLogs.includes("matchedEvents=1 input=120 output=12"), true);
   });
 });
 
@@ -2373,20 +2390,14 @@ test("ClaudeUsageProvider accepts a root that already points at a raw Claude pro
         timestamp: "2026-06-25T08:00:00.000Z",
         requestId: "req-dump-vscode",
         messageId: "msg-dump-vscode",
-        entrypoint: "claude-vscode",
+        entrypoint: "cli",
         model: "claude-sonnet-4-6",
         inputTokens: 90,
         outputTokens: 9
       })
     ]);
 
-    const stats = await new ClaudeUsageProvider({
-      root: projectsRoot,
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode"
-    }).getStats();
+    const stats = await new ClaudeUsageProvider({ root: projectsRoot }).getStats();
 
     assert.equal(stats.summary.filesScanned, 1);
     assert.equal(stats.summary.tokenEvents, 1);
@@ -2397,7 +2408,7 @@ test("ClaudeUsageProvider accepts a root that already points at a raw Claude pro
   });
 });
 
-test("ClaudeUsageProvider routes generic cli Linux sessions to CLI or VSCode by session hints", async () => {
+test("ClaudeUsageProvider aggregates generic cli Linux sessions regardless of IDE hints", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/linux-cli-terminal.jsonl", [
       claudeAssistantEvent({
@@ -2452,35 +2463,18 @@ test("ClaudeUsageProvider routes generic cli Linux sessions to CLI or VSCode by 
       });
     const now = () => new Date("2026-06-25T10:00:00.000Z");
 
-    const cliStats = await new ClaudeUsageProvider({
+    const stats = await new ClaudeUsageProvider({
       root,
       readUsageCommandOutput,
       readAuthStatusOutput,
       now
     }).getStats();
-    assert.equal(cliStats.summary.tokenEvents, 1);
-    assert.equal(cliStats.summary.totals.inputTokens, 70);
-    assert.equal(cliStats.summary.totals.outputTokens, 7);
-    assert.equal(cliStats.primaryLimitWindows.length, 1);
-    assert.equal(cliStats.primaryLimitWindows[0].totals.inputTokens, 70);
-    assert.equal(cliStats.primaryLimitWindows[0].totals.outputTokens, 7);
-
-    const vscodeStats = await new ClaudeUsageProvider({
-      root,
-      id: "claude-vscode",
-      label: "Claude VSCode",
-      entrypoints: ["claude-vscode"],
-      usageCommandKind: "vscode",
-      readUsageCommandOutput,
-      readAuthStatusOutput,
-      now
-    }).getStats();
-    assert.equal(vscodeStats.summary.tokenEvents, 2);
-    assert.equal(vscodeStats.summary.totals.inputTokens, 150);
-    assert.equal(vscodeStats.summary.totals.outputTokens, 15);
-    assert.equal(vscodeStats.primaryLimitWindows.length, 1);
-    assert.equal(vscodeStats.primaryLimitWindows[0].totals.inputTokens, 150);
-    assert.equal(vscodeStats.primaryLimitWindows[0].totals.outputTokens, 15);
+    assert.equal(stats.summary.tokenEvents, 3);
+    assert.equal(stats.summary.totals.inputTokens, 220);
+    assert.equal(stats.summary.totals.outputTokens, 22);
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 220);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 22);
   });
 });
 
@@ -2642,8 +2636,8 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
       }
     },
     {
-      providerId: "claude-vscode",
-      providerLabel: "Claude VSCode",
+      providerId: "claude",
+      providerLabel: "Claude",
       summary: {
         filesScanned: 1,
         linesRead: 1,
@@ -2714,7 +2708,7 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
       secondaryLimitWindows: [],
       warnings: [],
       analytics: {
-        agentName: "ClaudeVSCode",
+        agentName: "Claude",
         userIdHash: "claude-user"
       }
     }
@@ -2755,7 +2749,7 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
         }
       },
       {
-        agent: "ClaudeVSCode",
+        agent: "Claude",
         model_type: "current-session",
         used_percents: 20.25,
         used_exhausted: false,

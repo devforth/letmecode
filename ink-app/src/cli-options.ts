@@ -79,8 +79,8 @@ export function buildHelpText(): string {
     "  q or Esc           Quit",
     "",
     "Trace logging:",
-    "  --log-to PATH writes Claude CLI SDK and Claude VSCode detection details,",
-    "  session root selection, parsed session file summaries, entrypoint matching,",
+    "  --log-to PATH writes Claude detection details,",
+    "  session root selection, parsed session file summaries, aggregated usage selection,",
     "  every candidate binary path check, the final found/not-found result,",
     "  and the raw /usage command output plus live window matching details."
   ].join("\n");
