@@ -478,31 +478,48 @@ function DetailTab(props: {
 
 function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
   const { summary } = props.stats;
-  const isCodexProvider = props.stats.providerId === "codex";
+  const totals = summary.totals;
+  const period = resolveSummaryPeriod(props.stats.dayUsage);
+  const cacheRatio = resolveCacheRatio(totals);
+  const averageTokensPerEvent =
+    totals.eventCount > 0 ? totals.totalTokens / totals.eventCount : 0;
+  const costPerEvent =
+    totals.eventCount > 0
+      ? (totals.estimatedCredits * CODEX_CREDIT_COST_USD) / totals.eventCount
+      : 0;
+
   return (
     <Box flexDirection="column">
-      <Text bold>{props.stats.providerLabel}</Text>
-      <Text>
-        root: {summary.rootLabel} ({summary.rootPath})
-      </Text>
-      <Text>
-        files: {formatInteger(summary.filesScanned)}  lines: {formatInteger(summary.linesRead)}  token events: {formatInteger(summary.tokenEvents)}
-      </Text>
-      <UsageBreakdownLines totals={summary.totals} />
-      {isCodexProvider ? (
-        <Text>Burned tokens for: {formatUsageUsd(summary.totals)}</Text>
-      ) : (
-        <Text>
-          estimated credits: {formatUsageCredits(summary.totals)}
-        </Text>
-      )}
-      <Text>IpO: {formatInputPerOutput(summary.totals)}</Text>
-      <Text>
-        models: {summary.distinctModels.join(", ") || "none"}
-      </Text>
-      <Text>
-        plans: {summary.distinctPlanTypes.join(", ") || "none"}
-      </Text>
+      <Text bold>{props.stats.providerLabel} overview</Text>
+      <Text> </Text>
+      <Box>
+        <Box flexDirection="column" width={45}>
+          <DetailRow label="Plan" value={summary.distinctPlanTypes.join(", ") || "none"} />
+          <DetailRow label="Models" value={summary.distinctModels.join(", ") || "none"} />
+          <DetailRow label="Period" value={period} />
+          <Text> </Text>
+          <Text color="cyan">Usage</Text>
+          <DetailRow label="Events" value={formatInteger(totals.eventCount)} />
+          <DetailRow label="Input" value={formatOverviewTokenCount(totals.inputTokens)} />
+          <DetailRow label="Output" value={formatOverviewTokenCount(totals.outputTokens)} />
+          <DetailRow label="Cache read" value={formatCacheOverviewTokenCount(totals, totals.cacheReadInputTokens)} />
+          <DetailRow label="Reasoning" value={formatOverviewTokenCount(totals.reasoningOutputTokens)} />
+          <DetailRow label="Total" value={formatOverviewTokenCount(totals.totalTokens)} />
+          <DetailRow label="API equiv." value={formatUsageUsd(totals)} />
+        </Box>
+        <Box flexDirection="column">
+          <Text color="cyan">Efficiency</Text>
+          <DetailRow label="Cache ratio" value={formatPercent(cacheRatio)} />
+          <DetailRow label="Input/output" value={formatInputOutputRatio(totals)} />
+          <DetailRow label="Avg/event" value={`${formatOverviewTokenCount(averageTokensPerEvent)} tokens`} />
+          <DetailRow label="Cost/event" value={formatUnitUsd(costPerEvent)} />
+          <Text> </Text>
+          <Text color="cyan">Data source</Text>
+          <DetailRow label="Files" value={formatInteger(summary.filesScanned)} />
+          <DetailRow label="Lines" value={formatInteger(summary.linesRead)} />
+          <DetailRow label="Path" value={summary.rootPath} />
+        </Box>
+      </Box>
     </Box>
   );
 }
@@ -937,7 +954,7 @@ function DetailsPanelFrame(props: { children: React.ReactNode }): React.JSX.Elem
 function DetailRow(props: { label: string; value: string }): React.JSX.Element {
   return (
     <Text>
-      {pad(props.label, 12)}
+      {pad(props.label, 14)}
       {props.value}
     </Text>
   );
@@ -956,6 +973,32 @@ function UsageTotalsDetails(props: { totals: UsageTotals; modelId?: string }): R
 
 function formatInteger(value: number): string {
   return Math.round(value).toLocaleString("en-US");
+}
+
+function formatOverviewTokenCount(value: number): string {
+  const roundedValue = Math.round(value);
+  if (roundedValue >= 1_000_000_000) {
+    return `${formatFixedCompactNumber(roundedValue / 1_000_000_000)}B`;
+  }
+  if (roundedValue >= 1_000_000) {
+    return `${formatFixedCompactNumber(roundedValue / 1_000_000)}M`;
+  }
+  if (roundedValue >= 1_000) {
+    return `${formatFixedCompactNumber(roundedValue / 1_000)}K`;
+  }
+
+  return formatInteger(roundedValue);
+}
+
+function formatCacheOverviewTokenCount(totals: UsageTotals, value: number): string {
+  return totals.cacheStatus === "unavailable" ? "-" : formatOverviewTokenCount(value);
+}
+
+function formatFixedCompactNumber(value: number): string {
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: value < 10 ? 2 : 1,
+    minimumFractionDigits: 0
+  });
 }
 
 function formatCompactTokenCount(value: number): string {
@@ -1027,6 +1070,56 @@ function formatUsd(value: number): string {
   });
 }
 
+function formatUnitUsd(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return value.toLocaleString("en-US", {
+    currency: "USD",
+    style: "currency",
+    minimumFractionDigits: value < 0.01 && value > 0 ? 4 : 3,
+    maximumFractionDigits: value < 0.01 && value > 0 ? 4 : 3
+  });
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return `${value.toLocaleString("en-US", {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 0
+  })}%`;
+}
+
+function resolveCacheRatio(totals: UsageTotals): number {
+  if (totals.cacheStatus === "unavailable") {
+    return NaN;
+  }
+
+  const inputPool =
+    totals.inputTokens +
+    totals.cacheReadInputTokens +
+    totals.cacheWriteInputTokens;
+
+  return inputPool > 0
+    ? (totals.cacheReadInputTokens / inputPool) * 100
+    : 0;
+}
+
+function formatInputOutputRatio(totals: UsageTotals): string {
+  if (totals.outputTokens <= 0) {
+    return "-";
+  }
+
+  return `${(totals.inputTokens / totals.outputTokens).toLocaleString("en-US", {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 0
+  })} : 1`;
+}
+
 function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
   const fmt = (v: number) => `${Math.round(v)}%`;
   return minUsedPercent === maxUsedPercent
@@ -1079,6 +1172,20 @@ function formatCompactLocalDateTime(value: string): string {
 
   const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${lookup.day} ${lookup.month} ${lookup.hour}:${lookup.minute}`;
+}
+
+function resolveSummaryPeriod(dayUsage: DailyUsageRow[]): string {
+  const timestamps = dayUsage.flatMap((row) => [
+    row.firstEventUtcIso,
+    row.lastEventUtcIso
+  ]).filter((value): value is string => Boolean(value));
+
+  if (timestamps.length === 0) {
+    return "-";
+  }
+
+  const sortedTimestamps = timestamps.sort();
+  return `${formatCompactLocalDateTime(sortedTimestamps[0])} → ${formatCompactLocalDateTime(sortedTimestamps[sortedTimestamps.length - 1])}`;
 }
 
 function formatUtcDay(value: string): string {
