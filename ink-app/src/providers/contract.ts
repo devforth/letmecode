@@ -33,6 +33,7 @@ export type LimitWindowRow = {
   scope: LimitWindowScope;
   planType: string;
   limitId: string;
+  modelType?: string;
   windowMinutes: number;
   startTimeUtcIso: string;
   endTimeUtcIso: string;
