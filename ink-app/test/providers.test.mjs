@@ -1631,6 +1631,26 @@ test("ClaudeUsageProvider splits sdk-cli and claude-vscode entrypoints and build
 
 test("ClaudeUsageProvider traces binary detection and /usage output for Claude and Claude VSCode", async () => {
   await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "trace-project/mixed.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:00:00.000Z",
+        requestId: "req-trace-cli",
+        messageId: "msg-trace-cli",
+        entrypoint: "sdk-cli",
+        model: "claude-sonnet-4-5",
+        inputTokens: 70,
+        outputTokens: 7
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T10:00:00.000Z",
+        requestId: "req-trace-vscode",
+        messageId: "msg-trace-vscode",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 80,
+        outputTokens: 8
+      })
+    ]);
     const cliBinary = path.join(root, ".local", "bin", "claude");
     const cliMissingBinary = path.join(root, "bin", "claude");
     const vscodeMissingBinary = path.join(
@@ -1707,16 +1727,20 @@ exit 1
     }).getStats({ traceLogger });
 
     const combinedLogs = logs.join("\n");
+    assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.claude/projects -> ${path.join(root, ".claude", "projects")} (exists).`), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=1 entrypoints=claude-vscode:1, sdk-cli:1"), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${cliBinary} -> success.`), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${cliMissingBinary} -> failure (`), true);
     assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${cliBinary}.`), true);
     assert.equal(combinedLogs.includes("[Claude] Usage returned:\nCurrent session: 12% used"), true);
     assert.equal(combinedLogs.includes("Current week (all models): 34% used"), true);
+    assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=12%"), true);
     assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeMissingBinary} -> failure (`), true);
     assert.equal(combinedLogs.includes(`[Claude VSCode] Checked ${vscodeBinary} -> success.`), true);
     assert.equal(combinedLogs.includes(`[Claude VSCode] Binary detection result: found ${vscodeBinary}.`), true);
     assert.equal(combinedLogs.includes("[Claude VSCode] Usage returned:\nCurrent session: 56% used"), true);
     assert.equal(combinedLogs.includes("Current week (all models): 78% used"), true);
+    assert.equal(combinedLogs.includes("[Claude VSCode] Live window primary/session: used=56%"), true);
   });
 });
 
@@ -1836,6 +1860,60 @@ test("ClaudeUsageProvider finds Linux Claude sessions under ~/.config/claude/pro
     assert.equal(stats.summary.totals.outputTokens, 12);
     assert.equal(stats.summary.rootLabel, "~/.config/claude/projects");
     assert.equal(stats.summary.rootPath, sessionsRoot);
+  });
+});
+
+test("ClaudeUsageProvider traces Linux Claude limits with zero CLI transcript matches", async () => {
+  await withTempRoot(async (root) => {
+    const sessionsRoot = path.join(root, ".config", "claude", "projects");
+    await writeClaudeSessionAt(sessionsRoot, "ubuntu-cli/session.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T18:00:00.000Z",
+        requestId: "req-linux-vscode-only",
+        messageId: "msg-linux-vscode-only",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 120,
+        outputTokens: 12
+      })
+    ]);
+
+    const logs = [];
+    const traceLogger = {
+      log(message) {
+        logs.push(message);
+      }
+    };
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 44% used · resets Jun 25, 8pm (UTC)",
+          "Current week (all models): 6% used · resets Jul 2, 3pm (UTC)"
+        ].join("\n"),
+      readAuthStatusOutput: async () =>
+        JSON.stringify({
+          loggedIn: true,
+          email: "linux@example.com",
+          orgId: "org-linux",
+          orgName: "Linux Org",
+          subscriptionType: "team"
+        }),
+      now: () => new Date("2026-06-25T19:15:00.000Z")
+    }).getStats({ traceLogger });
+
+    assert.equal(stats.summary.filesScanned, 0);
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].eventCount, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 0);
+
+    const combinedLogs = logs.join("\n");
+    assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.config/claude/projects -> ${sessionsRoot} (exists).`), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=0 entrypoints=claude-vscode:1"), true);
+    assert.equal(combinedLogs.includes("[Claude] No transcript usage matched entrypoints [sdk-cli, claude]. Observed entrypoints=claude-vscode:1."), true);
+    assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=44%"), true);
+    assert.equal(combinedLogs.includes("matchedEvents=0 input=0 output=0"), true);
   });
 });
 

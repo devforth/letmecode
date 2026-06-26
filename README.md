@@ -8,6 +8,8 @@ npx -y letmecode -- -h
 npx -y letmecode -- --log-to log.txt
 ```
 
+`--log-to` now records Claude binary discovery, session-root selection, parsed transcript file summaries, entrypoint matching, raw `/usage` output, and live-window event matching so zero-token windows are diagnosable.
+
 <img width="2308" height="1491" alt="image" src="https://github.com/user-attachments/assets/f3f52d79-00e3-4ff5-bf2f-65f8be632aaa" />
 
 ## Controls

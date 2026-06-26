@@ -114,6 +114,7 @@ type ParsedUsageEvent = {
 };
 
 type ParsedClaudeSessionFile = {
+  filePath: string;
   linesRead: number;
   malformedLines: number;
   events: ParsedUsageEvent[];
@@ -164,7 +165,16 @@ export class ClaudeUsageProvider extends UsageProviderBase {
   }
 
   async getStats(options: ProviderStatsOptions = {}): Promise<ProviderStats> {
-    const resolvedSessionsRoot = await resolveClaudeSessionsRoot(this.root);
+    traceClaude(
+      options.traceLogger,
+      this.usageCommandKind,
+      `Starting stats collection with root=${this.root} entrypoints=[${[...this.entrypoints].join(", ")}].`
+    );
+    const resolvedSessionsRoot = await resolveClaudeSessionsRoot(
+      this.root,
+      this.usageCommandKind,
+      options.traceLogger
+    );
     const sessionsRoot = resolvedSessionsRoot.rootPath;
     const agentName = normalizeAnalyticsAgentName(this.label);
     const userIdHash = await readClaudeUserIdHash(
@@ -187,10 +197,32 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       malformedLines: 0
     };
 
-    const parsedSessionFiles = await loadParsedClaudeSessionFiles(sessionsRoot);
+    const parsedSessionFiles = await loadParsedClaudeSessionFiles(
+      sessionsRoot,
+      this.usageCommandKind,
+      options.traceLogger
+    );
+    traceClaude(
+      options.traceLogger,
+      this.usageCommandKind,
+      `Loaded ${parsedSessionFiles.length} parsed session file(s) from ${sessionsRoot}.`
+    );
 
     for (const file of parsedSessionFiles) {
       const matchingEvents = file.events.filter((event) => this.entrypoints.has(event.entrypoint));
+      traceClaude(
+        options.traceLogger,
+        this.usageCommandKind,
+        [
+          `Session file ${describeSessionFilePath(sessionsRoot, file.filePath)}:`,
+          `lines=${file.linesRead}`,
+          `malformed=${file.malformedLines}`,
+          `assistantUsageEvents=${file.events.length}`,
+          `matchingEvents=${matchingEvents.length}`,
+          `entrypoints=${summarizeEventCounts(file.events.map((event) => event.entrypoint || "<empty>"))}`,
+          `models=${summarizeDistinctValues(file.events.map((event) => event.modelId || "unknown"))}`
+        ].join(" ")
+      );
       if (matchingEvents.length === 0) {
         continue;
       }
@@ -208,6 +240,24 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       ...parsedEvents.keyedEvents.values(),
       ...parsedEvents.unkeyedEvents.values()
     ];
+    traceClaude(
+      options.traceLogger,
+      this.usageCommandKind,
+      [
+        `Transcript selection summary: filesWithMatches=${parseTotals.filesScanned}/${parsedSessionFiles.length}`,
+        `selectedEvents=${selectedEvents.length}`,
+        `duplicateUsageKeys=${parsedEvents.duplicateUsageKeys}`,
+        `duplicateUsageKeyCollisions=${parsedEvents.duplicateUsageKeyCollisions}`,
+        `duplicateUnkeyedEvents=${parsedEvents.duplicateUnkeyedEvents}`
+      ].join(" ")
+    );
+    if (selectedEvents.length === 0 && parsedSessionFiles.length > 0) {
+      traceClaude(
+        options.traceLogger,
+        this.usageCommandKind,
+        `No transcript usage matched entrypoints [${[...this.entrypoints].join(", ")}]. Observed entrypoints=${summarizeEventCounts(collectEntryPoints(parsedSessionFiles))}.`
+      );
+    }
 
     for (const event of selectedEvents) {
       addModelUsage(byModel, event.modelId, event.totals);
@@ -274,6 +324,23 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       liveLimitWindows.secondaryLimitWindows.length > 0
         ? liveLimitWindows.secondaryLimitWindows
         : fallbackSecondaryLimitWindows;
+    traceClaude(
+      options.traceLogger,
+      this.usageCommandKind,
+      [
+        `Finished stats collection:`,
+        `filesScanned=${parseTotals.filesScanned}`,
+        `linesRead=${parseTotals.linesRead}`,
+        `tokenEvents=${parseTotals.tokenEvents}`,
+        `models=${modelUsage.length}`,
+        `primaryWindows=${primaryLimitWindows.length}`,
+        `secondaryWindows=${secondaryLimitWindows.length}`,
+        `input=${summaryTotals.inputTokens}`,
+        `output=${summaryTotals.outputTokens}`,
+        `cacheRead=${summaryTotals.cacheReadInputTokens}`,
+        `cacheWrite=${summaryTotals.cacheWriteInputTokens}`
+      ].join(" ")
+    );
 
     return {
       providerId: this.id,
@@ -398,19 +465,45 @@ function isSessionFile(filePath: string): boolean {
   return filePath.endsWith(".jsonl");
 }
 
-async function resolveClaudeSessionsRoot(root: string): Promise<ClaudeSessionsRootCandidate> {
+async function resolveClaudeSessionsRoot(
+  root: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  traceLogger?: ProviderTraceLogger
+): Promise<ClaudeSessionsRootCandidate> {
   const candidates = buildClaudeSessionsRootCandidates(root);
+  traceClaude(
+    traceLogger,
+    usageCommandKind,
+    `Checking ${candidates.length} Claude session root candidate(s).`
+  );
 
   for (const candidate of candidates) {
-    if (await isDirectory(candidate.rootPath)) {
+    const exists = await isDirectory(candidate.rootPath);
+    traceClaude(
+      traceLogger,
+      usageCommandKind,
+      `Session root candidate ${candidate.rootLabel} -> ${candidate.rootPath} (${exists ? "exists" : "missing"}).`
+    );
+    if (exists) {
+      traceClaude(
+        traceLogger,
+        usageCommandKind,
+        `Selected session root ${candidate.rootLabel} -> ${candidate.rootPath}.`
+      );
       return candidate;
     }
   }
 
-  return candidates[0] ?? {
+  const fallbackCandidate = candidates[0] ?? {
     rootLabel: "~/.claude/projects",
     rootPath: path.join(path.resolve(root), ".claude", "projects")
   };
+  traceClaude(
+    traceLogger,
+    usageCommandKind,
+    `No session root candidate exists yet; defaulting to ${fallbackCandidate.rootLabel} -> ${fallbackCandidate.rootPath}.`
+  );
+  return fallbackCandidate;
 }
 
 function buildClaudeSessionsRootCandidates(root: string): ClaudeSessionsRootCandidate[] {
@@ -508,18 +601,34 @@ async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
   }
 }
 
-async function loadParsedClaudeSessionFiles(sessionsRoot: string): Promise<ParsedClaudeSessionFile[]> {
+async function loadParsedClaudeSessionFiles(
+  sessionsRoot: string,
+  usageCommandKind: ClaudeUsageCommandKind,
+  traceLogger?: ProviderTraceLogger
+): Promise<ParsedClaudeSessionFile[]> {
   const cacheKey = path.resolve(sessionsRoot);
   const cached = parsedClaudeSessionFilesCache.get(cacheKey);
   if (cached) {
-    return cached;
+    const files = await cached;
+    traceClaude(
+      traceLogger,
+      usageCommandKind,
+      `Session parse cache hit for ${sessionsRoot} (${files.length} file(s)).`
+    );
+    return files;
   }
 
   const pending = (async () => {
     const files: ParsedClaudeSessionFile[] = [];
+    traceClaude(traceLogger, usageCommandKind, `Scanning session files under ${sessionsRoot}.`);
     for await (const filePath of walkSessionFiles(sessionsRoot)) {
       files.push(await parseSessionFile(filePath));
     }
+    traceClaude(
+      traceLogger,
+      usageCommandKind,
+      `Completed session file scan under ${sessionsRoot}: ${files.length} file(s) parsed.`
+    );
 
     return files;
   })();
@@ -577,7 +686,7 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
     });
   }
 
-  return { linesRead, malformedLines, events };
+  return { filePath, linesRead, malformedLines, events };
 }
 
 function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string | null {
@@ -704,6 +813,51 @@ function describeUsageOutput(output: string | null): string {
   return output.trim() ? output : "<empty>";
 }
 
+function describeSessionFilePath(sessionsRoot: string, filePath: string): string {
+  const relativePath = path.relative(sessionsRoot, filePath);
+  if (!relativePath || relativePath.startsWith("..")) {
+    return filePath;
+  }
+
+  return relativePath;
+}
+
+function summarizeEventCounts(values: Iterable<string>): string {
+  const counts = new Map<string, number>();
+
+  for (const value of values) {
+    const normalizedValue = value || "<empty>";
+    counts.set(normalizedValue, (counts.get(normalizedValue) ?? 0) + 1);
+  }
+
+  if (counts.size === 0) {
+    return "<none>";
+  }
+
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([value, count]) => `${value}:${count}`)
+    .join(", ");
+}
+
+function summarizeDistinctValues(values: Iterable<string>, limit = 5): string {
+  const distinctValues = [...new Set([...values].filter(Boolean))].sort();
+
+  if (distinctValues.length === 0) {
+    return "<none>";
+  }
+
+  const visibleValues = distinctValues.slice(0, limit);
+  const remainder = distinctValues.length - visibleValues.length;
+  return remainder > 0
+    ? `${visibleValues.join(", ")} (+${remainder} more)`
+    : visibleValues.join(", ");
+}
+
+function collectEntryPoints(files: ParsedClaudeSessionFile[]): string[] {
+  return files.flatMap((file) => file.events.map((event) => event.entrypoint || "<empty>"));
+}
+
 function buildClaudeCommandEnvironment(): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -740,15 +894,56 @@ async function buildLiveLimitWindows(options: {
     options.usageCommandKind,
     `Parsed ${snapshots.length} live usage snapshot(s) from /usage output.`
   );
+  if (snapshots.length === 0) {
+    traceClaude(
+      options.traceLogger,
+      options.usageCommandKind,
+      "No live usage snapshots matched the expected /usage format."
+    );
+  }
   const resolvedPlanType = subscriptionType || "live";
+  traceClaude(
+    options.traceLogger,
+    options.usageCommandKind,
+    `Resolved live plan type ${resolvedPlanType}.`
+  );
+
+  const primaryLimitWindows = snapshots
+    .filter((snapshot) => snapshot.scope === "primary")
+    .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now));
+  const secondaryLimitWindows = snapshots
+    .filter((snapshot) => snapshot.scope === "secondary")
+    .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now));
+
+  for (let index = 0; index < snapshots.length; index += 1) {
+    const snapshot = snapshots[index];
+    const row =
+      snapshot.scope === "primary"
+        ? primaryLimitWindows.filter((window) => window.limitId === `current-${snapshot.label}`)[0]
+        : secondaryLimitWindows.filter((window) => window.limitId === `current-${snapshot.label}`)[0];
+    if (!row) {
+      continue;
+    }
+
+    traceClaude(
+      options.traceLogger,
+      options.usageCommandKind,
+      [
+        `Live window ${snapshot.scope}/${snapshot.label}:`,
+        `used=${snapshot.usedPercent}%`,
+        `range=${row.startTimeUtcIso}->${row.endTimeUtcIso}`,
+        `matchedEvents=${row.eventCount}`,
+        `input=${row.totals.inputTokens}`,
+        `output=${row.totals.outputTokens}`,
+        `cacheRead=${row.totals.cacheReadInputTokens}`,
+        `cacheWrite=${row.totals.cacheWriteInputTokens}`
+      ].join(" ")
+    );
+  }
 
   return {
-    primaryLimitWindows: snapshots
-      .filter((snapshot) => snapshot.scope === "primary")
-      .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now)),
-    secondaryLimitWindows: snapshots
-      .filter((snapshot) => snapshot.scope === "secondary")
-      .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now))
+    primaryLimitWindows,
+    secondaryLimitWindows
   };
 }
 
@@ -760,6 +955,9 @@ async function readClaudeSubscriptionType(
 ): Promise<string | null> {
   const output = await readClaudeAuthStatusOutput(root, usageCommandKind, override, traceLogger);
   const subscriptionType = parseClaudeSubscriptionType(output);
+  if (output && !subscriptionType) {
+    traceClaude(traceLogger, usageCommandKind, "Could not parse subscription type from auth status output.");
+  }
   traceClaude(
     traceLogger,
     usageCommandKind,
@@ -875,6 +1073,7 @@ async function readClaudeUserIdHash(
   const authStatusOutput = await readClaudeAuthStatusOutput(root, usageCommandKind, override, traceLogger);
   const snapshot = parseClaudeAuthStatusSnapshot(authStatusOutput);
   if (!snapshot) {
+    traceClaude(traceLogger, usageCommandKind, "Auth status output did not yield an analytics identity snapshot.");
     return null;
   }
 

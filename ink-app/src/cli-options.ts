@@ -80,8 +80,9 @@ export function buildHelpText(): string {
     "",
     "Trace logging:",
     "  --log-to PATH writes Claude CLI SDK and Claude VSCode detection details,",
+    "  session root selection, parsed session file summaries, entrypoint matching,",
     "  every candidate binary path check, the final found/not-found result,",
-    "  and the raw /usage command output."
+    "  and the raw /usage command output plus live window matching details."
   ].join("\n");
 }
 
