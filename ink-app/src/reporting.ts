@@ -6,6 +6,7 @@ import type { LimitWindowRow, ModelUsageRow, ProviderStats } from "./providers/i
 
 const REPORTING_ENDPOINT = "https://devforth.io/admin/api/report_ussage_anonymous";
 const CREDIT_TO_DOLLARS = 0.01;
+const MIN_REPORTED_USED_PERCENTS = 1;
 
 let versionCache: Promise<string> | null = null;
 
@@ -53,13 +54,13 @@ export async function buildAnonymousUsageReports(statsList: ProviderStats[]): Pr
   const letmecodeVersion = await readLetmecodeVersion();
 
   return statsList.flatMap((stats) => {
-    if (!stats.analytics?.userIdHash) {
+    if (!stats.analytics?.userIdHash || stats.providerId === "antigravity") {
       return [];
     }
 
-    return [...stats.primaryLimitWindows, ...stats.secondaryLimitWindows].map((window) =>
-      buildAnonymousUsageReport(stats, window, letmecodeVersion)
-    );
+    return [...stats.primaryLimitWindows, ...stats.secondaryLimitWindows]
+      .filter((window) => shouldReportUsageWindow(window))
+      .map((window) => buildAnonymousUsageReport(stats, window, letmecodeVersion));
   });
 }
 
@@ -151,6 +152,10 @@ function resolveReportedUsedPercents(window: LimitWindowRow): number {
   }
 
   return clampPercent(window.maxUsedPercent - window.minUsedPercent);
+}
+
+function shouldReportUsageWindow(window: LimitWindowRow): boolean {
+  return resolveReportedUsedPercents(window) >= MIN_REPORTED_USED_PERCENTS;
 }
 
 function clampPercent(value: number): number {

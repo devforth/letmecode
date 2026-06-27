@@ -2941,6 +2941,76 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
 });
 
+test("buildAnonymousUsagePayload skips windows below one percent usage", async () => {
+  const totals = (overrides = {}) => ({
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    cacheWrite5mInputTokens: 0,
+    cacheWrite1hInputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+    estimatedCredits: 0,
+    eventCount: 0,
+    ...overrides
+  });
+  const window = (limitId, minUsedPercent, maxUsedPercent) => ({
+    scope: "primary",
+    planType: "team",
+    limitId,
+    windowMinutes: 300,
+    startTimeUtcIso: "2026-06-25T07:30:00Z",
+    endTimeUtcIso: "2026-06-25T12:30:00Z",
+    firstSeenUtcIso: "2026-06-25T07:35:00Z",
+    lastSeenUtcIso: "2026-06-25T12:25:00Z",
+    minUsedPercent,
+    maxUsedPercent,
+    totals: totals({ estimatedCredits: 25, eventCount: 1 }),
+    modelUsage: [
+      {
+        modelId: "gpt-5.5",
+        totals: totals({ inputTokens: 10, outputTokens: 5, estimatedCredits: 25, eventCount: 1 })
+      }
+    ],
+    eventCount: 1
+  });
+
+  const payload = await buildAnonymousUsagePayload([
+    {
+      providerId: "codex",
+      providerLabel: "Codex",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: totals(),
+        distinctModels: [],
+        distinctPlanTypes: [],
+        rootLabel: "~/.codex/sessions",
+        rootPath: "/tmp/.codex/sessions"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [
+        window("zero-usage", 0, 0),
+        window("tiny-live-window", 99.5, 100),
+        window("reportable-window", 99, 100)
+      ],
+      secondaryLimitWindows: [],
+      warnings: [],
+      analytics: {
+        agentName: "Codex",
+        userIdHash: "codex-user"
+      }
+    }
+  ]);
+
+  assert.equal(payload.data.length, 1);
+  assert.equal(payload.data[0].model_type, "reportable-window");
+  assert.equal(payload.data[0].used_percents, 1);
+});
+
 test("buildAnonymousUsagePayload does not report Antigravity data", async () => {
   const totals = (overrides = {}) => ({
     inputTokens: 0,
