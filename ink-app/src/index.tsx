@@ -296,9 +296,15 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
 
   return (
     <Box flexDirection="column" paddingX={1} height={viewportHeight} overflow="hidden">
-      <Text bold color="cyan">
-        LetMeCode Usage Dashboard
-      </Text>
+      <Box>
+        <Text bold color="cyan">
+          LetMeCode Usage Dashboard
+        </Text>
+        <Text> </Text>
+        <Text bold color="black" backgroundColor="green">
+          {" beta "}
+        </Text>
+      </Box>
       <Box marginTop={1}>
         <Text color="gray">Provider  </Text>
         {sortedProviderStates.map((state) => (
