@@ -6,6 +6,9 @@ Ussage:
 npx -y letmecode@latest
 ```
 
+
+Preview:
+
 <img width="2301" height="1397" alt="image" src="https://github.com/user-attachments/assets/c37d6847-9926-4977-8592-5cab8346a86f" />
 
 
