@@ -301,7 +301,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           LetMeCode Usage Dashboard
         </Text>
         <Text> </Text>
-        <Text bold color="black" backgroundColor="green">
+        <Text bold color="white" backgroundColor="green">
           {" beta "}
         </Text>
       </Box>
