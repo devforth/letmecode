@@ -1940,6 +1940,42 @@ test("ClaudeUsageProvider merges keyed usage rows by per-field maxima instead of
   });
 });
 
+test("ClaudeUsageProvider dedupes keyed usage rows even when duplicate copies expose different ID subsets", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/mixed-key-aliases.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-mixed-ids",
+        messageId: "msg-mixed-ids",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheReadInputTokens: 50,
+        outputTokens: 10
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:02.000Z",
+        messageId: "msg-mixed-ids",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheReadInputTokens: 50,
+        outputTokens: 10
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 100);
+    assert.equal(stats.summary.totals.cacheReadInputTokens, 50);
+    assert.equal(stats.summary.totals.outputTokens, 10);
+
+    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
+    assert.equal(
+      verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")),
+      true
+    );
+  });
+});
+
 test("ClaudeUsageProvider does not sum streamed same-key output snapshots as separate billable events", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/output-snapshots.jsonl", [
@@ -2658,14 +2694,55 @@ test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", as
     assert.equal(stats.summary.totals.cacheReadInputTokens, 30);
     assert.equal(stats.summary.totals.outputTokens, 5);
     assert.equal(
-      stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate unkeyed Claude usage event")),
+      stats.warnings.some((warning) => warning.includes("adjacent duplicate unkeyed Claude usage event")),
       false
     );
 
     const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
     assert.equal(
-      verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate unkeyed Claude usage event")),
+      verboseStats.warnings.some((warning) => warning.includes("adjacent duplicate unkeyed Claude usage event")),
       true
+    );
+  });
+});
+
+test("ClaudeUsageProvider keeps non-adjacent unkeyed usage rows with identical signatures as separate events", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/unkeyed-separated.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        model: "claude-opus-4-8",
+        inputTokens: 40,
+        cacheReadInputTokens: 30,
+        cacheCreation1hInputTokens: 10,
+        outputTokens: 5
+      }),
+      JSON.stringify({
+        type: "user",
+        sessionId: "claude-session-1",
+        timestamp: "2026-06-18T20:00:02.000Z",
+        message: { role: "user", content: "run again" }
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:03.000Z",
+        model: "claude-opus-4-8",
+        inputTokens: 40,
+        cacheReadInputTokens: 30,
+        cacheCreation1hInputTokens: 10,
+        outputTokens: 5
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 2);
+    assert.equal(stats.summary.totals.inputTokens, 80);
+    assert.equal(stats.summary.totals.cacheWrite5mInputTokens, 0);
+    assert.equal(stats.summary.totals.cacheWrite1hInputTokens, 20);
+    assert.equal(stats.summary.totals.cacheReadInputTokens, 60);
+    assert.equal(stats.summary.totals.outputTokens, 10);
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("adjacent duplicate unkeyed Claude usage event")),
+      false
     );
   });
 });

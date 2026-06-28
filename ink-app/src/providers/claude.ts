@@ -105,7 +105,9 @@ type ClaudeUsageProviderOptions = {
 
 type ParsedUsageEvent = {
   entrypoint: string;
-  usageKey: string | null;
+  filePath: string;
+  lineNumber: number;
+  usageKeys: string[];
   usageSignature: string;
   timestampMs: number;
   modelId: string;
@@ -137,7 +139,8 @@ type ParsedClaudeSessionFileSignals = {
 
 type ParsedUsageEventAccumulator = {
   keyedEvents: Map<string, ParsedUsageEvent>;
-  unkeyedEvents: Map<string, ParsedUsageEvent>;
+  unkeyedEvents: ParsedUsageEvent[];
+  lastUnkeyedEventsBySignature: Map<string, { event: ParsedUsageEvent; index: number }>;
   duplicateUsageKeys: number;
   duplicateUsageKeyCollisions: number;
   duplicateUnkeyedEvents: number;
@@ -240,8 +243,8 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     }
 
     const selectedEvents = [
-      ...parsedEvents.keyedEvents.values(),
-      ...parsedEvents.unkeyedEvents.values()
+      ...new Set(parsedEvents.keyedEvents.values()),
+      ...parsedEvents.unkeyedEvents
     ];
     traceClaude(
       options.traceLogger,
@@ -286,7 +289,9 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     }
 
     if (options.verbose && parsedEvents.duplicateUnkeyedEvents > 0) {
-      warnings.push(`Collapsed ${parsedEvents.duplicateUnkeyedEvents} duplicate unkeyed Claude usage event(s) by usage signature.`);
+      warnings.push(
+        `Collapsed ${parsedEvents.duplicateUnkeyedEvents} adjacent duplicate unkeyed Claude usage event(s) by usage signature.`
+      );
     }
 
     const modelUsage = [...byModel.entries()]
@@ -681,12 +686,14 @@ async function parseSessionFile(filePath: string, sessionsRoot: string): Promise
     const entrypoint = typeof payloadObject.entrypoint === "string" ? payloadObject.entrypoint : "";
     const rateLimits = extractRateLimits(payloadObject, message);
     const normalizedUsage = normalizeUsage(usage);
-    const usageKey = buildUsageEventKey(payloadObject, message);
+    const usageKeys = buildUsageEventKeys(payloadObject, message);
     const usageSignature = buildUsageSignature(payloadObject, modelId, normalizedUsage);
     assistantEntryPoints.add(entrypoint);
     events.push({
       entrypoint,
-      usageKey,
+      filePath,
+      lineNumber: linesRead,
+      usageKeys,
       usageSignature,
       timestampMs: eventTimeMs,
       modelId,
@@ -827,16 +834,15 @@ function extractStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string");
 }
 
-function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string | null {
+function buildUsageEventKeys(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string[] {
   const sessionId = String(payloadObject.sessionId ?? "");
   const requestId = typeof payloadObject.requestId === "string" ? payloadObject.requestId : "";
   const messageId = typeof message?.id === "string" ? message.id : "";
 
-  if (!requestId && !messageId) {
-    return null;
-  }
-
-  return `${sessionId}|${requestId || messageId}`;
+  return [...new Set([
+    requestId ? `${sessionId}|request:${requestId}` : "",
+    messageId ? `${sessionId}|message:${messageId}` : ""
+  ].filter(Boolean))];
 }
 
 function buildUsageSignature(payloadObject: Record<string, unknown>, modelId: string, usage: ClaudeUsage): string {
@@ -860,7 +866,8 @@ function buildUsageSignatureFromParts(sessionId: string, modelId: string, usage:
 function createParsedUsageEventAccumulator(): ParsedUsageEventAccumulator {
   return {
     keyedEvents: new Map<string, ParsedUsageEvent>(),
-    unkeyedEvents: new Map<string, ParsedUsageEvent>(),
+    unkeyedEvents: [],
+    lastUnkeyedEventsBySignature: new Map<string, { event: ParsedUsageEvent; index: number }>(),
     duplicateUsageKeys: 0,
     duplicateUsageKeyCollisions: 0,
     duplicateUnkeyedEvents: 0
@@ -868,31 +875,52 @@ function createParsedUsageEventAccumulator(): ParsedUsageEventAccumulator {
 }
 
 function recordParsedUsageEvent(parsedEvents: ParsedUsageEventAccumulator, event: ParsedUsageEvent): void {
-  if (event.usageKey) {
-    const previous = parsedEvents.keyedEvents.get(event.usageKey);
-    if (!previous) {
-      parsedEvents.keyedEvents.set(event.usageKey, event);
+  if (event.usageKeys.length > 0) {
+    const previousMatches = [...new Set(
+      event.usageKeys
+        .map((usageKey) => parsedEvents.keyedEvents.get(usageKey))
+        .filter((candidate): candidate is ParsedUsageEvent => Boolean(candidate))
+    )];
+    if (previousMatches.length === 0) {
+      for (const usageKey of event.usageKeys) {
+        parsedEvents.keyedEvents.set(usageKey, event);
+      }
       return;
     }
 
     parsedEvents.duplicateUsageKeys += 1;
-    if (previous.usageSignature !== event.usageSignature) {
+    const distinctUsageSignatures = new Set([
+      event.usageSignature,
+      ...previousMatches.map((candidate) => candidate.usageSignature)
+    ]);
+    if (distinctUsageSignatures.size > 1) {
       parsedEvents.duplicateUsageKeyCollisions += 1;
     }
 
-    parsedEvents.keyedEvents.set(event.usageKey, mergeParsedUsageEvents(previous, event));
+    const mergedEvent = previousMatches.reduce(mergeParsedUsageEvents, event);
+    for (const usageKey of mergedEvent.usageKeys) {
+      parsedEvents.keyedEvents.set(usageKey, mergedEvent);
+    }
     return;
   }
 
-  const previous = parsedEvents.unkeyedEvents.get(event.usageSignature);
-  if (!previous) {
-    parsedEvents.unkeyedEvents.set(event.usageSignature, event);
+  const previousRecord = parsedEvents.lastUnkeyedEventsBySignature.get(event.usageSignature);
+  if (!previousRecord || !canCollapseAdjacentUnkeyedUsageEvents(previousRecord.event, event)) {
+    parsedEvents.unkeyedEvents.push(event);
+    parsedEvents.lastUnkeyedEventsBySignature.set(event.usageSignature, {
+      event,
+      index: parsedEvents.unkeyedEvents.length - 1
+    });
     return;
   }
 
   parsedEvents.duplicateUnkeyedEvents += 1;
-  if (normalizeTimestamp(event.timestampMs) > normalizeTimestamp(previous.timestampMs)) {
-    parsedEvents.unkeyedEvents.set(event.usageSignature, event);
+  if (normalizeTimestamp(event.timestampMs) > normalizeTimestamp(previousRecord.event.timestampMs)) {
+    parsedEvents.unkeyedEvents[previousRecord.index] = event;
+    parsedEvents.lastUnkeyedEventsBySignature.set(event.usageSignature, {
+      event,
+      index: previousRecord.index
+    });
   }
 }
 
@@ -900,11 +928,13 @@ function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEve
   const mergedUsage = mergeClaudeUsage(previous.usage, next.usage);
   const modelId = selectMergedEventModelId(previous, next);
   const latestEvent = normalizeTimestamp(next.timestampMs) >= normalizeTimestamp(previous.timestampMs) ? next : previous;
-  const sessionId = extractUsageKeySessionId(previous.usageKey) || extractUsageKeySessionId(next.usageKey);
+  const sessionId = extractUsageKeySessionId(previous.usageKeys) || extractUsageKeySessionId(next.usageKeys);
 
   return {
     entrypoint: latestEvent.entrypoint || previous.entrypoint || next.entrypoint,
-    usageKey: previous.usageKey ?? next.usageKey,
+    filePath: latestEvent.filePath,
+    lineNumber: latestEvent.lineNumber,
+    usageKeys: [...new Set([...previous.usageKeys, ...next.usageKeys])],
     usageSignature: buildUsageSignatureFromParts(sessionId, modelId, mergedUsage),
     timestampMs: Math.max(normalizeTimestamp(previous.timestampMs), normalizeTimestamp(next.timestampMs)),
     modelId,
@@ -944,7 +974,12 @@ function selectMergedEventModelId(previous: ParsedUsageEvent, next: ParsedUsageE
     : previous.modelId;
 }
 
-function extractUsageKeySessionId(usageKey: string | null): string {
+function canCollapseAdjacentUnkeyedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEvent): boolean {
+  return previous.filePath === next.filePath && next.lineNumber === previous.lineNumber + 1;
+}
+
+function extractUsageKeySessionId(usageKeys: string[]): string {
+  const usageKey = usageKeys[0];
   if (!usageKey) {
     return "";
   }
