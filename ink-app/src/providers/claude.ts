@@ -109,6 +109,7 @@ type ParsedUsageEvent = {
   usageSignature: string;
   timestampMs: number;
   modelId: string;
+  usage: ClaudeUsage;
   totals: UsageTotals;
   rateLimits: Record<string, unknown> | null;
 };
@@ -280,7 +281,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
 
     if (options.verbose && parsedEvents.duplicateUsageKeyCollisions > 0) {
       warnings.push(
-        `Detected ${parsedEvents.duplicateUsageKeyCollisions} Claude usage key collision(s) with different token usage; keeping the highest-cost/latest event per key.`
+        `Detected ${parsedEvents.duplicateUsageKeyCollisions} Claude usage key collision(s) with different token usage; merged same-key rows by per-field maxima to avoid double-counting cumulative snapshots.`
       );
     }
 
@@ -689,6 +690,7 @@ async function parseSessionFile(filePath: string, sessionsRoot: string): Promise
       usageSignature,
       timestampMs: eventTimeMs,
       modelId,
+      usage: normalizedUsage,
       totals: usageToTotals(modelId, normalizedUsage),
       rateLimits
     });
@@ -838,8 +840,12 @@ function buildUsageEventKey(payloadObject: Record<string, unknown>, message: Rec
 }
 
 function buildUsageSignature(payloadObject: Record<string, unknown>, modelId: string, usage: ClaudeUsage): string {
+  return buildUsageSignatureFromParts(String(payloadObject.sessionId ?? ""), modelId, usage);
+}
+
+function buildUsageSignatureFromParts(sessionId: string, modelId: string, usage: ClaudeUsage): string {
   return [
-    String(payloadObject.sessionId ?? ""),
+    sessionId,
     modelId,
     usage.inputTokens,
     usage.cacheCreationInputTokens,
@@ -874,10 +880,7 @@ function recordParsedUsageEvent(parsedEvents: ParsedUsageEventAccumulator, event
       parsedEvents.duplicateUsageKeyCollisions += 1;
     }
 
-    if (shouldReplaceUsageEvent(previous, event)) {
-      parsedEvents.keyedEvents.set(event.usageKey, event);
-    }
-
+    parsedEvents.keyedEvents.set(event.usageKey, mergeParsedUsageEvents(previous, event));
     return;
   }
 
@@ -888,21 +891,66 @@ function recordParsedUsageEvent(parsedEvents: ParsedUsageEventAccumulator, event
   }
 
   parsedEvents.duplicateUnkeyedEvents += 1;
-  if (shouldReplaceUsageEvent(previous, event)) {
+  if (normalizeTimestamp(event.timestampMs) > normalizeTimestamp(previous.timestampMs)) {
     parsedEvents.unkeyedEvents.set(event.usageSignature, event);
   }
 }
 
-function shouldReplaceUsageEvent(previous: ParsedUsageEvent, next: ParsedUsageEvent): boolean {
-  if (next.totals.estimatedCredits > previous.totals.estimatedCredits) {
-    return true;
+function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEvent): ParsedUsageEvent {
+  const mergedUsage = mergeClaudeUsage(previous.usage, next.usage);
+  const modelId = selectMergedEventModelId(previous, next);
+  const latestEvent = normalizeTimestamp(next.timestampMs) >= normalizeTimestamp(previous.timestampMs) ? next : previous;
+  const sessionId = extractUsageKeySessionId(previous.usageKey) || extractUsageKeySessionId(next.usageKey);
+
+  return {
+    entrypoint: latestEvent.entrypoint || previous.entrypoint || next.entrypoint,
+    usageKey: previous.usageKey ?? next.usageKey,
+    usageSignature: buildUsageSignatureFromParts(sessionId, modelId, mergedUsage),
+    timestampMs: Math.max(normalizeTimestamp(previous.timestampMs), normalizeTimestamp(next.timestampMs)),
+    modelId,
+    usage: mergedUsage,
+    totals: usageToTotals(modelId, mergedUsage),
+    rateLimits: latestEvent.rateLimits ?? previous.rateLimits ?? next.rateLimits
+  };
+}
+
+function mergeClaudeUsage(previous: ClaudeUsage, next: ClaudeUsage): ClaudeUsage {
+  return {
+    inputTokens: Math.max(previous.inputTokens, next.inputTokens),
+    cacheReadInputTokens: Math.max(previous.cacheReadInputTokens, next.cacheReadInputTokens),
+    cacheCreationInputTokens: Math.max(previous.cacheCreationInputTokens, next.cacheCreationInputTokens),
+    cacheCreation5mInputTokens: Math.max(previous.cacheCreation5mInputTokens, next.cacheCreation5mInputTokens),
+    cacheCreation1hInputTokens: Math.max(previous.cacheCreation1hInputTokens, next.cacheCreation1hInputTokens),
+    outputTokens: Math.max(previous.outputTokens, next.outputTokens),
+    inferenceGeo: next.inferenceGeo || previous.inferenceGeo
+  };
+}
+
+function selectMergedEventModelId(previous: ParsedUsageEvent, next: ParsedUsageEvent): string {
+  if (previous.modelId === next.modelId) {
+    return previous.modelId;
   }
 
-  if (next.totals.estimatedCredits === previous.totals.estimatedCredits) {
-    return normalizeTimestamp(next.timestampMs) > normalizeTimestamp(previous.timestampMs);
+  if (isInternalClaudeModel(previous.modelId) && !isInternalClaudeModel(next.modelId)) {
+    return next.modelId;
   }
 
-  return false;
+  if (isInternalClaudeModel(next.modelId) && !isInternalClaudeModel(previous.modelId)) {
+    return previous.modelId;
+  }
+
+  return next.totals.estimatedCredits >= previous.totals.estimatedCredits
+    ? next.modelId
+    : previous.modelId;
+}
+
+function extractUsageKeySessionId(usageKey: string | null): string {
+  if (!usageKey) {
+    return "";
+  }
+
+  const separatorIndex = usageKey.indexOf("|");
+  return separatorIndex >= 0 ? usageKey.slice(0, separatorIndex) : usageKey;
 }
 
 function normalizeTimestamp(value: number): number {

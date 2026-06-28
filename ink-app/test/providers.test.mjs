@@ -1884,7 +1884,7 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
   });
 });
 
-test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of first-write-wins", async () => {
+test("ClaudeUsageProvider merges keyed usage rows by per-field maxima instead of first-write-wins", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/key-collision.jsonl", [
       claudeAssistantEvent({
@@ -1928,13 +1928,94 @@ test("ClaudeUsageProvider keeps the highest-cost keyed usage row instead of firs
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
     assert.equal(
-      stats.warnings.some((warning) => warning.includes("highest-cost/latest event per key")),
+      stats.warnings.some((warning) => warning.includes("per-field maxima")),
       false
     );
 
     const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
     assert.equal(
-      verboseStats.warnings.some((warning) => warning.includes("highest-cost/latest event per key")),
+      verboseStats.warnings.some((warning) => warning.includes("per-field maxima")),
+      true
+    );
+  });
+});
+
+test("ClaudeUsageProvider does not sum streamed same-key output snapshots as separate billable events", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/output-snapshots.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-snapshot",
+        messageId: "msg-snapshot",
+        model: "claude-opus-4-8",
+        inputTokens: 400,
+        cacheReadInputTokens: 1200,
+        cacheCreation1hInputTokens: 300,
+        outputTokens: 200
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:02.000Z",
+        requestId: "req-snapshot",
+        messageId: "msg-snapshot",
+        model: "claude-opus-4-8",
+        inputTokens: 400,
+        cacheReadInputTokens: 1200,
+        cacheCreation1hInputTokens: 300,
+        outputTokens: 800
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 400);
+    assert.equal(stats.summary.totals.cacheReadInputTokens, 1200);
+    assert.equal(stats.summary.totals.cacheWrite1hInputTokens, 300);
+    assert.equal(stats.summary.totals.outputTokens, 800);
+    assert.equal(stats.dayUsage.length, 1);
+    assert.equal(stats.dayUsage[0].totals.outputTokens, 800);
+
+    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
+    assert.equal(verboseStats.summary.tokenEvents, 1);
+    assert.equal(
+      verboseStats.warnings.some((warning) => warning.includes("avoid double-counting cumulative snapshots")),
+      true
+    );
+  });
+});
+
+test("ClaudeUsageProvider preserves real model usage when a later same-key synthetic row appears", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/keyed-synthetic-followup.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-synthetic-followup",
+        messageId: "msg-synthetic-followup",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheReadInputTokens: 50,
+        outputTokens: 10
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:02.000Z",
+        requestId: "req-synthetic-followup",
+        messageId: "msg-synthetic-followup",
+        model: "<synthetic>",
+        inputTokens: 0,
+        outputTokens: 0
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 100);
+    assert.equal(stats.summary.totals.cacheReadInputTokens, 50);
+    assert.equal(stats.summary.totals.outputTokens, 10);
+    assert.equal(stats.modelUsage.some((row) => row.modelId === "<synthetic>"), false);
+    assert.equal(stats.modelUsage.some((row) => row.modelId === "claude-sonnet-4-6"), true);
+
+    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
+    assert.equal(
+      verboseStats.warnings.some((warning) => warning.includes("avoid double-counting cumulative snapshots")),
       true
     );
   });
