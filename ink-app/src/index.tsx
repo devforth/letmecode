@@ -305,7 +305,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           {" beta "}
         </Text>
       </Box>
-      <Box marginTop={1}>
+      <Box>
         <Text color="gray">Provider  </Text>
         {sortedProviderStates.map((state) => (
           <ProviderTab
@@ -329,7 +329,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         ))}
       </Box>
 
-      <Box marginTop={1} flexDirection="column" flexGrow={1} overflow="hidden">
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
         <Box flexGrow={1} overflow="hidden">
           <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
             <ContentPanel
@@ -342,7 +342,6 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
             />
           </Box>
         </Box>
-
         <SelectionDetailsPanel
           providerState={selectedProvider}
           tabId={selectedDetailTab.id}
@@ -350,7 +349,6 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           selectedDayRow={selectedDayRow}
           selectedModelRow={selectedModelRow}
         />
-
         <CopilotActionsPanel
           providerState={selectedProvider}
           actionMessage={copilotActionMessage}
@@ -358,7 +356,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         />
 
         {selectedProvider.status === "ready" && selectedProvider.stats.warnings.length > 0 ? (
-          <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" overflow="hidden">
+          <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" overflow="hidden">
             <Text color="yellow">Warnings</Text>
             {selectedProvider.stats.warnings.map((warning) => (
               <Text key={warning}>{warning}</Text>
@@ -386,7 +384,7 @@ function CopilotActionsPanel(props: {
   const accentColor = hasNoUsage ? "red" : "cyan";
 
   return (
-    <Box marginTop={1} borderStyle="round" borderColor={accentColor} paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor={accentColor} paddingX={1} flexDirection="column">
       <Text color={accentColor}>Copilot setup</Text>
       <Box>
         {COPILOT_ACTIONS.map((action, index) => (
@@ -483,8 +481,6 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
 
   return (
     <Box flexDirection="column">
-      <Text bold>{props.stats.providerLabel} overview</Text>
-      <Text> </Text>
       <Box>
         <Box flexDirection="column" width={45}>
           <DetailRow label="Plan" value={summary.distinctPlanTypes.join(", ") || "none"} />
@@ -503,7 +499,10 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
         <Box flexDirection="column">
           <Text color="cyan">Efficiency</Text>
           <DetailRow label="Cache ratio" value={formatPercent(cacheRatio)} />
-          <DetailRow label="Input/output" value={formatInputOutputRatio(totals)} />
+          {(() => {
+            const { label, value } = formatInputOutputRatio(totals, props.stats.providerId);
+            return <DetailRow label={label} value={value} padLength={Math.max(14, label.length + 1)} noSlice />
+          })()}
           <DetailRow label="Avg/event" value={`${formatOverviewTokenCount(averageTokensPerEvent)} tokens`} />
           <DetailRow label="Cost/event" value={formatUnitUsd(costPerEvent)} />
           <Text> </Text>
@@ -728,7 +727,6 @@ function buildTableRow(
 }
 
 function buildTextTableLines(options: {
-  title: string;
   lineKeyPrefix: string;
   headers: readonly string[];
   rows: TextTableRow[];
@@ -739,7 +737,6 @@ function buildTextTableLines(options: {
   if (options.rows.length === 0 && !options.totalRow) {
     return {
       bodyLines: [
-        { key: `${options.lineKeyPrefix}-title`, text: options.title, bold: true },
         { key: `${options.lineKeyPrefix}-empty`, text: "No rows found.", color: "gray" }
       ]
     };
@@ -753,7 +750,6 @@ function buildTextTableLines(options: {
     tableRows.map((row) => row.cells)
   );
   const headerLines: ScrollableLine[] = [
-    { key: `${options.lineKeyPrefix}-title`, text: options.title, bold: true },
     {
       key: `${options.lineKeyPrefix}-top-border`,
       text: buildTableBorder(table, "┌", "┬", "┐"),
@@ -830,7 +826,6 @@ function buildLimitWindowTableLines(
       : undefined;
 
   return buildTextTableLines({
-    title: "Limits",
     lineKeyPrefix: "limits",
     headers: LIMIT_TABLE_HEADERS,
     rows: [...primaryRows, ...secondaryRows],
@@ -859,7 +854,6 @@ function buildDailyUsageTableLines(
   selectedDayKey?: string
 ): ScrollableLines {
   return buildTextTableLines({
-    title: "Daily usage",
     lineKeyPrefix: "daily",
     headers: DAILY_TABLE_HEADERS,
     rows: rows.map<TextTableRow>((row) => ({
@@ -884,7 +878,6 @@ function buildModelUsageTableLines(
   selectedModelId?: string
 ): ScrollableLines {
   return buildTextTableLines({
-    title: "Model usage",
     lineKeyPrefix: "model",
     headers: MODEL_TABLE_HEADERS,
     rows: rows.map<TextTableRow>((row) => ({
@@ -969,17 +962,20 @@ function SelectionDetailsPanel(props: {
 
 function DetailsPanelFrame(props: { children: React.ReactNode }): React.JSX.Element {
   return (
-    <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" paddingX={1} flexDirection="column">
       <Text color="cyan">Details</Text>
       {props.children}
     </Box>
   );
 }
 
-function DetailRow(props: { label: string; value: string }): React.JSX.Element {
+function DetailRow(props: { label: string; value: string; padLength?: number; noSlice?: boolean }): React.JSX.Element {
+  const labelText = props.noSlice
+    ? props.label.padEnd(props.padLength ?? 14)
+    : pad(props.label, props.padLength ?? 14);
   return (
     <Text>
-      {pad(props.label, 14)}
+      {labelText}
       {props.value}
     </Text>
   );
@@ -1134,15 +1130,33 @@ function resolveCacheRatio(totals: UsageTotals): number {
     : 0;
 }
 
-function formatInputOutputRatio(totals: UsageTotals): string {
+function formatInputOutputRatio(totals: UsageTotals, providerId?: string): { label: string; value: string } {
   if (totals.outputTokens <= 0) {
-    return "-";
+    return {
+      label: providerId === "claude" ? "Input/Write/Read/W5m/W1h/Output" : "Input/ReadCache/Output",
+      value: "-"
+    };
   }
 
-  return `${(totals.inputTokens / totals.outputTokens).toLocaleString("en-US", {
-    maximumFractionDigits: 1,
-    minimumFractionDigits: 0
-  })} : 1`;
+  const fmt = (val: number) => {
+    const ratio = val / totals.outputTokens;
+    return ratio.toLocaleString("en-US", {
+      maximumFractionDigits: 1,
+      minimumFractionDigits: 0
+    });
+  };
+
+  if (providerId === "claude") {
+    return {
+      label: "Input/Write/Read/W5m/W1h/Output",
+      value: `${fmt(totals.inputTokens)} : ${fmt(totals.cacheWriteInputTokens)} : ${fmt(totals.cacheReadInputTokens)} : ${fmt(totals.cacheWrite5mInputTokens)} : ${fmt(totals.cacheWrite1hInputTokens)} : 1`
+    };
+  } else {
+    return {
+      label: "Input/ReadCache/Output",
+      value: `${fmt(totals.inputTokens)} : ${fmt(totals.cacheReadInputTokens)} : 1`
+    };
+  }
 }
 
 function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
@@ -1643,7 +1657,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
 
 function enterFullscreenMode(stdout: NodeJS.WriteStream): () => void {
   if (!stdout.isTTY) {
-    return () => {};
+    return () => { };
   }
 
   let restored = false;
@@ -1661,7 +1675,7 @@ function enterFullscreenMode(stdout: NodeJS.WriteStream): () => void {
 
 function enableMouseReporting(stdout: NodeJS.WriteStream): () => void {
   if (!stdout.isTTY) {
-    return () => {};
+    return () => { };
   }
 
   let disabled = false;
