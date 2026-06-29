@@ -981,7 +981,8 @@ test("CopilotUsageProvider estimates credits when Copilot telemetry omits premiu
     assert.equal(stats.modelUsage[0].modelId, "gpt-5.4-2026-03-01");
     assert.equal(stats.modelUsage[0].totals.estimatedCredits, 0);
     assert.equal(stats.modelUsage[0].totals.estimatedCreditsStatus, "unavailable");
-    assert.equal(stats.modelUsage[0].totals.cacheStatus, "unavailable");
+    assert.equal(stats.modelUsage[0].totals.cacheReadStatus, "unavailable");
+    assert.equal(stats.modelUsage[0].totals.cacheWriteStatus, "unavailable");
     assert.equal(
       stats.warnings.some((warning) => warning.includes("cache token attributes are unavailable")),
       true

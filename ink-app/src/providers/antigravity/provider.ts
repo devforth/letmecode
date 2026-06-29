@@ -404,9 +404,11 @@ function usageRecordToTotals(
       record.output,
     estimatedCredits: creditsFor(modelId, record),
     eventCount: 1,
-    // No cache status is set: cacheRead is a real value and renders as-is, while
-    // cacheWrite is 0 and already renders as "-" (zero tokens), so a status flag
-    // would add nothing.
+    // The local RPC reports cache reads but never cache writes, so cache reads
+    // are accurate while cache writes are genuinely unknown (not a confirmed
+    // zero) — surfaced as "-" everywhere, including the input/output ratio.
+    cacheReadStatus: "known",
+    cacheWriteStatus: "unavailable",
     estimatedCreditsStatus: rateForModel(modelId, record.input)
       ? "known"
       : "unavailable"

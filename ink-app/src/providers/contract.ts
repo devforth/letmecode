@@ -1,3 +1,5 @@
+export type UsageValueStatus = "known" | "unavailable";
+
 export type UsageTotals = {
   inputTokens: number;
   outputTokens: number;
@@ -9,8 +11,9 @@ export type UsageTotals = {
   totalTokens: number;
   estimatedCredits: number;
   eventCount: number;
-  cacheStatus?: "known" | "unavailable";
-  estimatedCreditsStatus?: "known" | "unavailable";
+  cacheReadStatus?: UsageValueStatus;
+  cacheWriteStatus?: UsageValueStatus;
+  estimatedCreditsStatus?: UsageValueStatus;
 };
 
 export type ModelUsageRow = {
@@ -125,8 +128,11 @@ export function addUsageTotals(target: UsageTotals, source: UsageTotals): void {
   target.totalTokens += source.totalTokens;
   target.estimatedCredits += source.estimatedCredits;
   target.eventCount += source.eventCount;
-  if (source.cacheStatus === "unavailable") {
-    target.cacheStatus = "unavailable";
+  if (source.cacheReadStatus === "unavailable") {
+    target.cacheReadStatus = "unavailable";
+  }
+  if (source.cacheWriteStatus === "unavailable") {
+    target.cacheWriteStatus = "unavailable";
   }
   if (source.estimatedCreditsStatus === "unavailable") {
     target.estimatedCreditsStatus = "unavailable";
