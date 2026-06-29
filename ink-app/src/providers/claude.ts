@@ -776,9 +776,9 @@ function inferClaudeSessionFileSources(files: ParsedClaudeSessionFile[]): void {
 function classifyClaudeSessionGroup(
   group:
     | {
-        assistantEntryPoints: Set<string>;
-        hasIdeHints: boolean;
-      }
+      assistantEntryPoints: Set<string>;
+      hasIdeHints: boolean;
+    }
     | undefined
 ): { kind: ClaudeSessionSourceKind; reason: string } {
   if (!group) {
@@ -1478,42 +1478,78 @@ async function checkReadableExecutableFile(filePath: string): Promise<FileAccess
   }
 }
 
+type ParsedLiveUsageLine = {
+  label: "session" | "week";
+  windowQualifier: string;
+  usedPercent: number;
+  windowMinutes: number;
+  resetString: string | null;
+};
+
 function parseLiveUsageWindowSnapshots(usageOutput: string | null, now: Date): LiveUsageWindowSnapshot[] {
   if (!usageOutput) {
     return [];
   }
 
-  const snapshots = new Map<string, LiveUsageWindowSnapshot>();
   const normalizedOutput = usageOutput.replace(ANSI_ESCAPE_SEQUENCE, "");
+  const parsedLines: ParsedLiveUsageLine[] = [];
 
   for (const line of normalizedOutput.split(/\r?\n/)) {
     const match = line
       .trim()
-      .match(/^Current\s+(session|week)(?:\s+\(([^)]+)\))?:\s+(\d+)%\s+used\b.*?\bresets\s+(.+)$/i);
+      .match(/^Current\s+(session|week)(?:\s+\(([^)]+)\))?:\s+(\d+)%\s+used\b(?:.*?\bresets\s+(.+))?$/i);
     if (!match) {
       continue;
     }
 
-    const label = match[1].toLowerCase() === "session" ? "session" : "week";
-    const windowQualifier = (match[2] ?? "").trim().toLowerCase();
     const usedPercent = Number(match[3]);
-    const windowMinutes = label === "session" ? CLAUDE_SESSION_WINDOW_MINUTES : CLAUDE_WEEK_WINDOW_MINUTES;
-    const resetsAtMs = parseResetTimestampUtc(match[4], now.getTime(), windowMinutes);
-    if (!Number.isFinite(usedPercent) || !resetsAtMs) {
+    if (!Number.isFinite(usedPercent)) {
       continue;
     }
 
-    const isSonnetOnlyWeek = label === "week" && windowQualifier === "sonnet only";
-    const limitId = isSonnetOnlyWeek ? "current-week-sonnet-only" : `current-${label}`;
-    snapshots.set(limitId, {
-      scope: label === "session" ? "primary" : "secondary",
+    const label = match[1].toLowerCase() === "session" ? "session" : "week";
+    parsedLines.push({
       label,
+      windowQualifier: (match[2] ?? "").trim().toLowerCase(),
+      usedPercent,
+      windowMinutes: label === "session" ? CLAUDE_SESSION_WINDOW_MINUTES : CLAUDE_WEEK_WINDOW_MINUTES,
+      resetString: match[4]?.trim() || null
+    });
+  }
+
+  // Per-scope reset times printed by Claude. Lines like "Current week (Sonnet
+  // only)" omit the reset because it is identical to the "all models" week, so
+  // a missing reset inherits the resolved reset of the same scope.
+  const resetMsByLabel = new Map<"session" | "week", number>();
+  for (const parsed of parsedLines) {
+    if (!parsed.resetString || resetMsByLabel.has(parsed.label)) {
+      continue;
+    }
+
+    const resetsAtMs = parseResetTimestampUtc(parsed.resetString, now.getTime(), parsed.windowMinutes);
+    if (resetsAtMs) {
+      resetMsByLabel.set(parsed.label, resetsAtMs);
+    }
+  }
+
+  const snapshots = new Map<string, LiveUsageWindowSnapshot>();
+  for (const parsed of parsedLines) {
+    const resetsAtMs = resetMsByLabel.get(parsed.label) ?? null;
+    if (!resetsAtMs) {
+      continue;
+    }
+
+    const isSonnetOnlyWeek = parsed.label === "week" && parsed.windowQualifier === "sonnet only";
+    const limitId = isSonnetOnlyWeek ? "current-week-sonnet-only" : `current-${parsed.label}`;
+    snapshots.set(limitId, {
+      scope: parsed.label === "session" ? "primary" : "secondary",
+      label: parsed.label,
       limitId,
       modelScope: isSonnetOnlyWeek ? "sonnet-only" : "all-models",
       modelType: isSonnetOnlyWeek ? "sonnet only" : undefined,
-      usedPercent,
+      usedPercent: parsed.usedPercent,
       resetsAtMs,
-      windowMinutes
+      windowMinutes: parsed.windowMinutes
     });
   }
 
@@ -1596,6 +1632,9 @@ function buildLiveLimitWindowRow(
       matchesClaudeLiveSnapshotModelScope(snapshot, event.modelId)
   );
   const totals = sumUsageTotals(inWindowEvents.map((event) => event.totals));
+  if (snapshot.usedPercent > 0 && totals.eventCount === 0) {
+    totals.estimatedCreditsStatus = "unavailable";
+  }
   const fallbackLastSeenMs = Math.min(now.getTime(), snapshot.resetsAtMs);
   const firstSeenMs =
     inWindowEvents.reduce(

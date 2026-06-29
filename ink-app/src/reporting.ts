@@ -54,7 +54,7 @@ export async function buildAnonymousUsageReports(statsList: ProviderStats[]): Pr
   const letmecodeVersion = await readLetmecodeVersion();
 
   return statsList.flatMap((stats) => {
-    if (!stats.analytics?.userIdHash || stats.providerId === "antigravity") {
+    if (!stats.analytics?.userIdHash) {
       return [];
     }
 
@@ -96,6 +96,10 @@ function resolveReportModelType(stats: ProviderStats, window: LimitWindowRow): s
     return resolveAntigravityReportModelType(stats, window);
   }
 
+  if (stats.providerId === "claude") {
+    return resolveClaudeReportModelType(window);
+  }
+
   if (window.modelType) {
     return truncateSchemaString(window.modelType, 128);
   }
@@ -109,6 +113,10 @@ function resolveReportModelType(stats: ProviderStats, window: LimitWindowRow): s
   }
 
   return truncateSchemaString(stats.providerId, 128);
+}
+
+function resolveClaudeReportModelType(window: LimitWindowRow): string {
+  return window.modelType?.toLowerCase().includes("sonnet") ? "sonnet-only" : "all";
 }
 
 function resolveAntigravityReportModelType(

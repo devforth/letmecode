@@ -59,7 +59,7 @@ const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
 
 const CODEX_CREDIT_COST_USD = 0.01;
 
-const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Window", "Used", "Start", "End", "API eq."] as const;
+const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Models", "Window", "Used", "Start", "End", "API eq."] as const;
 const DAILY_TABLE_HEADERS = ["Day", "Ev", "Input", "Output", "C read", "C write", "API eq."] as const;
 const MODEL_TABLE_HEADERS = ["Model", "Input", "Output", "C read", "C write", "API eq."] as const;
 
@@ -841,6 +841,7 @@ function buildLimitWindowTableRow(window: LimitWindowRow): TextTableRow {
     cells: [
       window.scope,
       window.planType,
+      formatLimitWindowModels(window),
       formatCompactWindowMinutes(window.windowMinutes),
       formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent),
       formatCompactLocalDateTime(window.startTimeUtcIso),
@@ -911,6 +912,7 @@ function SelectionDetailsPanel(props: {
         <Box>
           <Box flexDirection="column" width={25}>
             <DetailRow label="Plan" value={row.planType} />
+            <DetailRow label="Models" value={formatLimitWindowModels(row)} />
             <DetailRow label="Window" value={formatCompactWindowMinutes(row.windowMinutes)} />
             <DetailRow label="Usage" value={formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)} />
             <DetailRow label="Events" value={formatInteger(row.eventCount)} />
@@ -1183,6 +1185,15 @@ function formatCompactWindowMinutes(value: number): string {
   }
 
   return `${formatCompactNumber(hours)}h`;
+}
+
+function formatLimitWindowModels(window: LimitWindowRow): string {
+  const label = window.modelType?.trim();
+  if (!label) {
+    return "All";
+  }
+
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function formatLocalDateTime(value: string): string {

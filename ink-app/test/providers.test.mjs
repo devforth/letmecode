@@ -2184,6 +2184,56 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
   });
 });
 
+test("ClaudeUsageProvider captures the Sonnet-only weekly window when its reset is omitted", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/sonnet-only.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-28T08:00:00.000Z",
+        requestId: "req-sonnet-week",
+        messageId: "msg-sonnet-week",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 40,
+        outputTokens: 4
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 4% used · resets Jun 29, 3:40pm (UTC)",
+          "Current week (all models): 0% used · resets Jun 30, 1pm (UTC)",
+          "Current week (Sonnet only): 0% used"
+        ].join("\n"),
+      readAuthStatusOutput: async () =>
+        JSON.stringify({
+          loggedIn: true,
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+          email: "premium@devforth.io",
+          orgId: "premium-org",
+          orgName: "Premium Org",
+          subscriptionType: "team"
+        }),
+      now: () => new Date("2026-06-29T11:30:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows.length, 2);
+
+    const allModelsWeek = stats.secondaryLimitWindows.find((row) => row.limitId === "current-week");
+    const sonnetOnlyWeek = stats.secondaryLimitWindows.find(
+      (row) => row.limitId === "current-week-sonnet-only"
+    );
+    assert.ok(sonnetOnlyWeek, "expected a Sonnet-only weekly window even without an explicit reset");
+    assert.equal(sonnetOnlyWeek.modelType, "sonnet only");
+    // The Sonnet-only week inherits the weekly reset printed on the all-models week.
+    assert.equal(sonnetOnlyWeek.endTimeUtcIso, allModelsWeek.endTimeUtcIso);
+    assert.equal(sonnetOnlyWeek.totals.inputTokens, 40);
+  });
+});
+
 test("ClaudeUsageProvider prefers VSCode Claude binaries before falling back to other locations", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "trace-project/mixed.jsonl", [
@@ -2926,7 +2976,7 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
       },
       {
         agent: "Claude",
-        model_type: "current-session",
+        model_type: "all",
         used_percents: 20.25,
         used_exhausted: false,
         value_dollars: 0.5,
@@ -3117,7 +3167,7 @@ test("buildAnonymousUsagePayload skips windows below one percent usage", async (
   assert.equal(payload.data[0].used_percents, 1);
 });
 
-test("buildAnonymousUsagePayload does not report Antigravity data", async () => {
+test("buildAnonymousUsagePayload reports Antigravity data", async () => {
   const totals = (overrides = {}) => ({
     inputTokens: 0,
     outputTokens: 0,
@@ -3163,7 +3213,7 @@ test("buildAnonymousUsagePayload does not report Antigravity data", async () => 
         totals: totals(),
         distinctModels: [],
         distinctPlanTypes: ["pro"],
-        rootLabel: "Tokscale usage + Antigravity local quota",
+        rootLabel: "Antigravity local trajectories",
         rootPath: "/tmp/antigravity"
       },
       modelUsage: [],
@@ -3178,7 +3228,20 @@ test("buildAnonymousUsagePayload does not report Antigravity data", async () => 
     }
   ]);
 
-  assert.deepEqual(payload.data, []);
+  assert.equal(payload.data.length, 2);
+  const byModelType = new Map(payload.data.map((report) => [report.model_type, report]));
+  const gemini = byModelType.get("gemini");
+  const thirdParty = byModelType.get("third-party");
+
+  assert.ok(gemini, "expected a gemini Antigravity report");
+  assert.ok(thirdParty, "expected a third-party Antigravity report");
+  assert.equal(gemini.agent, "Antigravity");
+  assert.equal(gemini.userid_hash, "antigravity-user");
+  assert.equal(gemini.plan_id, "pro");
+  assert.equal(gemini.used_percents, 10);
+  assert.equal(gemini.value_dollars, 1);
+  assert.equal(gemini.window_duration_seconds, 18000);
+  assert.equal(thirdParty.window_duration_seconds, 604800);
 });
 
 test("buildAnonymousUsageReports prefers explicit limit-window model types", async () => {
@@ -3265,5 +3328,5 @@ test("buildAnonymousUsageReports prefers explicit limit-window model types", asy
 
   assert.equal(reports.length, 1);
   assert.equal(reports[0].plan_id, "team_premium");
-  assert.equal(reports[0].model_type, "sonnet only");
+  assert.equal(reports[0].model_type, "sonnet-only");
 });
