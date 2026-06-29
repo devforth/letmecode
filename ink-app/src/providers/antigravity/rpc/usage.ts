@@ -54,14 +54,6 @@ export type AntigravityUsage = {
   reasoning: number;
 };
 
-// A cascade's completed steps are immutable, so its usage only changes when the
-// step count changes. Cache per cascade to avoid refetching every full step
-// list on each refresh when nothing has happened.
-const cascadeUsageCache = new Map<
-  string,
-  { stepCount: number; usage: AntigravityUsage[] }
->();
-
 /**
  * Reconstructs per-response model usage from the Antigravity local language
  * server.
@@ -109,11 +101,6 @@ async function fetchCascadeUsage(
   cascadeId: string,
   stepCount: number
 ): Promise<AntigravityUsage[]> {
-  const cached = cascadeUsageCache.get(cascadeId);
-  if (cached && cached.stepCount === stepCount) {
-    return cached.usage;
-  }
-
   const response = await rpc<
     StepsResponse,
     {
@@ -155,7 +142,6 @@ async function fetchCascadeUsage(
     });
   }
 
-  cascadeUsageCache.set(cascadeId, { stepCount, usage });
   return usage;
 }
 

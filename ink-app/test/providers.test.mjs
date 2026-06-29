@@ -253,7 +253,7 @@ test("AntigravityUsageProvider parses one normalized usage record", async () => 
   }).getStats();
 
   assert.equal(stats.providerId, "antigravity");
-  assert.equal(stats.summary.filesScanned, 1);
+  assert.equal(stats.summary.filesScanned, 0);
   assert.equal(stats.summary.tokenEvents, 1);
   assert.equal(stats.modelUsage[0].modelId, "gemini-3-flash");
   assert.equal(stats.summary.totals.inputTokens, 5528);
@@ -408,7 +408,7 @@ test("AntigravityUsageProvider deduplicates duplicate responses", async () => {
     collectUsage: async () => [duplicate, duplicate]
   }).getStats();
 
-  assert.equal(stats.summary.filesScanned, 1);
+  assert.equal(stats.summary.filesScanned, 0);
   assert.equal(stats.summary.totals.eventCount, 1);
   assert.equal(stats.summary.totals.inputTokens, 10);
   assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate")), true);

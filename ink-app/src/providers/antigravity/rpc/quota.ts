@@ -4,6 +4,7 @@ import {
   type AntigravityLocalServer,
   type AntigravityRpcMetadata
 } from "./client.js";
+import { asRecord } from "../../limits.js";
 import type { AntigravityQuotaGroup } from "../types.js";
 
 const METADATA: AntigravityRpcMetadata = {
@@ -11,12 +12,6 @@ const METADATA: AntigravityRpcMetadata = {
   extensionName: "antigravity",
   ideVersion: "unknown",
   locale: "en"
-};
-
-type QuotaResponse = {
-  response?: {
-    groups?: AntigravityQuotaGroup[];
-  };
 };
 
 type StatusResponse = {
@@ -41,7 +36,10 @@ export type AntigravityUserStatus = {
  * unwraps the envelope.
  */
 export function extractQuotaGroups(payload: unknown): AntigravityQuotaGroup[] {
-  return (payload as QuotaResponse).response?.groups ?? [];
+  const response = asRecord(asRecord(payload)?.response);
+  const groups = response?.groups;
+
+  return Array.isArray(groups) ? (groups as AntigravityQuotaGroup[]) : [];
 }
 
 export async function fetchAntigravityUserStatus(

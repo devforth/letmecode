@@ -30,8 +30,17 @@ export function normalizeAntigravityModelId(modelId: string): string {
   return MODEL_IDS[modelId] ?? (modelId || "unknown");
 }
 
-export function antigravityModelScope(modelId: string): AntigravityModelScope {
-  return modelId.startsWith("gemini") ? "gemini" : "third-party";
+export function antigravityModelScope(rawModelId: string): AntigravityModelScope {
+  const modelId = normalizeAntigravityModelId(rawModelId);
+
+  if (modelId.startsWith("gemini")) {
+    return "gemini";
+  }
+  if (modelId.startsWith("claude") || modelId.startsWith("gpt")) {
+    return "third-party";
+  }
+
+  return "unknown";
 }
 
 export function modelScopeMatches(scope: AntigravityModelScope, modelId: string): boolean {
@@ -39,5 +48,12 @@ export function modelScopeMatches(scope: AntigravityModelScope, modelId: string)
 }
 
 export function modelScopeLabel(scope: AntigravityModelScope): string {
-  return scope === "gemini" ? "Gemini" : "Claude/GPT";
+  if (scope === "gemini") {
+    return "Gemini";
+  }
+  if (scope === "third-party") {
+    return "Claude/GPT";
+  }
+
+  return "Unknown";
 }

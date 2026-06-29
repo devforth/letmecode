@@ -222,8 +222,9 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       providerId: this.id,
       providerLabel: this.label,
       summary: {
-        filesScanned: records.length > 0 ? 1 : 0,
-        linesRead: records.length,
+        // The provider reads no files or lines; usage comes from the local RPC.
+        filesScanned: 0,
+        linesRead: 0,
         tokenEvents: selectedRecords.length,
         totals: sumUsageTotals(
           modelUsage.map((row) => row.totals)
@@ -403,9 +404,9 @@ function usageRecordToTotals(
       record.output,
     estimatedCredits: creditsFor(modelId, record),
     eventCount: 1,
-    // Antigravity (Gemini) does not report cache writes, so cacheWrite is a true
-    // zero rather than missing data; cache reads are reported and accurate.
-    cacheStatus: "known",
+    // No cache status is set: cacheRead is a real value and renders as-is, while
+    // cacheWrite is 0 and already renders as "-" (zero tokens), so a status flag
+    // would add nothing.
     estimatedCreditsStatus: rateForModel(modelId, record.input)
       ? "known"
       : "unavailable"

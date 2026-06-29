@@ -1,6 +1,6 @@
 import type { LimitWindowScope } from "../contract.js";
 
-export type AntigravityModelScope = "gemini" | "third-party";
+export type AntigravityModelScope = "gemini" | "third-party" | "unknown";
 
 export type AntigravityUsageRecord = {
   type: "usage";

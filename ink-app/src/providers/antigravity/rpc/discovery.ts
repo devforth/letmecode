@@ -27,8 +27,15 @@ export type AntigravityConnection = {
 
 export async function findAntigravityLocalServer():
     Promise<AntigravityConnection | null> {
-    for (const process of await findAntigravityProcesses()) {
-        for (const port of await findListeningPorts(process.pid)) {
+    const processes = await findAntigravityProcesses();
+    if (processes.length === 0) {
+        return null;
+    }
+
+    const portsByPid = await readListeningPortsByPid();
+
+    for (const process of processes) {
+        for (const port of portsByPid.get(process.pid) ?? []) {
             const server: AntigravityLocalServer = {
                 port,
                 csrfToken: process.csrfToken
@@ -100,7 +107,7 @@ async function findAntigravityProcesses():
     return processes;
 }
 
-async function findListeningPorts(pid: number): Promise<number[]> {
+async function readListeningPortsByPid(): Promise<Map<number, number[]>> {
     const { stdout } = await execFileAsync(
         "ss",
         ["-H", "-ltnp"],
@@ -110,13 +117,28 @@ async function findListeningPorts(pid: number): Promise<number[]> {
         }
     );
 
-    const ports = stdout
-        .split("\n")
-        .filter((line) => line.includes(`pid=${pid},`))
-        .flatMap((line) =>
-            [...line.matchAll(/(?:127\.0\.0\.1|\[::1\]):(\d+)/g)]
-        )
-        .map((match) => Number(match[1]));
+    const portsByPid = new Map<number, Set<number>>();
 
-    return [...new Set(ports)];
+    for (const line of stdout.split("\n")) {
+        const loopbackPorts = [
+            ...line.matchAll(/(?:127\.0\.0\.1|\[::1\]):(\d+)/g)
+        ].map((match) => Number(match[1]));
+
+        if (loopbackPorts.length === 0) {
+            continue;
+        }
+
+        for (const pidMatch of line.matchAll(/pid=(\d+),/g)) {
+            const pid = Number(pidMatch[1]);
+            const ports = portsByPid.get(pid) ?? new Set<number>();
+            for (const port of loopbackPorts) {
+                ports.add(port);
+            }
+            portsByPid.set(pid, ports);
+        }
+    }
+
+    return new Map(
+        [...portsByPid.entries()].map(([pid, ports]) => [pid, [...ports]])
+    );
 }

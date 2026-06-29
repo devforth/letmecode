@@ -1,7 +1,6 @@
 import type { ProviderStatsOptions } from "../contract.js";
 import type { AntigravityLocalServer } from "./rpc/client.js";
 import { fetchAntigravityUsageRpcData } from "./rpc/usage.js";
-import { normalizeAntigravityModelId } from "./models.js";
 import type { AntigravityUsageRecord } from "./types.js";
 
 export async function collectUsageFromLocalRpc(
@@ -26,7 +25,7 @@ export async function collectUsageFromLocalRpc(
       sessionId: entry.cascadeId,
       responseId: entry.responseId,
       timestamp,
-      modelId: normalizeAntigravityModelId(entry.model),
+      modelId: entry.model,
       input: entry.input,
       cacheRead: entry.cacheRead,
       cacheWrite: 0,
