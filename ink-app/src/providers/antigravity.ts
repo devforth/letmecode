@@ -159,18 +159,6 @@ type QuotaPayload = {
   };
 };
 
-type UserStatusPayload = {
-  response?: {
-    userStatus?: {
-      email?: string;
-      planStatus?: {
-        planInfo?: {
-          planName?: string;
-        };
-      };
-    };
-  };
-};
 
 export type AntigravityUsageRecord = {
   type: "usage";
@@ -365,8 +353,8 @@ async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSn
   return {
     entries: parseAntigravityQuotaEntries(quota),
     fetchedAt: Date.now(),
-    planType: parseAntigravityPlanType(status),
-    userIdHash: parseAntigravityUserIdHash(status)
+    planType: status.userStatus.planStatus.planInfo.planName ?? "unknown",
+    userIdHash:  createHash("md5").update(status.userStatus.email).digest("hex")
   };
 }
 
@@ -616,17 +604,6 @@ export function parseAntigravityQuotaEntries(
   });
 }
 
-export function parseAntigravityPlanType(payload: unknown): string {
-  const planName = (payload as UserStatusPayload).response?.userStatus?.planStatus?.planInfo?.planName;
-  return typeof planName === "string" && planName ? planName : "unknown";
-}
-
-export function parseAntigravityUserIdHash(payload: unknown): string | null {
-  const email = (payload as UserStatusPayload).response?.userStatus?.email;
-  return typeof email === "string" && email
-    ? createHash("md5").update(email).digest("hex")
-    : null;
-}
 
 
 function resolveQuotaGroupModelIds(text: string): string[] {

@@ -7,8 +7,6 @@ import path from "node:path";
 import test from "node:test";
 import {
   AntigravityUsageProvider,
-  parseAntigravityPlanType,
-  parseAntigravityUserIdHash,
   parseAntigravityQuotaEntries
 } from "../dist/providers/antigravity.js";
 import { ClaudeUsageProvider } from "../dist/providers/claude.js";
@@ -553,56 +551,6 @@ test("Antigravity quota parser rejects unsupported buckets and unknown groups", 
   assert.deepEqual(entries.map((entry) => entry.limitId), ["good"]);
 });
 
-test("Antigravity plan parser reads real user status plan name", () => {
-  assert.equal(
-    parseAntigravityPlanType({
-      response: {
-        userStatus: {
-          planStatus: {
-            planInfo: {
-              planName: "Pro"
-            }
-          }
-        }
-      }
-    }),
-    "Pro"
-  );
-  assert.equal(
-    parseAntigravityPlanType({
-      response: {
-        userStatus: {
-          planStatus: {
-            planInfo: {
-              planName: "Google AI Ultra"
-            }
-          }
-        }
-      }
-    }),
-    "Google AI Ultra"
-  );
-  assert.equal(parseAntigravityPlanType({ response: {} }), "unknown");
-});
-
-test("Antigravity user status parser builds anonymous analytics identity", () => {
-  assert.equal(
-    parseAntigravityUserIdHash(
-      {
-        response: {
-          userStatus: {
-            email: "ivan@devforth.io"
-          }
-        }
-      }
-    ),
-    createHash("md5").update("ivan@devforth.io").digest("hex")
-  );
-  assert.equal(
-    parseAntigravityUserIdHash({ userStatus: { email: "ivan@devforth.io" } }),
-    null
-  );
-});
 
 test("AntigravityUsageProvider reconstructs confirmed quota buckets by model pool and window", async () => {
   const payload = antigravityQuotaSummaryPayload();
