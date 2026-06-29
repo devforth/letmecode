@@ -1,7 +1,17 @@
 import type { LimitWindowScope } from "../contract.js";
-import type { AntigravityQuotaEntry } from "./provider.js";
+import type {
+  AntigravityModelScope,
+  AntigravityQuotaEntry,
+  AntigravityQuotaGroup
+} from "./types.js";
 
-const QUOTA_WINDOWS = {
+const QUOTA_WINDOWS: Record<
+  string,
+  {
+    scope: LimitWindowScope;
+    windowMinutes: number;
+  }
+> = {
   "5h": {
     scope: "primary",
     windowMinutes: 300
@@ -10,63 +20,17 @@ const QUOTA_WINDOWS = {
     scope: "secondary",
     windowMinutes: 10_080
   }
-} satisfies Record<
-  string,
-  {
-    scope: LimitWindowScope;
-    windowMinutes: number;
-  }
->;
-
-const QUOTA_MODEL_GROUPS = [
-  {
-    pattern: /gemini/,
-    models: [
-      "gemini-3.5-flash",
-      "gemini-3.1-pro",
-      "gemini-3-flash"
-    ]
-  },
-  {
-    pattern: /claude|gpt/,
-    models: [
-      "claude-opus-4-6",
-      "claude-sonnet-4-6",
-      "gpt-oss-120b"
-    ]
-  }
-];
-
-type QuotaBucket = {
-  bucketId?: string;
-  window?: keyof typeof QUOTA_WINDOWS;
-  remainingFraction?: number;
-  resetTime?: string;
-};
-
-type QuotaGroup = {
-  displayName?: string;
-  description?: string;
-  buckets?: QuotaBucket[];
-};
-
-type QuotaPayload = {
-  response?: {
-    groups?: QuotaGroup[];
-  };
 };
 
 export function parseAntigravityQuotaEntries(
-  payload: unknown
+  groups: AntigravityQuotaGroup[]
 ): AntigravityQuotaEntry[] {
-  const groups = (payload as QuotaPayload).response?.groups ?? [];
-
   return groups.flatMap((group) => {
-    const modelIds = resolveQuotaGroupModelIds(
+    const modelScope = resolveQuotaGroupScope(
       `${group.displayName ?? ""} ${group.description ?? ""}`
     );
 
-    if (!modelIds.length) {
+    if (!modelScope) {
       return [];
     }
 
@@ -89,7 +53,7 @@ export function parseAntigravityQuotaEntries(
 
       return [{
         limitId: bucket.bucketId,
-        modelIds,
+        modelScope,
         remainingFraction: bucket.remainingFraction,
         resetAt,
         ...window
@@ -98,10 +62,17 @@ export function parseAntigravityQuotaEntries(
   });
 }
 
-function resolveQuotaGroupModelIds(text: string): string[] {
-  return (
-    QUOTA_MODEL_GROUPS.find(({ pattern }) =>
-      pattern.test(text.toLowerCase())
-    )?.models ?? []
-  );
+function resolveQuotaGroupScope(
+  text: string
+): AntigravityModelScope | null {
+  const normalized = text.toLowerCase();
+
+  if (/gemini/.test(normalized)) {
+    return "gemini";
+  }
+  if (/claude|gpt/.test(normalized)) {
+    return "third-party";
+  }
+
+  return null;
 }

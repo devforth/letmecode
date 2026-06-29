@@ -15,42 +15,48 @@ type AntigravityProcess = {
     csrfToken: string;
 };
 
+/**
+ * A discovered server plus the quota-summary payload fetched while probing it.
+ * The probe is a real RetrieveUserQuotaSummary call, so its result is reused as
+ * the quota source instead of issuing the same request again.
+ */
+export type AntigravityConnection = {
+    server: AntigravityLocalServer;
+    quotaSummary: unknown;
+};
+
 export async function findAntigravityLocalServer():
-    Promise<AntigravityLocalServer | null> {
-    const process = await findAntigravityProcess();
+    Promise<AntigravityConnection | null> {
+    for (const process of await findAntigravityProcesses()) {
+        for (const port of await findListeningPorts(process.pid)) {
+            const server: AntigravityLocalServer = {
+                port,
+                csrfToken: process.csrfToken
+            };
 
-    if (!process) {
-        return null;
-    }
+            try {
+                const quotaSummary = await rpc<unknown>(
+                    server,
+                    ANTIGRAVITY_RPC_PATHS.quotaSummary
+                );
 
-    const ports = await findListeningPorts(process.pid);
-
-    for (const port of ports) {
-        const server: AntigravityLocalServer = {
-            port,
-            csrfToken: process.csrfToken
-        };
-
-        try {
-            await rpc<unknown>(
-                server,
-                ANTIGRAVITY_RPC_PATHS.quotaSummary
-            );
-
-            return server;
-        } catch {
-            // This port does not expose the expected Antigravity RPC API.
+                return { server, quotaSummary };
+            } catch {
+                // This port does not expose the expected Antigravity RPC API.
+            }
         }
     }
 
     return null;
 }
 
-async function findAntigravityProcess():
-    Promise<AntigravityProcess | null> {
+async function findAntigravityProcesses():
+    Promise<AntigravityProcess[]> {
     const entries = await fs.promises
         .readdir("/proc")
         .catch(() => []);
+
+    const processes: AntigravityProcess[] = [];
 
     for (const entry of entries) {
         if (!/^\d+$/.test(entry)) {
@@ -85,13 +91,13 @@ async function findAntigravityProcess():
             continue;
         }
 
-        return {
+        processes.push({
             pid: Number(entry),
             csrfToken
-        };
+        });
     }
 
-    return null;
+    return processes;
 }
 
 async function findListeningPorts(pid: number): Promise<number[]> {

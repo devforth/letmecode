@@ -475,7 +475,7 @@ function antigravityQuotaSummaryPayload(overrides = {}) {
 }
 
 test("Antigravity quota parser reads confirmed RetrieveUserQuotaSummary buckets", () => {
-  const entries = parseAntigravityQuotaEntries(antigravityQuotaSummaryPayload());
+  const entries = parseAntigravityQuotaEntries(antigravityQuotaSummaryPayload().response.groups);
   const byId = new Map(entries.map((entry) => [entry.limitId, entry]));
 
   assert.equal(entries.length, 4);
@@ -485,68 +485,56 @@ test("Antigravity quota parser reads confirmed RetrieveUserQuotaSummary buckets"
   assert.equal(byId.get("gemini-weekly")?.windowMinutes, 10080);
   assert.equal(byId.get("gemini-weekly")?.resetAt, Date.parse("2026-07-02T10:34:04Z"));
   assert.equal(byId.get("gemini-weekly")?.remainingFraction, 0.9623046);
-  assert.deepEqual(byId.get("gemini-5h")?.modelIds, [
-    "gemini-3.5-flash",
-    "gemini-3.1-pro",
-    "gemini-3-flash"
-  ]);
-  assert.deepEqual(byId.get("3p-5h")?.modelIds, [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "gpt-oss-120b"
-  ]);
+  assert.equal(byId.get("gemini-5h")?.modelScope, "gemini");
+  assert.equal(byId.get("3p-5h")?.modelScope, "third-party");
   assert.equal(byId.get("3p-5h")?.remainingFraction, 1);
 });
 
 test("Antigravity quota parser rejects unsupported buckets and unknown groups", () => {
-  const entries = parseAntigravityQuotaEntries({
-    response: {
-      groups: [
+  const entries = parseAntigravityQuotaEntries([
+    {
+      displayName: "Gemini Models",
+      description: "Models within this group: Gemini Flash",
+      buckets: [
         {
-          displayName: "Gemini Models",
-          description: "Models within this group: Gemini Flash",
-          buckets: [
-            {
-              bucketId: "bad-window",
-              window: "monthly",
-              remainingFraction: 0.5,
-              resetTime: "2026-07-02T10:34:04Z"
-            },
-            {
-              bucketId: "bad-fraction",
-              window: "5h",
-              remainingFraction: 2,
-              resetTime: "2026-07-02T10:34:04Z"
-            },
-            {
-              bucketId: "bad-reset",
-              window: "5h",
-              remainingFraction: 0.5,
-              resetTime: "not-a-date"
-            },
-            {
-              bucketId: "good",
-              window: "5h",
-              remainingFraction: 0.5,
-              resetTime: "2026-07-02T10:34:04Z"
-            }
-          ]
+          bucketId: "bad-window",
+          window: "monthly",
+          remainingFraction: 0.5,
+          resetTime: "2026-07-02T10:34:04Z"
         },
         {
-          displayName: "Autocomplete",
-          description: "Non-agent quota",
-          buckets: [
-            {
-              bucketId: "autocomplete-5h",
-              window: "5h",
-              remainingFraction: 0.1,
-              resetTime: "2026-07-02T10:34:04Z"
-            }
-          ]
+          bucketId: "bad-fraction",
+          window: "5h",
+          remainingFraction: 2,
+          resetTime: "2026-07-02T10:34:04Z"
+        },
+        {
+          bucketId: "bad-reset",
+          window: "5h",
+          remainingFraction: 0.5,
+          resetTime: "not-a-date"
+        },
+        {
+          bucketId: "good",
+          window: "5h",
+          remainingFraction: 0.5,
+          resetTime: "2026-07-02T10:34:04Z"
+        }
+      ]
+    },
+    {
+      displayName: "Autocomplete",
+      description: "Non-agent quota",
+      buckets: [
+        {
+          bucketId: "autocomplete-5h",
+          window: "5h",
+          remainingFraction: 0.1,
+          resetTime: "2026-07-02T10:34:04Z"
         }
       ]
     }
-  });
+  ]);
 
   assert.deepEqual(entries.map((entry) => entry.limitId), ["good"]);
 });
@@ -557,7 +545,7 @@ test("AntigravityUsageProvider reconstructs confirmed quota buckets by model poo
   const stats = await new AntigravityUsageProvider({
     collectQuota: async () => ({
       fetchedAt: Date.parse("2026-06-25T14:00:00.000Z"),
-      entries: parseAntigravityQuotaEntries(payload),
+      entries: parseAntigravityQuotaEntries(payload.response.groups),
       planType: "pro",
       userIdHash: "antigravity-user"
     }),
@@ -642,7 +630,7 @@ test("AntigravityUsageProvider reconstructs live quota windows from quota snapsh
       entries: [
         {
           limitId: "gemini-primary",
-          modelIds: ["gemini-3-flash"],
+          modelScope: "gemini",
           remainingFraction: 0.25,
           resetAt,
           windowMinutes: 300,
@@ -698,8 +686,9 @@ test("AntigravityUsageProvider reconstructs live quota windows from quota snapsh
   assert.equal(row.windowMinutes, 300);
   assert.equal(row.startTimeUtcIso, "2026-06-24T10:00:00.000Z");
   assert.equal(row.endTimeUtcIso, "2026-06-24T15:00:00.000Z");
-  assert.equal(row.firstSeenUtcIso, "2026-06-24T12:45:00.000Z");
-  assert.equal(row.lastSeenUtcIso, "2026-06-24T12:45:00.000Z");
+  // first/last-seen reflect the single in-window usage record (11:00), not the fetch time.
+  assert.equal(row.firstSeenUtcIso, "2026-06-24T11:00:00.000Z");
+  assert.equal(row.lastSeenUtcIso, "2026-06-24T11:00:00.000Z");
   assert.equal(row.minUsedPercent, 75);
   assert.equal(row.maxUsedPercent, 75);
   assert.equal(row.eventCount, 1);
@@ -724,7 +713,7 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
       entries: [
         {
           limitId: "shared-primary",
-          modelIds: ["*"],
+          modelScope: "gemini",
           remainingFraction: 0.6,
           resetAt,
           windowMinutes: 300,
@@ -739,7 +728,7 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
   assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 40);
   assert.equal(stats.primaryLimitWindows[0].eventCount, 0);
   assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 0);
-  assert.equal(stats.warnings.some((warning) => warning.includes("Antigravity token usage")), true);
+  assert.equal(stats.warnings.some((warning) => warning.includes("Antigravity usage")), true);
 });
 
 test("AntigravityUsageProvider returns historical usage when quota collection fails", async () => {
