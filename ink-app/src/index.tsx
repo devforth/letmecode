@@ -492,7 +492,7 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
           <DetailRow label="Events" value={formatInteger(totals.eventCount)} />
           <DetailRow label="Input" value={formatOverviewTokenCount(totals.inputTokens)} />
           <DetailRow label="Output" value={formatOverviewTokenCount(totals.outputTokens)} />
-          <DetailRow label="Cache read" value={formatCacheOverviewTokenCount(totals, totals.cacheReadInputTokens)} />
+          <DetailRow label="Cache read" value={formatCacheOverviewTokenCount(totals.cacheReadStatus, totals.cacheReadInputTokens)} />
           <DetailRow label="Reasoning" value={formatOverviewTokenCount(totals.reasoningOutputTokens)} />
           <DetailRow label="Total" value={formatOverviewTokenCount(totals.totalTokens)} />
           <DetailRow label="API equiv." value={formatUsageUsd(totals)} />
@@ -865,8 +865,8 @@ function buildDailyUsageTableLines(
         formatCompactTokenCount(row.totals.eventCount),
         formatCompactTokenCount(row.totals.inputTokens),
         formatCompactTokenCount(row.totals.outputTokens),
-        formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens),
-        formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens),
+        formatCompactCacheTokens(row.totals.cacheReadStatus, row.totals.cacheReadInputTokens),
+        formatCompactCacheTokens(row.totals.cacheWriteStatus, row.totals.cacheWriteInputTokens),
         formatUsageUsd(row.totals)
       ]
     })),
@@ -924,8 +924,8 @@ function SelectionDetailsPanel(props: {
               value={`${formatCompactLocalDateTime(row.startTimeUtcIso)} → ${formatCompactLocalDateTime(row.endTimeUtcIso)}`}
             />
             <DetailRow label="Input" value={formatInteger(row.totals.inputTokens)} />
-            <DetailRow label="Cache read" value={formatCacheTokens(row.totals, row.totals.cacheReadInputTokens)} />
-            <DetailRow label="Cache write" value={formatCacheTokens(row.totals, row.totals.cacheWriteInputTokens)} />
+            <DetailRow label="Cache read" value={formatCacheTokens(row.totals.cacheReadStatus, row.totals.cacheReadInputTokens)} />
+            <DetailRow label="Cache write" value={formatCacheTokens(row.totals.cacheWriteStatus, row.totals.cacheWriteInputTokens)} />
             <DetailRow label="Output" value={formatInteger(row.totals.outputTokens)} />
             <DetailRow label="Total" value={formatInteger(row.totals.totalTokens)} />
           </Box>
@@ -1014,8 +1014,10 @@ function formatOverviewTokenCount(value: number): string {
   return formatInteger(roundedValue);
 }
 
-function formatCacheOverviewTokenCount(totals: UsageTotals, value: number): string {
-  return totals.cacheStatus === "unavailable" ? "-" : formatOverviewTokenCount(value);
+type CacheFieldStatus = UsageTotals["cacheReadStatus"];
+
+function formatCacheOverviewTokenCount(status: CacheFieldStatus, value: number): string {
+  return status === "unavailable" ? "-" : formatOverviewTokenCount(value);
 }
 
 function formatFixedCompactNumber(value: number): string {
@@ -1119,7 +1121,7 @@ function formatPercent(value: number): string {
 }
 
 function resolveCacheRatio(totals: UsageTotals): number {
-  if (totals.cacheStatus === "unavailable") {
+  if (totals.cacheReadStatus === "unavailable") {
     return NaN;
   }
 
@@ -1273,8 +1275,8 @@ function formatModelUsageTableCells(modelId: string, totals: UsageTotals): strin
     displayModelId,
     formatCompactTokenCount(totals.inputTokens),
     formatCompactTokenCount(totals.outputTokens),
-    formatCompactCacheTokens(totals, totals.cacheReadInputTokens),
-    formatCompactCacheTokens(totals, totals.cacheWriteInputTokens),
+    formatCompactCacheTokens(totals.cacheReadStatus, totals.cacheReadInputTokens),
+    formatCompactCacheTokens(totals.cacheWriteStatus, totals.cacheWriteInputTokens),
     formatUsageUsd(totals, modelId)
   ];
 }
@@ -1285,25 +1287,25 @@ function UsageBreakdownLines(props: { totals: UsageTotals }): React.JSX.Element 
   return (
     <Box flexDirection="column">
       <Text>
-        input: {formatInteger(totals.inputTokens)}  output: {formatInteger(totals.outputTokens)}  cacheRead: {formatCacheTokens(totals, totals.cacheReadInputTokens)}
+        input: {formatInteger(totals.inputTokens)}  output: {formatInteger(totals.outputTokens)}  cacheRead: {formatCacheTokens(totals.cacheReadStatus, totals.cacheReadInputTokens)}
       </Text>
       <Text>
-        cacheWrite: {formatCacheTokens(totals, totals.cacheWriteInputTokens)}  cacheW5m: {formatOptionalTokens(totals.cacheWrite5mInputTokens)}  cacheW1h: {formatOptionalTokens(totals.cacheWrite1hInputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
+        cacheWrite: {formatCacheTokens(totals.cacheWriteStatus, totals.cacheWriteInputTokens)}  cacheW5m: {formatOptionalTokens(totals.cacheWrite5mInputTokens)}  cacheW1h: {formatOptionalTokens(totals.cacheWrite1hInputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
       </Text>
     </Box>
   );
 }
 
-function formatCacheTokens(totals: UsageTotals, value: number): string {
-  if (totals.cacheStatus === "unavailable") {
+function formatCacheTokens(status: CacheFieldStatus, value: number): string {
+  if (status === "unavailable") {
     return "-";
   }
 
   return formatOptionalTokens(value);
 }
 
-function formatCompactCacheTokens(totals: UsageTotals, value: number): string {
-  if (totals.cacheStatus === "unavailable") {
+function formatCompactCacheTokens(status: CacheFieldStatus, value: number): string {
+  if (status === "unavailable") {
     return "-";
   }
 
@@ -1323,11 +1325,17 @@ function formatInputPerOutput(totals: UsageTotals): string {
     return "input:cacheRead:cacheWrite:output = 0:0:0:0";
   }
 
-  if (totals.cacheStatus === "unavailable") {
-    return `input:cacheRead:cacheWrite:output = ${formatInteger(Math.round(totals.inputTokens / totals.outputTokens))}:-:-:1`;
-  }
+  const inputRatio = formatInteger(Math.round(totals.inputTokens / totals.outputTokens));
+  const cacheReadRatio =
+    totals.cacheReadStatus === "unavailable"
+      ? "-"
+      : formatInteger(Math.round(totals.cacheReadInputTokens / totals.outputTokens));
+  const cacheWriteRatio =
+    totals.cacheWriteStatus === "unavailable"
+      ? "-"
+      : formatInteger(Math.round(totals.cacheWriteInputTokens / totals.outputTokens));
 
-  return `input:cacheRead:cacheWrite:output = ${formatInteger(Math.round(totals.inputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.cacheReadInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.cacheWriteInputTokens / totals.outputTokens))}:1`;
+  return `input:cacheRead:cacheWrite:output = ${inputRatio}:${cacheReadRatio}:${cacheWriteRatio}:1`;
 }
 
 function useMeasuredElementSize(): {

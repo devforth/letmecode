@@ -1,13 +1,10 @@
 import { createHash } from "node:crypto";
-import os from "node:os";
-import path from "node:path";
 import {
   UsageProviderBase,
   addUsageTotals,
   createEmptyUsageTotals,
   sumUsageTotals,
   type LimitWindowRow,
-  type LimitWindowScope,
   type ModelUsageRow,
   type ProviderStats,
   type ProviderStatsOptions,
@@ -19,10 +16,30 @@ import {
   createDailyUsageAggregates
 } from "../daily.js";
 import { resolveUsageRate, type UsageRate, type UsageRateValue } from "../pricing.js";
+import {
+  modelScopeLabel,
+  modelScopeMatches,
+  normalizeAntigravityModelId
+} from "./models.js";
 import { parseAntigravityQuotaEntries } from "./quota-parser.js";
-import { findAntigravityLocalServer } from "./rpc/discovery.js";
-import { fetchAntigravityQuotaRpcData } from "./rpc/quota.js";
-import { collectUsageFromRpc } from "./usage-parse.js";
+import {
+  findAntigravityLocalServer,
+  type AntigravityConnection
+} from "./rpc/discovery.js";
+import { extractQuotaGroups, fetchAntigravityUserStatus } from "./rpc/quota.js";
+import { collectUsageFromLocalRpc } from "./usage-parse.js";
+import type {
+  AntigravityQuotaEntry,
+  AntigravityQuotaSnapshot,
+  AntigravityUsageRecord
+} from "./types.js";
+
+export type {
+  AntigravityModelScope,
+  AntigravityQuotaEntry,
+  AntigravityQuotaSnapshot,
+  AntigravityUsageRecord
+} from "./types.js";
 
 const RATE_CARD: Record<string, UsageRate> = {
   "gemini-3.5-flash": {
@@ -82,78 +99,45 @@ const UNPRICED_MODELS = new Set([
   "gpt-oss-120b"
 ]);
 
-const ANTIGRAVITY_CACHE_ROOT = path.join(
-  os.homedir(),
-  ".config",
-  "tokscale",
-  "antigravity-cache"
-);
-
-const MODEL_ALIASES: Record<string, string> = {
-  "gemini-3-flash-a": "gemini-3-flash",
-  "gemini-3-flash-preview": "gemini-3-flash",
-  "gemini-3.1-pro-preview": "gemini-3.1-pro",
-  "gemini-3.5-flash-preview": "gemini-3.5-flash",
-  "claude-sonnet-4-6-20251201": "claude-sonnet-4-6",
-  "claude-opus-4-6-20251201": "claude-opus-4-6"
-};
-
-export type AntigravityUsageRecord = {
-  type: "usage";
-  sessionId: string;
-  responseId: string;
-  timestamp: number;
-  modelId: string;
-  input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  output: number;
-  reasoning: number;
-};
-
-export type AntigravityQuotaEntry = {
-  limitId: string;
-  modelIds: string[];
-  remainingFraction: number;
-  resetAt: number;
-  windowMinutes: number;
-  scope: LimitWindowScope;
-};
-
-export type AntigravityQuotaSnapshot = {
-  entries: AntigravityQuotaEntry[];
-  fetchedAt: number;
-  planType: string;
-  userIdHash: string | null;
-};
-
 export type AntigravityUsageProviderOptions = {
   collectUsage?: (
     options?: ProviderStatsOptions
   ) => Promise<AntigravityUsageRecord[]>;
   collectQuota?: () => Promise<AntigravityQuotaSnapshot>;
+  findConnection?: () => Promise<AntigravityConnection | null>;
 };
 
 export class AntigravityUsageProvider extends UsageProviderBase {
-  private readonly collectUsage: (
+  private readonly collectUsageOverride?: (
     options?: ProviderStatsOptions
   ) => Promise<AntigravityUsageRecord[]>;
-  private readonly collectQuota: () => Promise<AntigravityQuotaSnapshot>;
+  private readonly collectQuotaOverride?: () => Promise<AntigravityQuotaSnapshot>;
+  private readonly findConnection: () => Promise<AntigravityConnection | null>;
 
   constructor(options: AntigravityUsageProviderOptions = {}) {
     super("antigravity", "Antigravity");
-    this.collectUsage = options.collectUsage ?? collectUsageFromRpc;
-    this.collectQuota =
-      options.collectQuota ?? collectAntigravityQuotaFromLocalRpc;
+    this.collectUsageOverride = options.collectUsage;
+    this.collectQuotaOverride = options.collectQuota;
+    this.findConnection = options.findConnection ?? findAntigravityLocalServer;
   }
 
   async getStats(
     options: ProviderStatsOptions = {}
   ): Promise<ProviderStats> {
     const warnings: string[] = [];
+
+    // Discover the local language server at most once per refresh and share the
+    // resulting connection (and its probe payload) between both collectors.
+    let connectionPromise: Promise<AntigravityConnection | null> | undefined;
+    const connect = () => (connectionPromise ??= this.findConnection());
+
     const [usageResult, quotaResult] = await Promise.allSettled([
-      this.collectUsage(options),
-      this.collectQuota()
+      this.collectUsageOverride
+        ? this.collectUsageOverride(options)
+        : collectUsageFromConnection(connect, options),
+      this.collectQuotaOverride
+        ? this.collectQuotaOverride()
+        : collectQuotaFromConnection(connect)
     ]);
 
     const records =
@@ -167,7 +151,7 @@ export class AntigravityUsageProvider extends UsageProviderBase {
 
     if (usageResult.status === "rejected") {
       warnings.push(
-        "Could not read Antigravity token usage cache."
+        "Could not read Antigravity usage from the local RPC."
       );
     }
     if (quotaResult.status === "rejected") {
@@ -192,7 +176,7 @@ export class AntigravityUsageProvider extends UsageProviderBase {
     const byDay = createDailyUsageAggregates();
 
     for (const record of selectedRecords) {
-      const modelId = resolveModelId(record.modelId);
+      const modelId = normalizeAntigravityModelId(record.modelId);
       const totals = usageRecordToTotals(modelId, record);
       addModelUsage(byModel, modelId, totals);
       addDailyUsage(
@@ -238,8 +222,9 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       providerId: this.id,
       providerLabel: this.label,
       summary: {
-        filesScanned: records.length > 0 ? 1 : 0,
-        linesRead: records.length,
+        // The provider reads no files or lines; usage comes from the local RPC.
+        filesScanned: 0,
+        linesRead: 0,
         tokenEvents: selectedRecords.length,
         totals: sumUsageTotals(
           modelUsage.map((row) => row.totals)
@@ -250,8 +235,8 @@ export class AntigravityUsageProvider extends UsageProviderBase {
             limitWindows.map((window) => window.planType)
           )
         ],
-        rootLabel: "Tokscale usage + Antigravity local quota",
-        rootPath: ANTIGRAVITY_CACHE_ROOT
+        rootLabel: "Antigravity local RPC",
+        rootPath: "127.0.0.1"
       },
       modelUsage,
       dayUsage: buildDailyUsageRows(byDay),
@@ -272,24 +257,34 @@ export class AntigravityUsageProvider extends UsageProviderBase {
   }
 }
 
-async function collectAntigravityQuotaFromLocalRpc(): Promise<AntigravityQuotaSnapshot> {
-  const server = await findAntigravityLocalServer();
-  if (!server) {
+async function collectUsageFromConnection(
+  connect: () => Promise<AntigravityConnection | null>,
+  options: ProviderStatsOptions
+): Promise<AntigravityUsageRecord[]> {
+  const connection = await connect();
+  return connection
+    ? collectUsageFromLocalRpc(connection.server, options)
+    : [];
+}
+
+async function collectQuotaFromConnection(
+  connect: () => Promise<AntigravityConnection | null>
+): Promise<AntigravityQuotaSnapshot> {
+  const connection = await connect();
+  if (!connection) {
     throw new Error("Antigravity local language server was not found.");
   }
 
-  const data = await fetchAntigravityQuotaRpcData(server);
+  const status = await fetchAntigravityUserStatus(connection.server);
 
   return {
-    // The RPC layer normalizes the quota summary; re-wrap it in the raw payload
-    // shape so the shared parser maps windows and model pools consistently.
-    entries: parseAntigravityQuotaEntries({
-      response: { groups: data.groups }
-    }),
+    entries: parseAntigravityQuotaEntries(
+      extractQuotaGroups(connection.quotaSummary)
+    ),
     fetchedAt: Date.now(),
-    planType: data.planName ?? "unknown",
-    userIdHash: data.email
-      ? createHash("md5").update(data.email).digest("hex")
+    planType: status.planName ?? "unknown",
+    userIdHash: status.email
+      ? createHash("md5").update(status.email).digest("hex")
       : null
   };
 }
@@ -301,19 +296,20 @@ function buildAntigravityLimitWindow(
   fetchedAt: number
 ): LimitWindowRow {
   const startAt = quota.resetAt - quota.windowMinutes * 60_000;
-  const modelIds = new Set(quota.modelIds.map(resolveModelId));
   const byModel = new Map<string, UsageTotals>();
+  const matchingTimestamps: number[] = [];
 
   for (const record of records) {
-    const modelId = resolveModelId(record.modelId);
+    const modelId = normalizeAntigravityModelId(record.modelId);
     if (
       record.timestamp < startAt ||
       record.timestamp >= quota.resetAt ||
-      !modelIds.has(modelId)
+      !modelScopeMatches(quota.modelScope, modelId)
     ) {
       continue;
     }
 
+    matchingTimestamps.push(record.timestamp);
     addModelUsage(
       byModel,
       modelId,
@@ -334,19 +330,27 @@ function buildAntigravityLimitWindow(
   const totals = sumUsageTotals(modelUsage.map((row) => row.totals));
   const usedPercent = clampPercent((1 - quota.remainingFraction) * 100);
 
-  // Quota percentage is authoritative from Antigravity RPC. Token totals are
-  // reconstructed from locally available usage events inside the same time
-  // window and may not match Antigravity's internal quota accounting exactly.
+  // The first/last-seen range reflects the matched local usage events inside
+  // the window. With no matches, fall back to the window start and the fetch
+  // time. Quota percentage is authoritative from Antigravity RPC; token totals
+  // are reconstructed locally and may not match its internal accounting exactly.
+  const firstSeenMs = matchingTimestamps.length
+    ? Math.min(...matchingTimestamps)
+    : startAt;
+  const lastSeenMs = matchingTimestamps.length
+    ? Math.max(...matchingTimestamps)
+    : fetchedAt;
+
   return {
     scope: quota.scope,
     planType,
     limitId: quota.limitId,
-    modelType: modelGroupLabel(quota.modelIds),
+    modelType: modelScopeLabel(quota.modelScope),
     windowMinutes: quota.windowMinutes,
     startTimeUtcIso: new Date(startAt).toISOString(),
     endTimeUtcIso: new Date(quota.resetAt).toISOString(),
-    firstSeenUtcIso: new Date(fetchedAt).toISOString(),
-    lastSeenUtcIso: new Date(fetchedAt).toISOString(),
+    firstSeenUtcIso: new Date(firstSeenMs).toISOString(),
+    lastSeenUtcIso: new Date(lastSeenMs).toISOString(),
     minUsedPercent: usedPercent,
     maxUsedPercent: usedPercent,
     totals,
@@ -400,7 +404,11 @@ function usageRecordToTotals(
       record.output,
     estimatedCredits: creditsFor(modelId, record),
     eventCount: 1,
-    cacheStatus: "known",
+    // The local RPC reports cache reads but never cache writes, so cache reads
+    // are accurate while cache writes are genuinely unknown (not a confirmed
+    // zero) — surfaced as "-" everywhere, including the input/output ratio.
+    cacheReadStatus: "known",
+    cacheWriteStatus: "unavailable",
     estimatedCreditsStatus: rateForModel(modelId, record.input)
       ? "known"
       : "unavailable"
@@ -434,37 +442,6 @@ function rateForModel(
 
 function rowInputTokens(row: ModelUsageRow): number {
   return row.totals.inputTokens + row.totals.cacheReadInputTokens + row.totals.cacheWriteInputTokens;
-}
-
-function resolveModelId(modelId: string): string {
-  return MODEL_ALIASES[modelId] ?? (modelId || "unknown");
-}
-
-function modelGroupLabel(modelIds: string[]): string | undefined {
-  const families: string[] = [];
-
-  for (const modelId of modelIds) {
-    const family = modelFamilyLabel(modelId);
-    if (family && !families.includes(family)) {
-      families.push(family);
-    }
-  }
-
-  return families.length > 0 ? families.join("/") : undefined;
-}
-
-function modelFamilyLabel(modelId: string): string | null {
-  if (modelId.startsWith("gemini")) {
-    return "Gemini";
-  }
-  if (modelId.startsWith("claude")) {
-    return "Claude";
-  }
-  if (modelId.startsWith("gpt")) {
-    return "GPT";
-  }
-
-  return null;
 }
 
 function addModelUsage(

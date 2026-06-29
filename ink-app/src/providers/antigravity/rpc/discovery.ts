@@ -15,42 +15,55 @@ type AntigravityProcess = {
     csrfToken: string;
 };
 
-export async function findAntigravityLocalServer():
-    Promise<AntigravityLocalServer | null> {
-    const process = await findAntigravityProcess();
+/**
+ * A discovered server plus the quota-summary payload fetched while probing it.
+ * The probe is a real RetrieveUserQuotaSummary call, so its result is reused as
+ * the quota source instead of issuing the same request again.
+ */
+export type AntigravityConnection = {
+    server: AntigravityLocalServer;
+    quotaSummary: unknown;
+};
 
-    if (!process) {
+export async function findAntigravityLocalServer():
+    Promise<AntigravityConnection | null> {
+    const processes = await findAntigravityProcesses();
+    if (processes.length === 0) {
         return null;
     }
 
-    const ports = await findListeningPorts(process.pid);
+    const portsByPid = await readListeningPortsByPid();
 
-    for (const port of ports) {
-        const server: AntigravityLocalServer = {
-            port,
-            csrfToken: process.csrfToken
-        };
+    for (const process of processes) {
+        for (const port of portsByPid.get(process.pid) ?? []) {
+            const server: AntigravityLocalServer = {
+                port,
+                csrfToken: process.csrfToken
+            };
 
-        try {
-            await rpc<unknown>(
-                server,
-                ANTIGRAVITY_RPC_PATHS.quotaSummary
-            );
+            try {
+                const quotaSummary = await rpc<unknown>(
+                    server,
+                    ANTIGRAVITY_RPC_PATHS.quotaSummary
+                );
 
-            return server;
-        } catch {
-            // This port does not expose the expected Antigravity RPC API.
+                return { server, quotaSummary };
+            } catch {
+                // This port does not expose the expected Antigravity RPC API.
+            }
         }
     }
 
     return null;
 }
 
-async function findAntigravityProcess():
-    Promise<AntigravityProcess | null> {
+async function findAntigravityProcesses():
+    Promise<AntigravityProcess[]> {
     const entries = await fs.promises
         .readdir("/proc")
         .catch(() => []);
+
+    const processes: AntigravityProcess[] = [];
 
     for (const entry of entries) {
         if (!/^\d+$/.test(entry)) {
@@ -85,16 +98,16 @@ async function findAntigravityProcess():
             continue;
         }
 
-        return {
+        processes.push({
             pid: Number(entry),
             csrfToken
-        };
+        });
     }
 
-    return null;
+    return processes;
 }
 
-async function findListeningPorts(pid: number): Promise<number[]> {
+async function readListeningPortsByPid(): Promise<Map<number, number[]>> {
     const { stdout } = await execFileAsync(
         "ss",
         ["-H", "-ltnp"],
@@ -104,13 +117,28 @@ async function findListeningPorts(pid: number): Promise<number[]> {
         }
     );
 
-    const ports = stdout
-        .split("\n")
-        .filter((line) => line.includes(`pid=${pid},`))
-        .flatMap((line) =>
-            [...line.matchAll(/(?:127\.0\.0\.1|\[::1\]):(\d+)/g)]
-        )
-        .map((match) => Number(match[1]));
+    const portsByPid = new Map<number, Set<number>>();
 
-    return [...new Set(ports)];
+    for (const line of stdout.split("\n")) {
+        const loopbackPorts = [
+            ...line.matchAll(/(?:127\.0\.0\.1|\[::1\]):(\d+)/g)
+        ].map((match) => Number(match[1]));
+
+        if (loopbackPorts.length === 0) {
+            continue;
+        }
+
+        for (const pidMatch of line.matchAll(/pid=(\d+),/g)) {
+            const pid = Number(pidMatch[1]);
+            const ports = portsByPid.get(pid) ?? new Set<number>();
+            for (const port of loopbackPorts) {
+                ports.add(port);
+            }
+            portsByPid.set(pid, ports);
+        }
+    }
+
+    return new Map(
+        [...portsByPid.entries()].map(([pid, ports]) => [pid, [...ports]])
+    );
 }

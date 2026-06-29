@@ -134,7 +134,10 @@ export class CopilotUsageProvider extends UsageProviderBase {
       .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
     const summaryTotals = sumUsageTotals(modelUsage.map((row) => row.totals));
 
-    if (summaryTotals.cacheStatus === "unavailable") {
+    if (
+      summaryTotals.cacheReadStatus === "unavailable" ||
+      summaryTotals.cacheWriteStatus === "unavailable"
+    ) {
       warnings.push(
         "Copilot cache token attributes are unavailable for some events; cached/non-cached tokens and estimated credits are shown as unknown."
       );
@@ -327,7 +330,8 @@ function createUsageTotals(modelId: string, usage: CopilotRawUsage): UsageTotals
     totalTokens: usage.inputTokens + usage.outputTokens,
     estimatedCredits: creditsFor(modelId, usage),
     eventCount: 1,
-    cacheStatus: hasCacheInfo ? "known" : "unavailable",
+    cacheReadStatus: hasCacheInfo ? "known" : "unavailable",
+    cacheWriteStatus: hasCacheInfo ? "known" : "unavailable",
     estimatedCreditsStatus: hasKnownCreditPricing ? "known" : "unavailable"
   };
 }

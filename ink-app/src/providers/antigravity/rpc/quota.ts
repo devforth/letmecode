@@ -4,41 +4,14 @@ import {
   type AntigravityLocalServer,
   type AntigravityRpcMetadata
 } from "./client.js";
+import { asRecord } from "../../limits.js";
+import type { AntigravityQuotaGroup } from "../types.js";
 
 const METADATA: AntigravityRpcMetadata = {
   ideName: "antigravity",
   extensionName: "antigravity",
   ideVersion: "unknown",
   locale: "en"
-};
-
-export type AntigravityQuotaBucket = {
-  bucketId: string;
-  window: string;
-  remainingFraction: number;
-  resetTime: string;
-};
-
-export type AntigravityQuotaGroup = {
-  displayName: string;
-  description?: string;
-  buckets: AntigravityQuotaBucket[];
-};
-
-export type AntigravityQuotaData = {
-  email: string | null;
-  planName: string | null;
-  groups: AntigravityQuotaGroup[];
-};
-
-type QuotaResponse = {
-  response?: {
-    groups?: Array<
-      Partial<Omit<AntigravityQuotaGroup, "buckets">> & {
-        buckets?: Partial<AntigravityQuotaBucket>[];
-      }
-    >;
-  };
 };
 
 type StatusResponse = {
@@ -52,65 +25,38 @@ type StatusResponse = {
   };
 };
 
-export async function fetchAntigravityQuotaRpcData(
+export type AntigravityUserStatus = {
+  email: string | null;
+  planName: string | null;
+};
+
+/**
+ * Pulls the raw quota groups out of a RetrieveUserQuotaSummary payload.
+ * Validation and normalization are the parser's responsibility, so this only
+ * unwraps the envelope.
+ */
+export function extractQuotaGroups(payload: unknown): AntigravityQuotaGroup[] {
+  const response = asRecord(asRecord(payload)?.response);
+  const groups = response?.groups;
+
+  return Array.isArray(groups) ? (groups as AntigravityQuotaGroup[]) : [];
+}
+
+export async function fetchAntigravityUserStatus(
   server: AntigravityLocalServer
-): Promise<AntigravityQuotaData> {
-  const [quota, status] = await Promise.all([
-    rpc<QuotaResponse>(
-      server,
-      ANTIGRAVITY_RPC_PATHS.quotaSummary
-    ),
-    rpc<
-      StatusResponse,
-      { metadata: AntigravityRpcMetadata }
-    >(
-      server,
-      ANTIGRAVITY_RPC_PATHS.userStatus,
-      { metadata: METADATA }
-    ).catch(() => null)
-  ]);
-
-  const groups = (quota.response?.groups ?? []).flatMap((group) => {
-    if (!group.displayName) {
-      return [];
-    }
-
-    const buckets = (group.buckets ?? []).flatMap((bucket) => {
-      if (
-        !bucket.bucketId ||
-        !bucket.window ||
-        !bucket.resetTime ||
-        typeof bucket.remainingFraction !== "number" ||
-        !Number.isFinite(bucket.remainingFraction)
-      ) {
-        return [];
-      }
-
-      return [{
-        bucketId: bucket.bucketId,
-        window: bucket.window,
-        remainingFraction: bucket.remainingFraction,
-        resetTime: bucket.resetTime
-      }];
-    });
-
-    if (!buckets.length) {
-      return [];
-    }
-
-    return [{
-      displayName: group.displayName,
-      ...(group.description === undefined
-        ? {}
-        : { description: group.description }),
-      buckets
-    }];
-  });
+): Promise<AntigravityUserStatus> {
+  const status = await rpc<
+    StatusResponse,
+    { metadata: AntigravityRpcMetadata }
+  >(
+    server,
+    ANTIGRAVITY_RPC_PATHS.userStatus,
+    { metadata: METADATA }
+  ).catch(() => null);
 
   return {
     email: status?.userStatus?.email ?? null,
     planName:
-      status?.userStatus?.planStatus?.planInfo?.planName ?? null,
-    groups
+      status?.userStatus?.planStatus?.planInfo?.planName ?? null
   };
 }
