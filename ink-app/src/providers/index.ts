@@ -1,7 +1,7 @@
 import { ClaudeUsageProvider } from "./claude.js";
 import { CodexUsageProvider } from "./codex.js";
 import { CopilotUsageProvider } from "./copilot.js";
-import { AntigravityUsageProvider } from "./antigravity/provider.js";
+import { AntigravityUsageProvider } from "./antigravity.js";
 import type { UsageProviderBase } from "./contract.js";
 
 export function createProviders(): UsageProviderBase[] {
@@ -13,13 +13,13 @@ export function createProviders(): UsageProviderBase[] {
   ];
 }
 
-export { AntigravityUsageProvider } from "./antigravity/provider.js";
+export { AntigravityUsageProvider } from "./antigravity.js";
 export type {
   AntigravityQuotaEntry,
   AntigravityQuotaSnapshot,
   AntigravityUsageProviderOptions,
   AntigravityUsageRecord
-} from "./antigravity/provider.js";
+} from "./antigravity.js";
 export { ClaudeUsageProvider } from "./claude.js";
 export { CodexUsageProvider } from "./codex.js";
 export {
