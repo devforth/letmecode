@@ -480,7 +480,8 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
       : 0;
 
   return (
-    <Box flexDirection="column">
+    <Box borderStyle="round" paddingX={1} flexDirection="column">
+      <Text color="cyan">Summary</Text>
       <Box>
         <Box flexDirection="column" width={45}>
           <DetailRow label="Plan" value={summary.distinctPlanTypes.join(", ") || "none"} />
