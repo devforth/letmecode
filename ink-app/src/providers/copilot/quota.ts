@@ -59,7 +59,8 @@ export async function getCopilotUserInfo(
   if (!token) {
     return {
       warnings: [
-        "GitHub credentials were not found; Copilot plan and quota are unavailable."
+        "Copilot plan and quota are unavailable: no GitHub token found. " +
+          "Set GH_TOKEN or GITHUB_TOKEN, or install GitHub CLI and run `gh auth login`."
       ]
     };
   }

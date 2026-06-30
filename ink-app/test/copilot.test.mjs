@@ -555,10 +555,11 @@ test("discover finds multiple JSONL files and ignores non-JSONL files", async ()
 test("user-info reports a controlled warning when no token is found", async () => {
   const result = await getCopilotUserInfo({ resolveToken: async () => null });
   assert.equal(result.quotaInfo, undefined);
-  assert.equal(
-    result.warnings.some((w) => w.includes("GitHub credentials were not found")),
-    true
-  );
+  assert.equal(result.warnings.length, 1);
+  const warning = result.warnings[0];
+  assert.equal(warning.includes("no GitHub token found"), true);
+  assert.equal(warning.includes("GH_TOKEN"), true);
+  assert.equal(warning.includes("gh auth login"), true);
 });
 
 test("user-info parses quota from an injected fetch and never leaks the token", async () => {
