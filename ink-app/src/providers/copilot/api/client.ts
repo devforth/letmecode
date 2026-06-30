@@ -7,10 +7,14 @@ const COPILOT_USER_HOSTNAME = "api.github.com";
 const COPILOT_USER_PATH = "/copilot_internal/user";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
-const USER_AGENT = "GitHubCopilotChat/0.x";
-const EDITOR_VERSION = "vscode/1.99.0";
-const EDITOR_PLUGIN_VERSION = "copilot-chat/0.x";
-const GITHUB_API_VERSION = "2023-07-07";
+// Mirror the header set the working Tokscale client sends to the unstable
+// /copilot_internal/user endpoint. Concrete versions (not "0.x" placeholders)
+// are required: the endpoint rejects/ignores some requests with implausible
+// editor/plugin versions.
+const USER_AGENT = "GitHubCopilotChat/0.26.7";
+const EDITOR_VERSION = "vscode/1.96.2";
+const EDITOR_PLUGIN_VERSION = "copilot-chat/0.26.7";
+const GITHUB_API_VERSION = "2025-04-01";
 
 export type GetCopilotUserOptions = { timeoutMs?: number };
 

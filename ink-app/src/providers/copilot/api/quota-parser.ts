@@ -36,15 +36,17 @@ export function parseCopilotQuota(raw: unknown): CopilotQuotaInfo {
   const plan = asString(root.copilot_plan);
   const snapshots = asRecord(root.quota_snapshots);
 
-  const quotas =
-    snapshots !== null
-      ? parsePaidQuotas(snapshots)
-      : parseFreeQuotas(root);
+  // Prefer the paid `quota_snapshots` form, but fall back to the free
+  // `monthly/limited` form when the snapshot object is present yet yields no
+  // usable quotas (e.g. an empty `quota_snapshots: {}`). Selecting paid purely
+  // on the object's presence would silently drop a free account's quotas.
+  const paid = snapshots !== null ? parsePaidQuotas(snapshots) : [];
+  const usePaid = paid.length > 0;
+  const quotas = usePaid ? paid : parseFreeQuotas(root);
 
-  const resetAt =
-    snapshots !== null
-      ? asString(root.quota_reset_date)
-      : asString(root.limited_user_reset_date);
+  const resetAt = usePaid
+    ? asString(root.quota_reset_date)
+    : asString(root.limited_user_reset_date);
 
   const info: CopilotQuotaInfo = {
     quotas: quotas.sort((left, right) => left.id.localeCompare(right.id))

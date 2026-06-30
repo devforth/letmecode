@@ -2,8 +2,7 @@ import type {
   DailyUsageRow,
   LimitWindowScope,
   ModelUsageRow,
-  UsageTotals,
-  UsageValueStatus
+  UsageTotals
 } from "../contract.js";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -68,7 +67,7 @@ export type CopilotUserApiResult =
   | { ok: false; warning: string };
 
 // ────────────────────────────────────────────────────────────────────────────
-// OTEL discovery (otel/discover.ts) + raw parsing (otel/parse.ts)
+// OTEL discovery (otel/discover.ts)
 // ────────────────────────────────────────────────────────────────────────────
 
 export type CopilotOtelFileSource =
@@ -88,81 +87,6 @@ export type CopilotOtelFile = {
 
 export type CopilotOtelDiscoveryResult = {
   files: CopilotOtelFile[];
-  warnings: string[];
-};
-
-export type CopilotRawOtelRecord = {
-  payload: unknown;
-  filePath: string;
-  fileSource: CopilotOtelFileSource;
-  lineNumber: number;
-  fileModifiedAtMs: number;
-};
-
-export type CopilotOtelParseResult = {
-  records: CopilotRawOtelRecord[];
-  filesScanned: number;
-  linesRead: number;
-  malformedLines: number;
-  warnings: string[];
-};
-
-// ────────────────────────────────────────────────────────────────────────────
-// Normalized usage event (otel/normalize.ts)
-// ────────────────────────────────────────────────────────────────────────────
-
-export type CopilotUsageEventSource =
-  | "chat-span"
-  | "inference-log"
-  | "agent-turn-log"
-  | "agent-summary-span";
-
-/**
- * A single normalized Copilot usage event. `inputTokens` is the RAW reported
- * input as emitted by the Copilot OTEL exporter — it already INCLUDES
- * cache-read tokens but NOT cache-write/creation tokens. usage/aggregate.ts is
- * responsible for deriving uncached input (`max(0, inputTokens - cacheRead)`).
- */
-export type CopilotUsageEvent = {
-  timestampMs: number;
-  modelId: string;
-
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens: number;
-  cacheWriteInputTokens: number;
-  reasoningOutputTokens: number;
-
-  cacheReadStatus: UsageValueStatus;
-  cacheWriteStatus: UsageValueStatus;
-
-  traceId?: string;
-  spanId?: string;
-  responseId?: string;
-  conversationId?: string;
-  sessionId?: string;
-  agentId?: string;
-  turnIndex?: number;
-  durationMs?: number;
-
-  sourceType: CopilotUsageEventSource;
-
-  filePath: string;
-  lineNumber: number;
-};
-
-export type CopilotNormalizeResult = {
-  events: CopilotUsageEvent[];
-  warnings: string[];
-};
-
-// ────────────────────────────────────────────────────────────────────────────
-// Deduplication (otel/deduplicate.ts)
-// ────────────────────────────────────────────────────────────────────────────
-
-export type CopilotDeduplicationResult = {
-  events: CopilotUsageEvent[];
-  duplicatesRemoved: number;
   warnings: string[];
 };
 

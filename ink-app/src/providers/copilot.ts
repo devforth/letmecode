@@ -3,7 +3,8 @@
 // only re-exports the public surface so existing import paths keep working.
 export {
   CopilotUsageProvider,
-  configureCopilotVsCodeLogging
+  configureCopilotVsCodeLogging,
+  getCopilotCliOtelEnv
 } from "./copilot/provider.js";
 export type { CopilotUsageProviderOptions } from "./copilot/provider.js";
 export type {

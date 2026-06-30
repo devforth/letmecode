@@ -8,8 +8,7 @@ import type {
 } from "../types.js";
 import {
   getConfiguredCopilotOutfiles,
-  getCopilotOtelPath,
-  getVsCodeUserRoots
+  getCopilotOtelPath
 } from "./configure.js";
 
 export type DiscoverCopilotOtelFilesOptions = {
@@ -46,23 +45,6 @@ function isPermissionError(error: unknown): boolean {
   return isErrnoException(error) && (error.code === "EACCES" || error.code === "EPERM");
 }
 
-/**
- * Classify a configured VS Code outfile into "vscode" vs "vscode-insiders" by
- * locating which user root it lives under. The stable root is index 0 and the
- * Insiders root is index 1 (see getVsCodeUserRoots). Falls back to "vscode".
- */
-function classifyVsCodeOutfile(resolvedOutfile: string, root: string): CopilotOtelFileSource {
-  const userRoots = getVsCodeUserRoots(root);
-  const key = dedupKey(resolvedOutfile);
-  if (userRoots.length > 1) {
-    const insidersRoot = dedupKey(path.resolve(userRoots[1]));
-    if (key === insidersRoot || key.startsWith(insidersRoot + path.sep)) {
-      return "vscode-insiders";
-    }
-  }
-  return "vscode";
-}
-
 export async function discoverCopilotOtelFiles(
   options?: DiscoverCopilotOtelFilesOptions
 ): Promise<CopilotOtelDiscoveryResult> {
@@ -90,8 +72,7 @@ export async function discoverCopilotOtelFiles(
   try {
     const configured = await getConfiguredCopilotOutfiles(root);
     for (const entry of configured) {
-      const resolved = path.resolve(entry.path);
-      candidates.push({ path: entry.path, source: classifyVsCodeOutfile(resolved, root) });
+      candidates.push({ path: entry.path, source: entry.source });
     }
   } catch (error) {
     if (isPermissionError(error)) {

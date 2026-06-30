@@ -6,8 +6,7 @@ import test from "node:test";
 
 import { parseCopilotQuota } from "../dist/providers/copilot/api/quota-parser.js";
 import { getCopilotUserInfo } from "../dist/providers/copilot/api/user-info.js";
-import { normalizeCopilotOtelRecords } from "../dist/providers/copilot/otel/normalize.js";
-import { deduplicateCopilotUsageEvents } from "../dist/providers/copilot/otel/deduplicate.js";
+import { parseCopilotOtelFiles } from "../dist/providers/copilot/otel/parse.js";
 import { discoverCopilotOtelFiles } from "../dist/providers/copilot/otel/discover.js";
 import { aggregateCopilotUsage } from "../dist/providers/copilot/usage/aggregate.js";
 
@@ -27,6 +26,28 @@ async function writeOtel(root, name, lines) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, lines.join("\n"), "utf8");
   return target;
+}
+
+async function parseCopilotRecords(records) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "letmecode-copilot-parse-"));
+  try {
+    const target = path.join(root, "otel.jsonl");
+    await fs.writeFile(
+      target,
+      records.map((record) => JSON.stringify(record.payload)).join("\n"),
+      "utf8"
+    );
+    return await parseCopilotOtelFiles([
+      {
+        path: target,
+        source: "copilot-cli",
+        modifiedAtMs: records[0]?.fileModifiedAtMs ?? 1_700_000_000_000,
+        sizeBytes: 0
+      }
+    ]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 }
 
 function rawRecord(payload, overrides = {}) {
@@ -57,7 +78,6 @@ function usageEvent(overrides = {}) {
     reasoningOutputTokens: 0,
     cacheReadStatus: "known",
     cacheWriteStatus: "known",
-    sourceType: "chat-span",
     filePath: "/a.jsonl",
     lineNumber: 1,
     ...overrides
@@ -152,10 +172,10 @@ test("quota-parser guards remaining greater than total", () => {
   assert.equal(info.quotas[0].usedPercent, 0);
 });
 
-// ─── normalize ──────────────────────────────────────────────────────────────
+// ─── parse ─────────────────────────────────────────────────────────────────
 
-test("normalize parses a standard VS Code chat span", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse parses a standard VS Code chat span", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "gpt-4.1",
       "gen_ai.operation.name": "chat",
@@ -166,15 +186,14 @@ test("normalize parses a standard VS Code chat span", () => {
   ]);
   assert.equal(events.length, 1);
   assert.equal(events[0].modelId, "gpt-4.1");
-  assert.equal(events[0].sourceType, "chat-span");
   assert.equal(events[0].inputTokens, 100); // RAW reported input (includes cache-read)
   assert.equal(events[0].cacheReadInputTokens, 20);
   assert.equal(events[0].outputTokens, 10);
   assert.equal(events[0].cacheReadStatus, "known");
 });
 
-test("normalize falls back to gen_ai.request.model", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse falls back to gen_ai.request.model", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.request.model": "gpt-5-mini",
       "gen_ai.operation.name": "chat",
@@ -185,8 +204,8 @@ test("normalize falls back to gen_ai.request.model", () => {
   assert.equal(events[0].modelId, "gpt-5-mini");
 });
 
-test("normalize reads underscore cache aliases", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse reads underscore cache aliases", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "claude-sonnet-4-6",
       "gen_ai.operation.name": "chat",
@@ -202,8 +221,8 @@ test("normalize reads underscore cache aliases", () => {
   assert.equal(events[0].cacheWriteStatus, "known");
 });
 
-test("normalize reads dotted cache aliases", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse reads dotted cache aliases", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "claude-sonnet-4-6",
       "gen_ai.operation.name": "chat",
@@ -217,8 +236,8 @@ test("normalize reads dotted cache aliases", () => {
   assert.equal(events[0].cacheWriteInputTokens, 15);
 });
 
-test("normalize keeps cache-only events", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse keeps cache-only events", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "gpt-4.1",
       "gen_ai.operation.name": "chat",
@@ -231,8 +250,8 @@ test("normalize keeps cache-only events", () => {
   assert.equal(events[0].cacheReadInputTokens, 500);
 });
 
-test("normalize accepts numeric string token values", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse accepts numeric string token values", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "gpt-4.1",
       "gen_ai.operation.name": "chat",
@@ -244,8 +263,8 @@ test("normalize accepts numeric string token values", () => {
   assert.equal(events[0].outputTokens, 10);
 });
 
-test("normalize defaults missing model to unknown", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse defaults missing model to unknown", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.operation.name": "chat",
       "gen_ai.usage.input_tokens": 5,
@@ -255,9 +274,12 @@ test("normalize defaults missing model to unknown", () => {
   assert.equal(events[0].modelId, "unknown");
 });
 
-test("normalize supports multiple timestamp formats and prefers hrTime", () => {
-  // hrTime wins over startTime.
-  const hr = normalizeCopilotOtelRecords([
+test("parse supports multiple timestamp formats and prefers completion (startTime over hrTime)", async () => {
+  // endTime/startTime (request completion) win over hrTime, matching Tokscale.
+  const startDay = new Date(1782130578 * 1000).toISOString().slice(0, 10);
+  const hrDay = new Date(1782206354 * 1000).toISOString().slice(0, 10);
+  assert.notEqual(startDay, hrDay); // the two timestamps are on different days
+  const hr = await parseCopilotRecords([
     rawRecord({
       startTime: [1782130578, 148000000],
       hrTime: [1782206354, 661000000],
@@ -269,10 +291,10 @@ test("normalize supports multiple timestamp formats and prefers hrTime", () => {
       }
     })
   ]);
-  assert.equal(new Date(hr.events[0].timestampMs).toISOString().slice(0, 10), "2026-06-23");
+  assert.equal(new Date(hr.events[0].timestampMs).toISOString().slice(0, 10), startDay);
 
   // ISO string via a non-hr field.
-  const iso = normalizeCopilotOtelRecords([
+  const iso = await parseCopilotRecords([
     rawRecord({
       time: "2026-06-20T00:00:00.000Z",
       attributes: {
@@ -285,7 +307,7 @@ test("normalize supports multiple timestamp formats and prefers hrTime", () => {
   assert.equal(new Date(iso.events[0].timestampMs).toISOString().slice(0, 10), "2026-06-20");
 
   // Falls back to file mtime when no timestamp is present.
-  const fallback = normalizeCopilotOtelRecords([
+  const fallback = await parseCopilotRecords([
     rawRecord(
       {
         attributes: {
@@ -300,8 +322,8 @@ test("normalize supports multiple timestamp formats and prefers hrTime", () => {
   assert.equal(fallback.events[0].timestampMs, 1_782_000_000_000);
 });
 
-test("normalize reads the reasoning_tokens alias", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse reads the reasoning_tokens alias", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "gpt-4.1",
       "gen_ai.operation.name": "chat",
@@ -313,8 +335,8 @@ test("normalize reads the reasoning_tokens alias", () => {
   assert.equal(events[0].reasoningOutputTokens, 20);
 });
 
-test("normalize keeps reported input intact when cache-write is present", () => {
-  const { events } = normalizeCopilotOtelRecords([
+test("parse keeps reported input intact when cache-write is present", async () => {
+  const { events } = await parseCopilotRecords([
     chatRecord({
       "gen_ai.response.model": "claude-sonnet-4-6",
       "gen_ai.operation.name": "chat",
@@ -328,13 +350,13 @@ test("normalize keeps reported input intact when cache-write is present", () => 
   assert.equal(events[0].cacheWriteInputTokens, 30);
 });
 
-test("normalize ignores OTLP envelopes and array-form attributes", () => {
-  const envelope = normalizeCopilotOtelRecords([
+test("parse ignores OTLP envelopes and array-form attributes", async () => {
+  const envelope = await parseCopilotRecords([
     rawRecord({ resourceLogs: [{ scopeLogs: [{ logRecords: [{}] }] }] })
   ]);
   assert.equal(envelope.events.length, 0);
 
-  const arrayAttrs = normalizeCopilotOtelRecords([
+  const arrayAttrs = await parseCopilotRecords([
     rawRecord({
       attributes: [{ key: "gen_ai.usage.input_tokens", value: { intValue: "100" } }]
     })
@@ -342,85 +364,117 @@ test("normalize ignores OTLP envelopes and array-form attributes", () => {
   assert.equal(arrayAttrs.events.length, 0);
 });
 
-// ─── deduplicate ───────────────────────────────────────────────────────────
+test("parse drops records that match no supported span/log type", async () => {
+  // Tokens present, but no chat/inference/agent marker => not chat usage.
+  const { events } = await parseCopilotRecords([
+    chatRecord({
+      "gen_ai.response.model": "gpt-4.1",
+      "gen_ai.operation.name": "embeddings",
+      "gen_ai.usage.input_tokens": 100,
+      "gen_ai.usage.output_tokens": 0
+    })
+  ]);
+  assert.equal(events.length, 0);
+});
 
-test("deduplicate collapses the same trace + span across source types", () => {
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ sourceType: "inference-log", traceId: "t1", spanId: "s1", lineNumber: 2 }),
-    usageEvent({ sourceType: "chat-span", traceId: "t1", spanId: "s1", lineNumber: 1 })
+test("parse ignores invoke_agent aggregate spans", async () => {
+  const { events } = await parseCopilotRecords([
+    chatRecord({
+      "gen_ai.operation.name": "invoke_agent",
+      "event.name": "copilot_chat.agent.turn",
+      "gen_ai.usage.input_tokens": 50,
+      "gen_ai.usage.output_tokens": 5
+    })
+  ]);
+  assert.equal(events.length, 0);
+});
+
+test("parse reads session id aliases", async () => {
+  const { events } = await parseCopilotRecords([
+    chatRecord({
+      "gen_ai.response.model": "gpt-4.1",
+      "gen_ai.operation.name": "chat",
+      "copilot_chat.session_id": "sess-7",
+      "gen_ai.usage.input_tokens": 10,
+      "gen_ai.usage.output_tokens": 1
+    })
+  ]);
+  assert.equal(events[0].sessionId, "sess-7");
+});
+
+test("parse resolves trace id from spanContext", async () => {
+  const { events } = await parseCopilotRecords([
+    rawRecord({
+      spanContext: { traceId: "trace-xyz", spanId: "span-1" },
+      attributes: {
+        "gen_ai.response.model": "gpt-4.1",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.usage.input_tokens": 10,
+        "gen_ai.usage.output_tokens": 1
+      }
+    })
+  ]);
+  assert.equal(events[0].traceId, "trace-xyz");
+  assert.equal(events[0].spanId, "span-1");
+});
+
+test("parse inherits model from a sibling record sharing the trace", async () => {
+  const { events } = await parseCopilotRecords([
+    chatRecord({
+      "gen_ai.trace.id": "t-shared",
+      "gen_ai.response.model": "claude-sonnet-4-6",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.usage.input_tokens": 5,
+      "gen_ai.usage.output_tokens": 1
+    }),
+    chatRecord({
+      "gen_ai.trace.id": "t-shared",
+      "gen_ai.operation.name": "inference",
+      "gen_ai.usage.input_tokens": 200,
+      "gen_ai.usage.output_tokens": 20
+    })
+  ]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].modelId, "claude-sonnet-4-6");
+});
+
+test("parse deduplicates repeated chat spans by trace and span", async () => {
+  const result = await parseCopilotRecords([
+    chatRecord({
+      "gen_ai.trace.id": "t1",
+      "span_id": "s1",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.usage.input_tokens": 10
+    }),
+    chatRecord({
+      "gen_ai.trace.id": "t1",
+      "span_id": "s1",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.usage.input_tokens": 10
+    })
   ]);
   assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].sourceType, "chat-span");
   assert.equal(result.duplicatesRemoved, 1);
 });
 
-test("deduplicate keeps the chat span when a responseId is shared with an inference log", () => {
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ sourceType: "inference-log", responseId: "r1", lineNumber: 2 }),
-    usageEvent({ sourceType: "chat-span", responseId: "r1", lineNumber: 1 })
-  ]);
-  assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].sourceType, "chat-span");
-});
-
-test("deduplicate preserves distinct calls that reuse one response id", () => {
-  // The Copilot exporter reuses gen_ai.response.id across several sequential
-  // calls within a turn (different tokens/timestamps). These are distinct usage
-  // events and must NOT collapse just because the response id matches.
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ responseId: "shared", timestampMs: 1000, inputTokens: 22580, outputTokens: 338, lineNumber: 1 }),
-    usageEvent({ responseId: "shared", timestampMs: 9000, inputTokens: 23350, outputTokens: 1015, lineNumber: 2 }),
-    usageEvent({ responseId: "shared", timestampMs: 11000, inputTokens: 24401, outputTokens: 100, lineNumber: 3 })
-  ]);
-  assert.equal(result.events.length, 3);
-  assert.equal(result.duplicatesRemoved, 0);
-});
-
-test("deduplicate collapses a truly identical record that reuses a response id", () => {
-  // Same response id AND identical timestamp + token tuple => the same call
-  // emitted twice; one copy is dropped.
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ sourceType: "chat-span", responseId: "r", timestampMs: 1000, inputTokens: 50, outputTokens: 5, lineNumber: 1 }),
-    usageEvent({ sourceType: "inference-log", responseId: "r", timestampMs: 1000, inputTokens: 50, outputTokens: 5, lineNumber: 2 })
-  ]);
-  assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].sourceType, "chat-span");
-});
-
-test("deduplicate preserves distinct turns within one conversation", () => {
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ traceId: "t1", spanId: "s1", conversationId: "c1", responseId: "r1", lineNumber: 1 }),
-    usageEvent({ traceId: "t1", spanId: "s2", conversationId: "c1", responseId: "r2", lineNumber: 2 })
+test("parse preserves separate chat spans in one conversation", async () => {
+  const result = await parseCopilotRecords([
+    chatRecord({
+      "gen_ai.trace.id": "t1",
+      "span_id": "s1",
+      "conversation.id": "c1",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.usage.input_tokens": 10
+    }),
+    chatRecord({
+      "gen_ai.trace.id": "t1",
+      "span_id": "s2",
+      "conversation.id": "c1",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.usage.input_tokens": 20
+    })
   ]);
   assert.equal(result.events.length, 2);
-});
-
-test("deduplicate drops an agent summary that covers detailed turns", () => {
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ sourceType: "agent-turn-log", conversationId: "c1", spanId: "sa", lineNumber: 1 }),
-    usageEvent({ sourceType: "agent-turn-log", conversationId: "c1", spanId: "sb", lineNumber: 2 }),
-    usageEvent({ sourceType: "agent-summary-span", conversationId: "c1", lineNumber: 3 })
-  ]);
-  assert.equal(result.events.length, 2);
-  assert.equal(result.events.every((e) => e.sourceType === "agent-turn-log"), true);
-  assert.equal(result.duplicatesRemoved, 1);
-});
-
-test("deduplicate drops an unlinked agent turn when a chat span exists in the same file", () => {
-  const result = deduplicateCopilotUsageEvents([
-    usageEvent({ sourceType: "chat-span", filePath: "/a.jsonl", lineNumber: 1 }),
-    usageEvent({ sourceType: "agent-turn-log", filePath: "/a.jsonl", lineNumber: 2, turnIndex: 0 })
-  ]);
-  assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].sourceType, "chat-span");
-});
-
-test("deduplicate is order-independent", () => {
-  const a = usageEvent({ sourceType: "chat-span", traceId: "t1", spanId: "s1", lineNumber: 1 });
-  const b = usageEvent({ sourceType: "inference-log", traceId: "t1", spanId: "s1", lineNumber: 2 });
-  const forward = deduplicateCopilotUsageEvents([a, b]);
-  const reverse = deduplicateCopilotUsageEvents([b, a]);
-  assert.deepEqual(forward.events, reverse.events);
 });
 
 // ─── aggregate ───────────────────────────────────────────────────────────────
@@ -442,6 +496,24 @@ test("aggregate derives uncached input and treats cache-write as additive", () =
   assert.equal(totals.totalTokens, 111000);
   assert.ok(Math.abs(totals.estimatedCredits - 9.95) < 1e-9);
   assert.equal(totals.estimatedCreditsStatus, "known");
+});
+
+test("aggregate preserves the full cache-read bucket for cache-only events", () => {
+  // input 0, cache-read 500: capping cache-read at input would zero the bucket
+  // and lose the usage. The bucket must keep all 500.
+  const aggregated = aggregateCopilotUsage([
+    usageEvent({
+      modelId: "claude-haiku-4-5-20251001",
+      inputTokens: 0,
+      cacheReadInputTokens: 500,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0
+    })
+  ]);
+  const totals = byModel(aggregated).get("claude-haiku-4-5-20251001");
+  assert.equal(totals.inputTokens, 0);
+  assert.equal(totals.cacheReadInputTokens, 500);
+  assert.equal(totals.totalTokens, 500);
 });
 
 test("aggregate marks unknown pricing and warns", () => {

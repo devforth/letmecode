@@ -10,11 +10,10 @@ import {
 import { getCopilotUserInfo } from "./api/user-info.js";
 import {
   configureCopilotVsCodeLogging,
+  getCopilotCliOtelEnv,
   getConfiguredCopilotOutfiles
 } from "./otel/configure.js";
-import { deduplicateCopilotUsageEvents } from "./otel/deduplicate.js";
 import { discoverCopilotOtelFiles } from "./otel/discover.js";
-import { normalizeCopilotOtelRecords } from "./otel/normalize.js";
 import { parseCopilotOtelFiles } from "./otel/parse.js";
 import {
   COPILOT_PRIMARY_QUOTA_IDS,
@@ -24,7 +23,7 @@ import {
 } from "./types.js";
 import { aggregateCopilotUsage } from "./usage/aggregate.js";
 
-export { configureCopilotVsCodeLogging };
+export { configureCopilotVsCodeLogging, getCopilotCliOtelEnv };
 export type {
   CopilotVsCodeLoggingOptions,
   CopilotVsCodeLoggingResult
@@ -89,8 +88,8 @@ export class CopilotUsageProvider extends UsageProviderBase {
       warnings.push("Could not search for Copilot OTEL files.");
     }
 
-    // Usage pipeline. Each stage degrades gracefully — a parse/normalize failure
-    // must not hide the quota windows we may already have.
+    // Usage pipeline. Parsing owns JSONL streaming, chat-span filtering, simple
+    // trace/span deduplication, and token normalization.
     const parseResult = await parseCopilotOtelFiles(files);
     warnings.push(...parseResult.warnings);
     if (parseResult.malformedLines > 0) {
@@ -99,18 +98,13 @@ export class CopilotUsageProvider extends UsageProviderBase {
       );
     }
 
-    const normalized = normalizeCopilotOtelRecords(parseResult.records);
-    warnings.push(...normalized.warnings);
-
-    const deduplicated = deduplicateCopilotUsageEvents(normalized.events);
-    warnings.push(...deduplicated.warnings);
-    if (deduplicated.duplicatesRemoved > 0) {
+    if (parseResult.duplicatesRemoved > 0) {
       warnings.push(
-        `Removed ${deduplicated.duplicatesRemoved} duplicate Copilot usage event(s).`
+        `Removed ${parseResult.duplicatesRemoved} duplicate Copilot usage event(s).`
       );
     }
 
-    const aggregated = aggregateCopilotUsage(deduplicated.events);
+    const aggregated = aggregateCopilotUsage(parseResult.events);
     warnings.push(...aggregated.warnings);
 
     if (files.length === 0) {
@@ -123,6 +117,20 @@ export class CopilotUsageProvider extends UsageProviderBase {
     }
 
     const limitWindows = quotaInfo ? buildCopilotLimitWindows(quotaInfo) : [];
+
+    // A quota with no usable percent/total renders as 0% used, which reads as
+    // "nothing used" when the value is actually unknown. Keep the window visible
+    // but warn so the 0% is not mistaken for a real measurement.
+    if (quotaInfo) {
+      const unknown = quotaInfo.quotas
+        .filter((quota) => !quotaUsedPercentIsKnown(quota))
+        .map((quota) => quota.label);
+      if (unknown.length > 0) {
+        warnings.push(
+          `Copilot quota usage is unknown for: ${unknown.join(", ")} (shown as 0%).`
+        );
+      }
+    }
 
     return {
       providerId: this.id,
@@ -209,6 +217,15 @@ function buildCopilotLimitWindows(quotaInfo: CopilotQuotaInfo): LimitWindowRow[]
       eventCount: 0
     } satisfies LimitWindowRow;
   });
+}
+
+/** Whether a quota carries enough data to derive a real used-percent value. */
+function quotaUsedPercentIsKnown(quota: CopilotQuota): boolean {
+  return (
+    quota.usedPercent !== undefined ||
+    quota.remainingPercent !== undefined ||
+    (quota.total !== undefined && quota.total > 0 && quota.used !== undefined)
+  );
 }
 
 function resolveQuotaUsedPercent(quota: CopilotQuota): number {

@@ -63,7 +63,28 @@ function trimToken(value: string | undefined): string | undefined {
     return undefined;
   }
   const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+  return trimmed.length > 0 ? decodeKeyringToken(trimmed) : undefined;
+}
+
+const GO_KEYRING_BASE64_PREFIX = "go-keyring-base64:";
+
+/**
+ * The `gh` keyring backend (and some hosts.yml/keychain entries) store the token
+ * as `go-keyring-base64:<base64>`. Decode that envelope so the raw token is used
+ * on the wire. A value without the prefix, or an undecodable payload, is returned
+ * unchanged.
+ */
+function decodeKeyringToken(value: string): string {
+  if (!value.startsWith(GO_KEYRING_BASE64_PREFIX)) {
+    return value;
+  }
+  const encoded = value.slice(GO_KEYRING_BASE64_PREFIX.length);
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8").trim();
+    return decoded.length > 0 ? decoded : value;
+  } catch {
+    return value;
+  }
 }
 
 function resolveGhConfigDir(

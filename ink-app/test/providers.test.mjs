@@ -822,7 +822,7 @@ test("CopilotUsageProvider parses only VS Code OTEL usage and ignores old sessio
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
     assert.equal(stats.providerId, "copilot");
     assert.equal(stats.providerLabel, "Copilot");
     assert.equal(stats.summary.filesScanned, 1);
@@ -870,7 +870,7 @@ test("CopilotUsageProvider ignores generic OTLP log envelopes", async () => {
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 0);
@@ -906,7 +906,7 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.summary.totals.inputTokens, 0);
@@ -915,7 +915,7 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
   });
 });
 
-test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
+test("CopilotUsageProvider prefers completion time (startTime over hrTime)", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
@@ -930,11 +930,16 @@ test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
+    // startTime (1782130578) wins over hrTime (1782206354), which are on
+    // different days; the day bucket reflects the startTime day.
+    const startDay = new Date(1782130578 * 1000).toISOString().slice(0, 10);
+    const hrDay = new Date(1782206354 * 1000).toISOString().slice(0, 10);
+    assert.notEqual(startDay, hrDay);
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
-    assert.equal(stats.dayUsage[0].dayKey, "2026-06-23");
+    assert.equal(stats.dayUsage[0].dayKey, startDay);
   });
 });
 
@@ -953,7 +958,7 @@ test("CopilotUsageProvider parses file exporter hrTime timestamps", async () => 
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
@@ -975,7 +980,7 @@ test("CopilotUsageProvider estimates credits when Copilot telemetry omits premiu
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5.4-2026-03-01");
@@ -1005,7 +1010,7 @@ test("CopilotUsageProvider estimates credits for GPT-5 mini OTEL usage", async (
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5-mini");
@@ -1030,16 +1035,18 @@ test("CopilotUsageProvider reads dotted cache attributes and Claude cache-write 
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
+    // Reported input INCLUDES cache-read but NOT cache-write, so uncached input
+    // subtracts only cache-read (100000 - 20000); cache-write is additive.
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 20000);
-    assert.equal(stats.summary.totals.inputTokens, 70000);
+    assert.equal(stats.summary.totals.inputTokens, 80000);
     assert.equal(stats.summary.totals.cacheWriteInputTokens, 10000);
     assert.equal(stats.summary.totals.outputTokens, 1000);
     assert.equal(stats.summary.totals.reasoningOutputTokens, 1000);
-    assert.equal(stats.summary.totals.totalTokens, 101000);
-    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 8.95) < 0.0000001);
+    assert.equal(stats.summary.totals.totalTokens, 111000);
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 9.95) < 0.0000001);
   });
 });
 
@@ -1066,7 +1073,7 @@ test("CopilotUsageProvider leaves GPT-4o mini credits unknown and estimates Clau
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(byModel.get("gpt-4o-mini-2024-07-18")?.estimatedCredits, 0);
@@ -1099,7 +1106,7 @@ test("CopilotUsageProvider treats Copilot NES and suggestion models as non-billa
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(stats.summary.totals.inputTokens, 3000);
@@ -1134,7 +1141,7 @@ test("CopilotUsageProvider applies long-context rates for large GPT-5.4 and GPT-
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCredits, 0);
@@ -1157,7 +1164,7 @@ test("CopilotUsageProvider applies model-specific long-context thresholds", asyn
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.totals.estimatedCredits, 0);
     assert.equal(stats.summary.totals.estimatedCreditsStatus, "unavailable");
@@ -1170,6 +1177,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       JSON.stringify({
         hrTime: [1782130578, 148000000],
         attributes: {
+          "gen_ai.trace.id": "trace-agent-1",
           "gen_ai.response.model": "gpt-5.4-2026-03-01",
           "gen_ai.operation.name": "chat",
           "gen_ai.usage.input_tokens": 84275,
@@ -1179,6 +1187,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       JSON.stringify({
         hrTime: [1782130578, 154000000],
         attributes: {
+          "gen_ai.trace.id": "trace-agent-1",
           "event.name": "copilot_chat.agent.turn",
           "gen_ai.operation.name": "invoke_agent",
           "turn.index": 0,
@@ -1188,8 +1197,10 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
+    // The invoke_agent record is an aggregate (agent-summary-span) sharing the
+    // chat span's trace, so it is suppressed; only the granular chat span counts.
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.summary.totals.inputTokens, 84275);
     assert.deepEqual(stats.modelUsage.map((row) => row.modelId), ["gpt-5.4-2026-03-01"]);
@@ -1272,7 +1283,7 @@ test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL fil
       "utf8"
     );
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {} }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(

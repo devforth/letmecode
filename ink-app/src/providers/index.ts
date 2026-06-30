@@ -24,7 +24,8 @@ export { ClaudeUsageProvider } from "./claude.js";
 export { CodexUsageProvider } from "./codex.js";
 export {
   CopilotUsageProvider,
-  configureCopilotVsCodeLogging
+  configureCopilotVsCodeLogging,
+  getCopilotCliOtelEnv
 } from "./copilot.js";
 export type {
   CopilotVsCodeLoggingOptions,

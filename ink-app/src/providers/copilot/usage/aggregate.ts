@@ -15,7 +15,8 @@ import {
   normalizeCopilotModelId,
   rateForCopilotModel
 } from "../models.js";
-import type { CopilotAggregatedUsage, CopilotUsageEvent } from "../types.js";
+import type { CopilotUsageEvent } from "../otel/parse.js";
+import type { CopilotAggregatedUsage } from "../types.js";
 
 const CACHE_UNAVAILABLE_WARNING =
   "Copilot cache token attributes are unavailable for some events; cached/non-cached tokens and estimated credits are shown as unknown.";
@@ -36,12 +37,15 @@ export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggre
     const hasCacheInfo =
       event.cacheReadStatus === "known" || event.cacheWriteStatus === "known";
 
-    const cacheRead = hasCacheInfo
-      ? Math.min(event.cacheReadInputTokens, event.inputTokens)
-      : 0;
+    // The reported input already INCLUDES cache-read but NOT cache-write. The
+    // cache-read bucket is preserved IN FULL; only the portion that overlaps the
+    // reported input is subtracted to derive the uncached input. Capping cacheRead
+    // at inputTokens would silently lose cache-only events (input 0, cacheRead N).
+    const reportedInput = Math.max(0, event.inputTokens);
+    const cacheRead = hasCacheInfo ? Math.max(0, event.cacheReadInputTokens) : 0;
     const uncachedInput = hasCacheInfo
-      ? Math.max(0, event.inputTokens - cacheRead)
-      : event.inputTokens;
+      ? Math.max(0, reportedInput - cacheRead)
+      : reportedInput;
     const cacheWrite = hasCacheInfo ? Math.max(0, event.cacheWriteInputTokens) : 0;
     const output = event.outputTokens;
     const reasoning = Math.min(event.reasoningOutputTokens, output);
