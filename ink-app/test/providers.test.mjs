@@ -993,10 +993,6 @@ test("CopilotUsageProvider estimates credits when Copilot telemetry omits premiu
     assert.equal(stats.modelUsage[0].totals.estimatedCreditsStatus, "unavailable");
     assert.equal(stats.modelUsage[0].totals.cacheReadStatus, "unavailable");
     assert.equal(stats.modelUsage[0].totals.cacheWriteStatus, "unavailable");
-    assert.equal(
-      stats.warnings.some((warning) => warning.includes("cache token attributes are unavailable")),
-      true
-    );
   });
 });
 
@@ -1352,6 +1348,183 @@ test("CopilotUsageProvider returns quota windows even when no OTEL files exist",
     assert.equal(
       stats.warnings.some((w) => w.includes("No Copilot OTEL files were found")),
       true
+    );
+  });
+});
+
+test("CopilotUsageProvider joins the AI Credits window with in-window OTEL usage", async () => {
+  await withTempRoot(async (root) => {
+    const inWindowSec = Math.floor(Date.UTC(2026, 5, 15) / 1000); // 2026-06-15
+    const beforeWindowSec = Math.floor(Date.UTC(2026, 4, 15) / 1000); // 2026-05-15 (outside)
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [inWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "claude-haiku-4-5-20251001",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 100000,
+          "gen_ai.usage.cache_read.input_tokens": 20000,
+          "gen_ai.usage.cache_creation.input_tokens": 10000,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      }),
+      JSON.stringify({
+        hrTime: [beforeWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 500,
+          "gen_ai.usage.output_tokens": 50
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [
+            { id: "chat", label: "Chat", unlimited: true },
+            { id: "completions", label: "Completions", unlimited: true },
+            {
+              id: "premium_interactions",
+              label: "Premium",
+              total: 1500,
+              used: 28.2,
+              remaining: 1471.8,
+              usedPercent: 1.9,
+              remainingPercent: 98.1
+            }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    // All-time summary counts BOTH events; the window must not restrict it.
+    assert.equal(stats.summary.tokenEvents, 2);
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows.length, 0); // chat/completions unlimited
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.limitId, "premium_interactions");
+    assert.equal(row.modelType, "AI Credits");
+    assert.equal(row.startTimeUtcIso, "2026-06-01T00:00:00.000Z");
+    assert.equal(row.endTimeUtcIso, "2026-07-01T00:00:00.000Z");
+    assert.equal(row.windowMinutes, 30 * 24 * 60); // June = 30 days
+    assert.equal(row.maxUsedPercent, 1.9); // official quota percentage from the API
+    // Totals = only the in-window OTEL event.
+    assert.equal(row.eventCount, 1);
+    assert.equal(row.totals.inputTokens, 80000);
+    assert.equal(row.totals.cacheReadInputTokens, 20000);
+    assert.equal(row.totals.cacheWriteInputTokens, 10000);
+    assert.ok(row.totals.estimatedCredits > 0); // API-equivalent cost from local pricing
+    assert.notEqual(row.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((w) => w.includes("cache token counts")),
+      false
+    ); // cache attributes were present, so no cache warning
+  });
+});
+
+test("CopilotUsageProvider warns when cache tokens are missing so cost cannot be estimated", async () => {
+  await withTempRoot(async (root) => {
+    const inWindowSec = Math.floor(Date.UTC(2026, 5, 15) / 1000);
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [inWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 1000,
+          "gen_ai.usage.output_tokens": 100
+        } // no cache_read / cache_write attributes
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [{ id: "premium_interactions", label: "Premium", total: 1500, used: 28.2, usedPercent: 1.9 }]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.eventCount, 1);
+    assert.equal(row.totals.estimatedCreditsStatus, "unavailable"); // cost unknown
+    assert.equal(
+      stats.warnings.some((w) => w.includes("cache token counts")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider flags incomplete telemetry when official usage has no local events", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [
+            { id: "premium_interactions", label: "Premium", total: 1500, used: 28.2, usedPercent: 1.9 }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.eventCount, 0);
+    // Not a trusted $0 — cost is marked unknown for the UI to render "-".
+    assert.equal(row.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((w) => w.includes("Local token totals are incomplete")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider shows only metered quota buckets, not unlimited ones", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          quotas: [
+            { id: "chat", label: "Chat", unlimited: true, usedPercent: 0, remainingPercent: 100 },
+            { id: "completions", label: "Completions", unlimited: true, usedPercent: 0, remainingPercent: 100 },
+            { id: "premium_interactions", label: "Premium", usedPercent: 2, remainingPercent: 98 }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    const allWindows = [...stats.primaryLimitWindows, ...stats.secondaryLimitWindows];
+    assert.deepEqual(allWindows.map((w) => w.limitId), ["premium_interactions"]);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 2);
+    // Unlimited buckets are not "unknown" — they must not produce that warning.
+    assert.equal(
+      stats.warnings.some((w) => w.includes("quota usage is unknown")),
+      false
     );
   });
 });

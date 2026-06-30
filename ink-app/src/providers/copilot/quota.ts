@@ -18,11 +18,15 @@ export type CopilotQuota = {
   used?: number;
   usedPercent?: number;
   remainingPercent?: number;
+  /** True for buckets the plan does not meter (e.g. chat/completions on paid plans). */
+  unlimited?: boolean;
 };
 
 export type CopilotQuotaInfo = {
   plan?: string;
   resetAt?: string;
+  /** True when the plan meters AI Credits (token-based billing). */
+  tokenBasedBilling?: boolean;
   quotas: CopilotQuota[];
 };
 
@@ -192,8 +196,12 @@ export function parseCopilotQuota(raw: unknown): CopilotQuotaInfo {
   if (plan !== undefined) {
     info.plan = plan;
   }
+  if (root.token_based_billing === true) {
+    info.tokenBasedBilling = true;
+  }
+  // Prefer the precise UTC reset timestamp; fall back to the date-only field.
   const resetAt = usePaid
-    ? asString(root.quota_reset_date)
+    ? asString(root.quota_reset_date_utc) ?? asString(root.quota_reset_date)
     : asString(root.limited_user_reset_date);
   if (resetAt !== undefined) {
     info.resetAt = resetAt;
@@ -212,13 +220,20 @@ function parsePaidQuotas(snapshots: Record<string, unknown>): CopilotQuota[] {
       continue;
     }
 
+    if (snapshot.unlimited === true) {
+      quota.unlimited = true;
+    }
+
     const total = finiteNonNegative(snapshot.entitlement);
     if (total !== undefined) {
       quota.total = total;
     }
 
     const percentRemaining = finiteNonNegative(snapshot.percent_remaining);
-    const rawRemaining = finiteNonNegative(snapshot.remaining);
+    // `quota_remaining` carries the precise (often fractional) balance; `remaining`
+    // is a rounded integer. Prefer the precise one for credit math.
+    const rawRemaining =
+      finiteNonNegative(snapshot.quota_remaining) ?? finiteNonNegative(snapshot.remaining);
 
     if (percentRemaining !== undefined) {
       quota.remainingPercent = clampPercent(percentRemaining);
@@ -301,4 +316,25 @@ function clampPercent(value: number): number {
     return 0;
   }
   return Math.min(100, Math.max(0, value));
+}
+
+/**
+ * Subtract one calendar month from a date in UTC, clamping the day so that, e.g.
+ * 2026-03-31 → 2026-02-28 and 2024-03-31 → 2024-02-29. A reset on the first of a
+ * month maps to the first of the previous month. Used to derive the start of the
+ * current monthly billing window from its reset (end) date.
+ */
+export function subtractOneUtcCalendarMonth(value: Date): Date {
+  const result = new Date(value);
+  const originalDay = result.getUTCDate();
+
+  result.setUTCDate(1);
+  result.setUTCMonth(result.getUTCMonth() - 1);
+
+  const daysInTargetMonth = new Date(
+    Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)
+  ).getUTCDate();
+
+  result.setUTCDate(Math.min(originalDay, daysInTargetMonth));
+  return result;
 }

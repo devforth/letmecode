@@ -4,10 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { parseCopilotQuota, getCopilotUserInfo } from "../dist/providers/copilot/quota.js";
+import {
+  parseCopilotQuota,
+  getCopilotUserInfo,
+  subtractOneUtcCalendarMonth
+} from "../dist/providers/copilot/quota.js";
 import { parseCopilotOtelFiles } from "../dist/providers/copilot/otel/parse.js";
 import { discoverCopilotOtelFiles } from "../dist/providers/copilot/otel/discover.js";
-import { aggregateCopilotUsage } from "../dist/providers/copilot/usage/aggregate.js";
+import {
+  aggregateCopilotUsage,
+  filterCopilotUsageEvents
+} from "../dist/providers/copilot/usage/aggregate.js";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -164,6 +171,25 @@ test("quota-parser guards remaining greater than total", () => {
   assert.equal(info.quotas[0].remaining, 300);
   assert.equal(info.quotas[0].used, 0);
   assert.equal(info.quotas[0].usedPercent, 0);
+});
+
+test("quota-parser flags unlimited buckets and meters only the real limit", () => {
+  // Real individual-plan shape: chat/completions are unlimited; only
+  // premium_interactions is metered.
+  const info = parseCopilotQuota({
+    copilot_plan: "individual",
+    quota_reset_date: "2026-07-01",
+    quota_snapshots: {
+      chat: { unlimited: true, percent_remaining: 100, entitlement: 0, remaining: 0 },
+      completions: { unlimited: true, percent_remaining: 100, entitlement: 0, remaining: 0 },
+      premium_interactions: { unlimited: false, percent_remaining: 98.1, entitlement: 1500, remaining: 1471 }
+    }
+  });
+  const quotas = new Map(info.quotas.map((q) => [q.id, q]));
+  assert.equal(quotas.get("chat").unlimited, true);
+  assert.equal(quotas.get("completions").unlimited, true);
+  assert.equal(quotas.get("premium_interactions").unlimited, undefined);
+  assert.ok(Math.abs(quotas.get("premium_interactions").usedPercent - 1.9) < 1e-9);
 });
 
 // ─── parse ─────────────────────────────────────────────────────────────────
@@ -449,30 +475,26 @@ test("aggregate preserves the full cache-read bucket for cache-only events", () 
   assert.equal(totals.totalTokens, 500);
 });
 
-test("aggregate marks unknown pricing and warns", () => {
+test("aggregate marks unknown pricing as unavailable", () => {
   const aggregated = aggregateCopilotUsage([
     usageEvent({ modelId: "gpt-4.1", inputTokens: 100, cacheReadInputTokens: 5, outputTokens: 10 })
   ]);
   const totals = byModel(aggregated).get("gpt-4.1");
   assert.equal(totals.estimatedCredits, 0);
   assert.equal(totals.estimatedCreditsStatus, "unavailable");
-  assert.equal(
-    aggregated.warnings.some((w) => w.includes("Pricing is unavailable for models: gpt-4.1")),
-    true
-  );
 });
 
-test("aggregate zero-rates non-billable models without a pricing warning", () => {
+test("aggregate zero-rates non-billable models as known", () => {
   const aggregated = aggregateCopilotUsage([
-    usageEvent({ modelId: "copilot-nes", inputTokens: 1000, outputTokens: 20 })
+    usageEvent({ modelId: "copilot-nes", inputTokens: 1000, outputTokens: 20 }),
+    usageEvent({ modelId: "copilot-suggestions-himalia-001", inputTokens: 2000, outputTokens: 30 }),
+    usageEvent({ modelId: "copilot-suggestion-2026-01-01", inputTokens: 500, outputTokens: 5 })
   ]);
-  const totals = byModel(aggregated).get("copilot-nes");
-  assert.equal(totals.estimatedCredits, 0);
-  assert.equal(totals.estimatedCreditsStatus, "known");
-  assert.equal(
-    aggregated.warnings.some((w) => w.includes("Pricing is unavailable")),
-    false
-  );
+  for (const id of ["copilot-nes", "copilot-suggestions-himalia-001", "copilot-suggestion-2026-01-01"]) {
+    const totals = byModel(aggregated).get(id);
+    assert.equal(totals.estimatedCredits, 0);
+    assert.equal(totals.estimatedCreditsStatus, "known");
+  }
 });
 
 test("aggregate reports unavailable credits when cache data is missing", () => {
@@ -488,10 +510,6 @@ test("aggregate reports unavailable credits when cache data is missing", () => {
   const totals = byModel(aggregated).get("gpt-5-mini");
   assert.equal(totals.estimatedCredits, 0);
   assert.equal(totals.estimatedCreditsStatus, "unavailable");
-  assert.equal(
-    aggregated.warnings.some((w) => w.includes("cache token attributes are unavailable")),
-    true
-  );
 });
 
 test("aggregate groups by model and by day", () => {
@@ -503,6 +521,60 @@ test("aggregate groups by model and by day", () => {
   assert.equal(aggregated.modelUsage.length, 2);
   assert.equal(aggregated.dayUsage.length, 2);
   assert.equal(aggregated.tokenEvents, 3);
+});
+
+// ─── billing window ──────────────────────────────────────────────────────────
+
+const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+test("subtractOneUtcCalendarMonth maps a reset on the 1st to the previous 1st", () => {
+  const start = subtractOneUtcCalendarMonth(new Date("2026-07-01T00:00:00.000Z"));
+  assert.equal(start.toISOString(), "2026-06-01T00:00:00.000Z");
+});
+
+test("subtractOneUtcCalendarMonth clamps short months and handles leap years", () => {
+  assert.equal(iso(subtractOneUtcCalendarMonth(new Date("2026-03-31T00:00:00Z")).getTime()), "2026-02-28");
+  assert.equal(iso(subtractOneUtcCalendarMonth(new Date("2024-03-31T00:00:00Z")).getTime()), "2024-02-29");
+  assert.equal(iso(subtractOneUtcCalendarMonth(new Date("2026-07-31T00:00:00Z")).getTime()), "2026-06-30");
+});
+
+test("filterCopilotUsageEvents uses a half-open interval [start, end)", () => {
+  const start = Date.UTC(2026, 5, 1); // 2026-06-01
+  const end = Date.UTC(2026, 6, 1); // 2026-07-01
+  const events = [
+    usageEvent({ lineNumber: 1, timestampMs: start }), // at start: included
+    usageEvent({ lineNumber: 2, timestampMs: end - 1 }), // just before end: included
+    usageEvent({ lineNumber: 3, timestampMs: end }), // at end: excluded (next window)
+    usageEvent({ lineNumber: 4, timestampMs: start - 1 }) // before start: excluded
+  ];
+  const inWindow = filterCopilotUsageEvents(events, start, end);
+  assert.deepEqual(inWindow.map((e) => e.lineNumber).sort(), [1, 2]);
+});
+
+test("window aggregation reflects only in-window OTEL token usage and pricing", () => {
+  const start = Date.UTC(2026, 5, 1);
+  const end = Date.UTC(2026, 6, 1);
+  const events = [
+    usageEvent({
+      modelId: "claude-haiku-4-5-20251001",
+      timestampMs: start + 1000,
+      inputTokens: 100000,
+      cacheReadInputTokens: 20000,
+      cacheWriteInputTokens: 10000,
+      outputTokens: 1000
+    }),
+    usageEvent({ modelId: "gpt-5-mini", timestampMs: end + 5000, inputTokens: 999, outputTokens: 999 })
+  ];
+  const windowUsage = aggregateCopilotUsage(filterCopilotUsageEvents(events, start, end));
+  assert.equal(windowUsage.tokenEvents, 1);
+  assert.equal(windowUsage.summaryTotals.inputTokens, 80000); // uncached = 100000 - cacheRead
+  assert.equal(windowUsage.summaryTotals.cacheReadInputTokens, 20000);
+  assert.equal(windowUsage.summaryTotals.cacheWriteInputTokens, 10000);
+  assert.ok(windowUsage.summaryTotals.estimatedCredits > 0); // priced model
+  assert.notEqual(windowUsage.summaryTotals.estimatedCreditsStatus, "unavailable");
+
+  // All-time aggregation is NOT restricted to the window.
+  assert.equal(aggregateCopilotUsage(events).tokenEvents, 2);
 });
 
 // ─── discover ─────────────────────────────────────────────────────────────

@@ -34,7 +34,11 @@ export const RATE_CARD: Record<string, UsageRate> = {
  * suggestions). These are zero-rated rather than "unknown" so they never turn
  * aggregate credit totals unknown.
  */
-export const NON_BILLABLE_MODEL_PREFIXES = ["copilot-nes", "copilot-suggestion"] as const;
+export const NON_BILLABLE_MODEL_PREFIXES = [
+  "copilot-nes",
+  "copilot-suggestion",
+  "copilot-suggestions"
+] as const;
 
 /**
  * Canonicalize a Copilot model id. The exporter already emits stable,

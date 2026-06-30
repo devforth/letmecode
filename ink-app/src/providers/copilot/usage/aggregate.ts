@@ -24,11 +24,23 @@ export type CopilotAggregatedUsage = {
   summaryTotals: UsageTotals;
   distinctModels: string[];
   tokenEvents: number;
-  warnings: string[];
 };
 
-const CACHE_UNAVAILABLE_WARNING =
-  "Copilot cache token attributes are unavailable for some events; cached/non-cached tokens and estimated credits are shown as unknown.";
+/**
+ * Select events whose timestamp falls in the half-open interval
+ * `[startTimeMs, endTimeMs)`. An event exactly at `endTimeMs` belongs to the
+ * next window and is excluded. Used to scope OTEL usage to a billing window
+ * without re-parsing — the same events feed all-time and per-window rollups.
+ */
+export function filterCopilotUsageEvents(
+  events: CopilotUsageEvent[],
+  startTimeMs: number,
+  endTimeMs: number
+): CopilotUsageEvent[] {
+  return events.filter(
+    (event) => event.timestampMs >= startTimeMs && event.timestampMs < endTimeMs
+  );
+}
 
 /**
  * Aggregate normalized Copilot usage events into per-model and per-day rollups
@@ -39,7 +51,6 @@ const CACHE_UNAVAILABLE_WARNING =
 export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggregatedUsage {
   const byModel = new Map<string, UsageTotals>();
   const byDay = createDailyUsageAggregates();
-  const unratedModels = new Set<string>();
 
   for (const event of events) {
     const modelId = normalizeCopilotModelId(event.modelId);
@@ -61,9 +72,6 @@ export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggre
 
     const nonBillable = isNonBillableCopilotModel(modelId);
     const rate = nonBillable ? undefined : rateForCopilotModel(modelId, event.inputTokens);
-    if (!nonBillable && rate === undefined) {
-      unratedModels.add(modelId);
-    }
 
     const creditsKnown = nonBillable || (hasCacheInfo && rate !== undefined);
     const estimatedCreditsStatus: UsageValueStatus = creditsKnown ? "known" : "unavailable";
@@ -109,24 +117,11 @@ export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggre
   const distinctModels = modelUsage.map((row) => row.modelId);
   const dayUsage = buildDailyUsageRows(byDay);
 
-  const warnings: string[] = [];
-  if (unratedModels.size > 0) {
-    const sorted = [...unratedModels].sort();
-    warnings.push(`Pricing is unavailable for models: ${sorted.join(", ")}.`);
-  }
-  if (
-    summaryTotals.cacheReadStatus === "unavailable" ||
-    summaryTotals.cacheWriteStatus === "unavailable"
-  ) {
-    warnings.push(CACHE_UNAVAILABLE_WARNING);
-  }
-
   return {
     modelUsage,
     dayUsage,
     summaryTotals,
     distinctModels,
-    tokenEvents: events.length,
-    warnings
+    tokenEvents: events.length
   };
 }
