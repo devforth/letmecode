@@ -1,6 +1,7 @@
 import {
   addUsageTotals,
   sumUsageTotals,
+  type DailyUsageRow,
   type ModelUsageRow,
   type UsageTotals,
   type UsageValueStatus
@@ -16,7 +17,15 @@ import {
   rateForCopilotModel
 } from "../models.js";
 import type { CopilotUsageEvent } from "../otel/parse.js";
-import type { CopilotAggregatedUsage } from "../types.js";
+
+export type CopilotAggregatedUsage = {
+  modelUsage: ModelUsageRow[];
+  dayUsage: DailyUsageRow[];
+  summaryTotals: UsageTotals;
+  distinctModels: string[];
+  tokenEvents: number;
+  warnings: string[];
+};
 
 const CACHE_UNAVAILABLE_WARNING =
   "Copilot cache token attributes are unavailable for some events; cached/non-cached tokens and estimated credits are shown as unknown.";

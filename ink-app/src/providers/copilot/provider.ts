@@ -7,7 +7,6 @@ import {
   type ProviderStats,
   type ProviderStatsOptions
 } from "../contract.js";
-import { getCopilotUserInfo } from "./api/user-info.js";
 import {
   configureCopilotVsCodeLogging,
   getCopilotCliOtelEnv,
@@ -16,18 +15,28 @@ import {
 import { discoverCopilotOtelFiles } from "./otel/discover.js";
 import { parseCopilotOtelFiles } from "./otel/parse.js";
 import {
-  COPILOT_PRIMARY_QUOTA_IDS,
+  getCopilotUserInfo,
   type CopilotQuota,
   type CopilotQuotaInfo,
   type CopilotUserInfoResult
-} from "./types.js";
+} from "./quota.js";
 import { aggregateCopilotUsage } from "./usage/aggregate.js";
 
 export { configureCopilotVsCodeLogging, getCopilotCliOtelEnv };
 export type {
   CopilotVsCodeLoggingOptions,
   CopilotVsCodeLoggingResult
-} from "./types.js";
+} from "./otel/configure.js";
+
+/**
+ * Quota buckets that map to the primary (most prominent) limit windows in the
+ * dashboard. Everything else is surfaced as a secondary window.
+ */
+const COPILOT_PRIMARY_QUOTA_IDS: ReadonlySet<string> = new Set([
+  "premium_interactions",
+  "chat",
+  "completions"
+]);
 
 export type CopilotUsageProviderOptions = {
   root?: string;

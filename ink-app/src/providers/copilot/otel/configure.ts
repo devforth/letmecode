@@ -3,10 +3,17 @@ import os from "node:os";
 import path from "node:path";
 import { applyEdits, modify, parse } from "jsonc-parser";
 import { asRecord } from "../../limits.js";
-import type {
-  CopilotVsCodeLoggingOptions,
-  CopilotVsCodeLoggingResult
-} from "../types.js";
+
+export type CopilotVsCodeLoggingOptions = {
+  root?: string;
+  settingsPath?: string;
+};
+
+export type CopilotVsCodeLoggingResult = {
+  settingsPath: string;
+  outfile: string;
+  changed: boolean;
+};
 
 const VSCODE_OTEL_SETTINGS = {
   "github.copilot.chat.otel.enabled": true,
@@ -91,37 +98,21 @@ export async function isCopilotVsCodeLoggingEnabled(root: string, outfile: strin
 }
 
 /**
- * For each VS Code user root (stable + insiders), read settings.json and report
+ * For each VS Code user root (stable + Insiders), read settings.json and report
  * the configured Copilot OTEL outfile when file export is enabled. Used by the
  * provider to detect "logging configured but the file has not been created yet".
- *
- * The `source` is derived from WHICH settings root the outfile was configured in
- * (index 0 = stable, index 1 = Insiders), not from the outfile path itself: both
- * editors are typically configured to export to the same `~/.copilot/otel`
- * directory, so the path alone cannot distinguish them.
  */
-export type ConfiguredCopilotOutfile = {
-  path: string;
-  enabled: boolean;
-  source: "vscode" | "vscode-insiders";
-};
-
 export async function getConfiguredCopilotOutfiles(
   root: string
-): Promise<ConfiguredCopilotOutfile[]> {
-  const results: ConfiguredCopilotOutfile[] = [];
-  const userRoots = getVsCodeUserRoots(root);
-  for (let index = 0; index < userRoots.length; index += 1) {
-    const settings = await readJsonSettings(path.join(userRoots[index], "settings.json"));
+): Promise<{ path: string; enabled: boolean }[]> {
+  const results: { path: string; enabled: boolean }[] = [];
+  for (const userRoot of getVsCodeUserRoots(root)) {
+    const settings = await readJsonSettings(path.join(userRoot, "settings.json"));
     const enabled = settings["github.copilot.chat.otel.enabled"] === true;
     const exporterType = settings["github.copilot.chat.otel.exporterType"];
     const outfile = settings["github.copilot.chat.otel.outfile"];
     if (enabled && exporterType === "file" && typeof outfile === "string") {
-      results.push({
-        path: path.resolve(outfile),
-        enabled: true,
-        source: index === 0 ? "vscode" : "vscode-insiders"
-      });
+      results.push({ path: path.resolve(outfile), enabled: true });
     }
   }
 

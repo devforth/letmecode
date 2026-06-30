@@ -2,8 +2,8 @@ import fs from "node:fs";
 import readline from "node:readline";
 
 import { asRecord } from "../../limits.js";
-import type { CopilotOtelFile } from "../types.js";
 import type { UsageValueStatus } from "../../contract.js";
+import type { CopilotOtelFile } from "./discover.js";
 
 const INPUT_KEY = "gen_ai.usage.input_tokens";
 const OUTPUT_KEY = "gen_ai.usage.output_tokens";

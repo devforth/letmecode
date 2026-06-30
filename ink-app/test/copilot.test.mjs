@@ -4,8 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { parseCopilotQuota } from "../dist/providers/copilot/api/quota-parser.js";
-import { getCopilotUserInfo } from "../dist/providers/copilot/api/user-info.js";
+import { parseCopilotQuota, getCopilotUserInfo } from "../dist/providers/copilot/quota.js";
 import { parseCopilotOtelFiles } from "../dist/providers/copilot/otel/parse.js";
 import { discoverCopilotOtelFiles } from "../dist/providers/copilot/otel/discover.js";
 import { aggregateCopilotUsage } from "../dist/providers/copilot/usage/aggregate.js";
@@ -40,9 +39,7 @@ async function parseCopilotRecords(records) {
     return await parseCopilotOtelFiles([
       {
         path: target,
-        source: "copilot-cli",
-        modifiedAtMs: records[0]?.fileModifiedAtMs ?? 1_700_000_000_000,
-        sizeBytes: 0
+        modifiedAtMs: records[0]?.fileModifiedAtMs ?? 1_700_000_000_000
       }
     ]);
   } finally {
@@ -582,7 +579,6 @@ test("discover deduplicates a path found via env and directory scan", async () =
       env: { COPILOT_OTEL_FILE_EXPORTER_PATH: file }
     });
     assert.equal(result.files.length, 1);
-    assert.equal(result.files[0].source, "environment");
     assert.equal(result.files[0].path, path.resolve(file));
   });
 });

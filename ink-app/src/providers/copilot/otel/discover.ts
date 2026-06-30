@@ -1,78 +1,61 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import type {
-  CopilotOtelDiscoveryResult,
-  CopilotOtelFile,
-  CopilotOtelFileSource
-} from "../types.js";
-import {
-  getConfiguredCopilotOutfiles,
-  getCopilotOtelPath
-} from "./configure.js";
+import { getConfiguredCopilotOutfiles, getCopilotOtelPath } from "./configure.js";
 
 export type DiscoverCopilotOtelFilesOptions = {
   root?: string;
   env?: NodeJS.ProcessEnv;
-  explicitPaths?: string[];
 };
 
-type Candidate = {
+export type CopilotOtelFile = {
   path: string;
-  source: CopilotOtelFileSource;
+  modifiedAtMs: number;
 };
 
-// More specific sources win when the same resolved path appears from multiple
-// origins. Higher number = more specific.
-const SOURCE_PRIORITY: Record<CopilotOtelFileSource, number> = {
-  explicit: 5,
-  environment: 4,
-  vscode: 3,
-  "vscode-insiders": 3,
-  "copilot-cli": 2,
-  unknown: 1
+export type CopilotOtelDiscoveryResult = {
+  files: CopilotOtelFile[];
+  warnings: string[];
 };
 
 function dedupKey(resolvedPath: string): string {
   return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
 }
 
-function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string";
-}
-
 function isPermissionError(error: unknown): boolean {
-  return isErrnoException(error) && (error.code === "EACCES" || error.code === "EPERM");
+  const code =
+    error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+  return code === "EACCES" || code === "EPERM";
 }
 
+/**
+ * Discover the Copilot OTEL JSONL files to read, from three sources:
+ *   1. the `COPILOT_OTEL_FILE_EXPORTER_PATH` env var (Copilot CLI),
+ *   2. the `outfile` configured in VS Code / Insiders settings, and
+ *   3. every `*.jsonl` in `<root>/.copilot/otel/`.
+ * This covers the VS Code extension, a standalone Copilot CLI, and the CLI run
+ * from VS Code, on Linux/Windows/macOS. Paths are resolved and de-duplicated
+ * (case-insensitively on Windows); the first occurrence wins.
+ */
 export async function discoverCopilotOtelFiles(
   options?: DiscoverCopilotOtelFilesOptions
 ): Promise<CopilotOtelDiscoveryResult> {
   const root = options?.root ?? process.cwd();
   const env = options?.env ?? process.env;
-  const explicitPaths = options?.explicitPaths ?? [];
 
   const warnings: string[] = [];
-  const candidates: Candidate[] = [];
+  const candidatePaths: string[] = [];
 
-  // 1. Explicit paths.
-  for (const explicit of explicitPaths) {
-    if (typeof explicit === "string" && explicit.length > 0) {
-      candidates.push({ path: explicit, source: "explicit" });
-    }
-  }
-
-  // 2. Environment exporter path.
+  // 1. Environment exporter path.
   const envPath = env.COPILOT_OTEL_FILE_EXPORTER_PATH;
   if (typeof envPath === "string" && envPath.length > 0) {
-    candidates.push({ path: envPath, source: "environment" });
+    candidatePaths.push(envPath);
   }
 
-  // 3. VS Code / Insiders configured outfiles.
+  // 2. VS Code / Insiders configured outfiles.
   try {
-    const configured = await getConfiguredCopilotOutfiles(root);
-    for (const entry of configured) {
-      candidates.push({ path: entry.path, source: entry.source });
+    for (const entry of await getConfiguredCopilotOutfiles(root)) {
+      candidatePaths.push(entry.path);
     }
   } catch (error) {
     if (isPermissionError(error)) {
@@ -81,7 +64,7 @@ export async function discoverCopilotOtelFiles(
     // Missing settings or any other read issue is not an error here.
   }
 
-  // 4. Directory scan of <root>/.copilot/otel/*.jsonl (copilot-cli).
+  // 3. Directory scan of <root>/.copilot/otel/*.jsonl.
   const otelDir = path.dirname(getCopilotOtelPath(root));
   try {
     const entries = await fs.readdir(otelDir, { withFileTypes: true });
@@ -89,10 +72,9 @@ export async function discoverCopilotOtelFiles(
       if (!entry.isFile() && !entry.isSymbolicLink()) {
         continue;
       }
-      if (!entry.name.toLowerCase().endsWith(".jsonl")) {
-        continue;
+      if (entry.name.toLowerCase().endsWith(".jsonl")) {
+        candidatePaths.push(path.join(otelDir, entry.name));
       }
-      candidates.push({ path: path.join(otelDir, entry.name), source: "copilot-cli" });
     }
   } catch (error) {
     if (isPermissionError(error)) {
@@ -101,55 +83,30 @@ export async function discoverCopilotOtelFiles(
     // ENOENT (missing directory) and similar are not errors — skip.
   }
 
-  // Resolve + dedup, keeping the most specific source on collision.
-  const bySource = new Map<string, Candidate & { resolved: string }>();
-  for (const candidate of candidates) {
-    const resolved = path.resolve(candidate.path);
-    const key = dedupKey(resolved);
-    const existing = bySource.get(key);
-    if (!existing || SOURCE_PRIORITY[candidate.source] > SOURCE_PRIORITY[existing.source]) {
-      bySource.set(key, { ...candidate, resolved });
-    }
-  }
-
-  // Filter to readable regular files and collect stat metadata.
+  // Resolve, de-dup by path (first wins), and keep readable regular files.
+  const seen = new Set<string>();
   const files: CopilotOtelFile[] = [];
-  for (const candidate of bySource.values()) {
-    let isFile = false;
-    let modifiedAtMs = 0;
-    let sizeBytes = 0;
-    try {
-      const stats = await fs.stat(candidate.resolved);
-      isFile = stats.isFile();
-      modifiedAtMs = stats.mtimeMs;
-      sizeBytes = stats.size;
-    } catch (error) {
-      if (isPermissionError(error)) {
-        warnings.push(`Failed to read Copilot OTEL file ${candidate.resolved}: permission denied.`);
-      }
-      // Missing file or other stat failures simply drop the candidate.
+  for (const candidate of candidatePaths) {
+    const resolved = path.resolve(candidate);
+    const key = dedupKey(resolved);
+    if (seen.has(key)) {
       continue;
     }
-
-    if (!isFile) {
-      continue;
-    }
+    seen.add(key);
 
     try {
-      await fs.access(candidate.resolved, fs.constants.R_OK);
+      const stats = await fs.stat(resolved);
+      if (!stats.isFile()) {
+        continue;
+      }
+      await fs.access(resolved, fs.constants.R_OK);
+      files.push({ path: resolved, modifiedAtMs: stats.mtimeMs });
     } catch (error) {
       if (isPermissionError(error)) {
-        warnings.push(`Failed to read Copilot OTEL file ${candidate.resolved}: permission denied.`);
+        warnings.push(`Failed to read Copilot OTEL file ${resolved}: permission denied.`);
       }
-      continue;
+      // Missing file or other failures simply drop the candidate.
     }
-
-    files.push({
-      path: candidate.resolved,
-      source: candidate.source,
-      modifiedAtMs,
-      sizeBytes
-    });
   }
 
   // Stable sort by modifiedAtMs ASC, then path ASC.

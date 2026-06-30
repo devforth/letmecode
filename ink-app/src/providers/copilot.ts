@@ -10,4 +10,4 @@ export type { CopilotUsageProviderOptions } from "./copilot/provider.js";
 export type {
   CopilotVsCodeLoggingOptions,
   CopilotVsCodeLoggingResult
-} from "./copilot/types.js";
+} from "./copilot/provider.js";
