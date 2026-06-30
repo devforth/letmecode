@@ -18,6 +18,11 @@ import {
 } from "../dist/providers/copilot.js";
 import { createProviders } from "../dist/providers/index.js";
 
+// Keep the Copilot provider tests hermetic: never resolve a real GitHub token or
+// hit the network for quota. OTEL-focused tests inject "no quota"; quota-focused
+// tests inject their own fetchUserInfo.
+const copilotNoQuota = async () => ({ quotaInfo: undefined, warnings: [] });
+
 async function withTempRoot(run) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "letmecode-codex-"));
   try {
@@ -822,7 +827,7 @@ test("CopilotUsageProvider parses only VS Code OTEL usage and ignores old sessio
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     assert.equal(stats.providerId, "copilot");
     assert.equal(stats.providerLabel, "Copilot");
     assert.equal(stats.summary.filesScanned, 1);
@@ -870,7 +875,7 @@ test("CopilotUsageProvider ignores generic OTLP log envelopes", async () => {
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 0);
@@ -906,7 +911,7 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.summary.totals.inputTokens, 0);
@@ -915,7 +920,7 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
   });
 });
 
-test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
+test("CopilotUsageProvider prefers completion time (startTime over hrTime)", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
@@ -930,11 +935,16 @@ test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
+    // startTime (1782130578) wins over hrTime (1782206354), which are on
+    // different days; the day bucket reflects the startTime day.
+    const startDay = new Date(1782130578 * 1000).toISOString().slice(0, 10);
+    const hrDay = new Date(1782206354 * 1000).toISOString().slice(0, 10);
+    assert.notEqual(startDay, hrDay);
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
-    assert.equal(stats.dayUsage[0].dayKey, "2026-06-23");
+    assert.equal(stats.dayUsage[0].dayKey, startDay);
   });
 });
 
@@ -953,7 +963,7 @@ test("CopilotUsageProvider parses file exporter hrTime timestamps", async () => 
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
@@ -975,7 +985,7 @@ test("CopilotUsageProvider estimates credits when Copilot telemetry omits premiu
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5.4-2026-03-01");
@@ -983,10 +993,6 @@ test("CopilotUsageProvider estimates credits when Copilot telemetry omits premiu
     assert.equal(stats.modelUsage[0].totals.estimatedCreditsStatus, "unavailable");
     assert.equal(stats.modelUsage[0].totals.cacheReadStatus, "unavailable");
     assert.equal(stats.modelUsage[0].totals.cacheWriteStatus, "unavailable");
-    assert.equal(
-      stats.warnings.some((warning) => warning.includes("cache token attributes are unavailable")),
-      true
-    );
   });
 });
 
@@ -1005,7 +1011,7 @@ test("CopilotUsageProvider estimates credits for GPT-5 mini OTEL usage", async (
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5-mini");
@@ -1030,16 +1036,18 @@ test("CopilotUsageProvider reads dotted cache attributes and Claude cache-write 
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
+    // Reported input INCLUDES cache-read but NOT cache-write, so uncached input
+    // subtracts only cache-read (100000 - 20000); cache-write is additive.
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 20000);
-    assert.equal(stats.summary.totals.inputTokens, 70000);
+    assert.equal(stats.summary.totals.inputTokens, 80000);
     assert.equal(stats.summary.totals.cacheWriteInputTokens, 10000);
     assert.equal(stats.summary.totals.outputTokens, 1000);
     assert.equal(stats.summary.totals.reasoningOutputTokens, 1000);
-    assert.equal(stats.summary.totals.totalTokens, 101000);
-    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 8.95) < 0.0000001);
+    assert.equal(stats.summary.totals.totalTokens, 111000);
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 9.95) < 0.0000001);
   });
 });
 
@@ -1066,7 +1074,7 @@ test("CopilotUsageProvider leaves GPT-4o mini credits unknown and estimates Clau
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(byModel.get("gpt-4o-mini-2024-07-18")?.estimatedCredits, 0);
@@ -1099,7 +1107,7 @@ test("CopilotUsageProvider treats Copilot NES and suggestion models as non-billa
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(stats.summary.totals.inputTokens, 3000);
@@ -1134,7 +1142,7 @@ test("CopilotUsageProvider applies long-context rates for large GPT-5.4 and GPT-
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCredits, 0);
@@ -1157,7 +1165,7 @@ test("CopilotUsageProvider applies model-specific long-context thresholds", asyn
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.totals.estimatedCredits, 0);
     assert.equal(stats.summary.totals.estimatedCreditsStatus, "unavailable");
@@ -1170,6 +1178,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       JSON.stringify({
         hrTime: [1782130578, 148000000],
         attributes: {
+          "gen_ai.trace.id": "trace-agent-1",
           "gen_ai.response.model": "gpt-5.4-2026-03-01",
           "gen_ai.operation.name": "chat",
           "gen_ai.usage.input_tokens": 84275,
@@ -1179,6 +1188,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       JSON.stringify({
         hrTime: [1782130578, 154000000],
         attributes: {
+          "gen_ai.trace.id": "trace-agent-1",
           "event.name": "copilot_chat.agent.turn",
           "gen_ai.operation.name": "invoke_agent",
           "turn.index": 0,
@@ -1188,8 +1198,10 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
+    // The invoke_agent record is an aggregate (agent-summary-span) sharing the
+    // chat span's trace, so it is suppressed; only the granular chat span counts.
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.summary.totals.inputTokens, 84275);
     assert.deepEqual(stats.modelUsage.map((row) => row.modelId), ["gpt-5.4-2026-03-01"]);
@@ -1272,13 +1284,282 @@ test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL fil
       "utf8"
     );
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("has not been created yet")),
       true
     );
+  });
+});
+
+test("CopilotUsageProvider returns OTEL usage even when quota loading fails", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 120,
+          "gen_ai.usage.output_tokens": 12
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => {
+        throw new Error("quota down");
+      }
+    }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 120);
+    assert.equal(stats.primaryLimitWindows.length, 0);
+    assert.equal(
+      stats.warnings.some((w) => w.includes("plan and quota are unavailable")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider returns quota windows even when no OTEL files exist", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "copilot_pro",
+          quotas: [{ id: "chat", label: "Chat", usedPercent: 30, remainingPercent: 70 }]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.deepEqual(stats.summary.distinctPlanTypes, ["copilot_pro"]);
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].limitId, "chat");
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 30);
+    assert.equal(
+      stats.warnings.some((w) => w.includes("No Copilot OTEL files were found")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider joins the AI Credits window with in-window OTEL usage", async () => {
+  await withTempRoot(async (root) => {
+    const inWindowSec = Math.floor(Date.UTC(2026, 5, 15) / 1000); // 2026-06-15
+    const beforeWindowSec = Math.floor(Date.UTC(2026, 4, 15) / 1000); // 2026-05-15 (outside)
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [inWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "claude-haiku-4-5-20251001",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 100000,
+          "gen_ai.usage.cache_read.input_tokens": 20000,
+          "gen_ai.usage.cache_creation.input_tokens": 10000,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      }),
+      JSON.stringify({
+        hrTime: [beforeWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 500,
+          "gen_ai.usage.output_tokens": 50
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [
+            { id: "chat", label: "Chat", unlimited: true },
+            { id: "completions", label: "Completions", unlimited: true },
+            {
+              id: "premium_interactions",
+              label: "Premium",
+              total: 1500,
+              used: 28.2,
+              remaining: 1471.8,
+              usedPercent: 1.9,
+              remainingPercent: 98.1
+            }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    // All-time summary counts BOTH events; the window must not restrict it.
+    assert.equal(stats.summary.tokenEvents, 2);
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows.length, 0); // chat/completions unlimited
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.limitId, "premium_interactions");
+    assert.equal(row.modelType, "AI Credits");
+    assert.equal(row.startTimeUtcIso, "2026-06-01T00:00:00.000Z");
+    assert.equal(row.endTimeUtcIso, "2026-07-01T00:00:00.000Z");
+    assert.equal(row.windowMinutes, 30 * 24 * 60); // June = 30 days
+    assert.equal(row.maxUsedPercent, 1.9); // official quota percentage from the API
+    // Totals = only the in-window OTEL event.
+    assert.equal(row.eventCount, 1);
+    assert.equal(row.totals.inputTokens, 80000);
+    assert.equal(row.totals.cacheReadInputTokens, 20000);
+    assert.equal(row.totals.cacheWriteInputTokens, 10000);
+    assert.ok(row.totals.estimatedCredits > 0); // API-equivalent cost from local pricing
+    assert.notEqual(row.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((w) => w.includes("cache token counts")),
+      false
+    ); // cache attributes were present, so no cache warning
+  });
+});
+
+test("CopilotUsageProvider warns when cache tokens are missing so cost cannot be estimated", async () => {
+  await withTempRoot(async (root) => {
+    const inWindowSec = Math.floor(Date.UTC(2026, 5, 15) / 1000);
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [inWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 1000,
+          "gen_ai.usage.output_tokens": 100
+        } // no cache_read / cache_write attributes
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [{ id: "premium_interactions", label: "Premium", total: 1500, used: 28.2, usedPercent: 1.9 }]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.eventCount, 1);
+    assert.equal(row.totals.estimatedCreditsStatus, "unavailable"); // cost unknown
+    assert.equal(
+      stats.warnings.some((w) => w.includes("cache token counts")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider flags incomplete telemetry when official usage has no local events", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [
+            { id: "premium_interactions", label: "Premium", total: 1500, used: 28.2, usedPercent: 1.9 }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.eventCount, 0);
+    // Not a trusted $0 — cost is marked unknown for the UI to render "-".
+    assert.equal(row.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((w) => w.includes("Local token totals are incomplete")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider shows only metered quota buckets, not unlimited ones", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          quotas: [
+            { id: "chat", label: "Chat", unlimited: true, usedPercent: 0, remainingPercent: 100 },
+            { id: "completions", label: "Completions", unlimited: true, usedPercent: 0, remainingPercent: 100 },
+            { id: "premium_interactions", label: "Premium", usedPercent: 2, remainingPercent: 98 }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    const allWindows = [...stats.primaryLimitWindows, ...stats.secondaryLimitWindows];
+    assert.deepEqual(allWindows.map((w) => w.limitId), ["premium_interactions"]);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 2);
+    // Unlimited buckets are not "unknown" — they must not produce that warning.
+    assert.equal(
+      stats.warnings.some((w) => w.includes("quota usage is unknown")),
+      false
+    );
+  });
+});
+
+test("CopilotUsageProvider omits an unknown-usage quota window and warns", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "copilot_pro",
+          quotas: [{ id: "chat", label: "Chat" }] // no usable percent/total
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 0);
+    assert.equal(stats.secondaryLimitWindows.length, 0);
+    assert.equal(
+      stats.warnings.some((w) => w.includes("quota usage is unknown for: Chat")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider does not duplicate warnings", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: copilotNoQuota
+    }).getStats();
+    assert.equal(stats.warnings.length, new Set(stats.warnings).size);
   });
 });
 

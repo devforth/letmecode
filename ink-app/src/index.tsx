@@ -846,7 +846,9 @@ function buildLimitWindowTableRow(window: LimitWindowRow): TextTableRow {
       formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent),
       formatCompactLocalDateTime(window.startTimeUtcIso),
       formatCompactLocalDateTime(window.endTimeUtcIso),
-      formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD)
+      // Status-aware: shows "-" when the API-equivalent cost is unknown rather
+      // than a misleading $0.00.
+      formatUsageUsd(window.totals)
     ]
   };
 }
