@@ -728,7 +728,12 @@ function buildClaudeSessionGroupKey(sessionsRoot: string, filePath: string): str
   }
 
   const normalizedRelativePath = relativePath.split(path.sep).join("/");
-  const subagentMatch = normalizedRelativePath.match(/^(.*\/[^/]+)\/subagents\/[^/]+\.jsonl$/);
+  // Group subagent transcripts under their parent session. This covers both the
+  // flat Task layout (`<session>/subagents/<agent>.jsonl`) and the nested workflow
+  // layout (`<session>/subagents/workflows/<wf>/<agent>.jsonl`), so workflow
+  // subagents inherit the parent session's source classification rather than each
+  // becoming its own group.
+  const subagentMatch = normalizedRelativePath.match(/^(.*\/[^/]+)\/subagents\/.*\.jsonl$/);
   if (subagentMatch?.[1]) {
     return subagentMatch[1];
   }
