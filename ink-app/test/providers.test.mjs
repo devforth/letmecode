@@ -7,8 +7,6 @@ import path from "node:path";
 import test from "node:test";
 import {
   AntigravityUsageProvider,
-  parseAntigravityPlanType,
-  parseAntigravityUserIdHash,
   parseAntigravityQuotaEntries
 } from "../dist/providers/antigravity.js";
 import { ClaudeUsageProvider } from "../dist/providers/claude.js";
@@ -19,6 +17,11 @@ import {
   configureCopilotVsCodeLogging
 } from "../dist/providers/copilot.js";
 import { createProviders } from "../dist/providers/index.js";
+
+// Keep the Copilot provider tests hermetic: never resolve a real GitHub token or
+// hit the network for quota. OTEL-focused tests inject "no quota"; quota-focused
+// tests inject their own fetchUserInfo.
+const copilotNoQuota = async () => ({ quotaInfo: undefined, warnings: [] });
 
 async function withTempRoot(run) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "letmecode-codex-"));
@@ -255,7 +258,7 @@ test("AntigravityUsageProvider parses one normalized usage record", async () => 
   }).getStats();
 
   assert.equal(stats.providerId, "antigravity");
-  assert.equal(stats.summary.filesScanned, 1);
+  assert.equal(stats.summary.filesScanned, 0);
   assert.equal(stats.summary.tokenEvents, 1);
   assert.equal(stats.modelUsage[0].modelId, "gemini-3-flash");
   assert.equal(stats.summary.totals.inputTokens, 5528);
@@ -410,7 +413,7 @@ test("AntigravityUsageProvider deduplicates duplicate responses", async () => {
     collectUsage: async () => [duplicate, duplicate]
   }).getStats();
 
-  assert.equal(stats.summary.filesScanned, 1);
+  assert.equal(stats.summary.filesScanned, 0);
   assert.equal(stats.summary.totals.eventCount, 1);
   assert.equal(stats.summary.totals.inputTokens, 10);
   assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate")), true);
@@ -477,7 +480,7 @@ function antigravityQuotaSummaryPayload(overrides = {}) {
 }
 
 test("Antigravity quota parser reads confirmed RetrieveUserQuotaSummary buckets", () => {
-  const entries = parseAntigravityQuotaEntries(antigravityQuotaSummaryPayload());
+  const entries = parseAntigravityQuotaEntries(antigravityQuotaSummaryPayload().response.groups);
   const byId = new Map(entries.map((entry) => [entry.limitId, entry]));
 
   assert.equal(entries.length, 4);
@@ -487,129 +490,67 @@ test("Antigravity quota parser reads confirmed RetrieveUserQuotaSummary buckets"
   assert.equal(byId.get("gemini-weekly")?.windowMinutes, 10080);
   assert.equal(byId.get("gemini-weekly")?.resetAt, Date.parse("2026-07-02T10:34:04Z"));
   assert.equal(byId.get("gemini-weekly")?.remainingFraction, 0.9623046);
-  assert.deepEqual(byId.get("gemini-5h")?.modelIds, [
-    "gemini-3.5-flash",
-    "gemini-3.1-pro",
-    "gemini-3-flash"
-  ]);
-  assert.deepEqual(byId.get("3p-5h")?.modelIds, [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "gpt-oss-120b"
-  ]);
+  assert.equal(byId.get("gemini-5h")?.modelScope, "gemini");
+  assert.equal(byId.get("3p-5h")?.modelScope, "third-party");
   assert.equal(byId.get("3p-5h")?.remainingFraction, 1);
 });
 
 test("Antigravity quota parser rejects unsupported buckets and unknown groups", () => {
-  const entries = parseAntigravityQuotaEntries({
-    response: {
-      groups: [
+  const entries = parseAntigravityQuotaEntries([
+    {
+      displayName: "Gemini Models",
+      description: "Models within this group: Gemini Flash",
+      buckets: [
         {
-          displayName: "Gemini Models",
-          description: "Models within this group: Gemini Flash",
-          buckets: [
-            {
-              bucketId: "bad-window",
-              window: "monthly",
-              remainingFraction: 0.5,
-              resetTime: "2026-07-02T10:34:04Z"
-            },
-            {
-              bucketId: "bad-fraction",
-              window: "5h",
-              remainingFraction: 2,
-              resetTime: "2026-07-02T10:34:04Z"
-            },
-            {
-              bucketId: "bad-reset",
-              window: "5h",
-              remainingFraction: 0.5,
-              resetTime: "not-a-date"
-            },
-            {
-              bucketId: "good",
-              window: "5h",
-              remainingFraction: 0.5,
-              resetTime: "2026-07-02T10:34:04Z"
-            }
-          ]
+          bucketId: "bad-window",
+          window: "monthly",
+          remainingFraction: 0.5,
+          resetTime: "2026-07-02T10:34:04Z"
         },
         {
-          displayName: "Autocomplete",
-          description: "Non-agent quota",
-          buckets: [
-            {
-              bucketId: "autocomplete-5h",
-              window: "5h",
-              remainingFraction: 0.1,
-              resetTime: "2026-07-02T10:34:04Z"
-            }
-          ]
+          bucketId: "bad-fraction",
+          window: "5h",
+          remainingFraction: 2,
+          resetTime: "2026-07-02T10:34:04Z"
+        },
+        {
+          bucketId: "bad-reset",
+          window: "5h",
+          remainingFraction: 0.5,
+          resetTime: "not-a-date"
+        },
+        {
+          bucketId: "good",
+          window: "5h",
+          remainingFraction: 0.5,
+          resetTime: "2026-07-02T10:34:04Z"
+        }
+      ]
+    },
+    {
+      displayName: "Autocomplete",
+      description: "Non-agent quota",
+      buckets: [
+        {
+          bucketId: "autocomplete-5h",
+          window: "5h",
+          remainingFraction: 0.1,
+          resetTime: "2026-07-02T10:34:04Z"
         }
       ]
     }
-  });
+  ]);
 
   assert.deepEqual(entries.map((entry) => entry.limitId), ["good"]);
 });
 
-test("Antigravity plan parser reads real user status plan name", () => {
-  assert.equal(
-    parseAntigravityPlanType({
-      response: {
-        userStatus: {
-          planStatus: {
-            planInfo: {
-              planName: "Pro"
-            }
-          }
-        }
-      }
-    }),
-    "Pro"
-  );
-  assert.equal(
-    parseAntigravityPlanType({
-      response: {
-        userStatus: {
-          planStatus: {
-            planInfo: {
-              planName: "Google AI Ultra"
-            }
-          }
-        }
-      }
-    }),
-    "Google AI Ultra"
-  );
-  assert.equal(parseAntigravityPlanType({ response: {} }), "unknown");
-});
-
-test("Antigravity user status parser builds anonymous analytics identity", () => {
-  assert.equal(
-    parseAntigravityUserIdHash(
-      {
-        response: {
-          userStatus: {
-            email: "ivan@devforth.io"
-          }
-        }
-      }
-    ),
-    createHash("md5").update("ivan@devforth.io").digest("hex")
-  );
-  assert.equal(
-    parseAntigravityUserIdHash({ userStatus: { email: "ivan@devforth.io" } }),
-    null
-  );
-});
 
 test("AntigravityUsageProvider reconstructs confirmed quota buckets by model pool and window", async () => {
   const payload = antigravityQuotaSummaryPayload();
   const stats = await new AntigravityUsageProvider({
     collectQuota: async () => ({
       fetchedAt: Date.parse("2026-06-25T14:00:00.000Z"),
-      entries: parseAntigravityQuotaEntries(payload),
+      entries: parseAntigravityQuotaEntries(payload.response.groups),
       planType: "pro",
       userIdHash: "antigravity-user"
     }),
@@ -694,7 +635,7 @@ test("AntigravityUsageProvider reconstructs live quota windows from quota snapsh
       entries: [
         {
           limitId: "gemini-primary",
-          modelIds: ["gemini-3-flash"],
+          modelScope: "gemini",
           remainingFraction: 0.25,
           resetAt,
           windowMinutes: 300,
@@ -750,8 +691,9 @@ test("AntigravityUsageProvider reconstructs live quota windows from quota snapsh
   assert.equal(row.windowMinutes, 300);
   assert.equal(row.startTimeUtcIso, "2026-06-24T10:00:00.000Z");
   assert.equal(row.endTimeUtcIso, "2026-06-24T15:00:00.000Z");
-  assert.equal(row.firstSeenUtcIso, "2026-06-24T12:45:00.000Z");
-  assert.equal(row.lastSeenUtcIso, "2026-06-24T12:45:00.000Z");
+  // first/last-seen reflect the single in-window usage record (11:00), not the fetch time.
+  assert.equal(row.firstSeenUtcIso, "2026-06-24T11:00:00.000Z");
+  assert.equal(row.lastSeenUtcIso, "2026-06-24T11:00:00.000Z");
   assert.equal(row.minUsedPercent, 75);
   assert.equal(row.maxUsedPercent, 75);
   assert.equal(row.eventCount, 1);
@@ -776,7 +718,7 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
       entries: [
         {
           limitId: "shared-primary",
-          modelIds: ["*"],
+          modelScope: "gemini",
           remainingFraction: 0.6,
           resetAt,
           windowMinutes: 300,
@@ -791,7 +733,7 @@ test("AntigravityUsageProvider returns live quota windows when usage collection 
   assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 40);
   assert.equal(stats.primaryLimitWindows[0].eventCount, 0);
   assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 0);
-  assert.equal(stats.warnings.some((warning) => warning.includes("Antigravity token usage")), true);
+  assert.equal(stats.warnings.some((warning) => warning.includes("Antigravity usage")), true);
 });
 
 test("AntigravityUsageProvider returns historical usage when quota collection fails", async () => {
@@ -885,7 +827,7 @@ test("CopilotUsageProvider parses only VS Code OTEL usage and ignores old sessio
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     assert.equal(stats.providerId, "copilot");
     assert.equal(stats.providerLabel, "Copilot");
     assert.equal(stats.summary.filesScanned, 1);
@@ -933,7 +875,7 @@ test("CopilotUsageProvider ignores generic OTLP log envelopes", async () => {
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 0);
@@ -969,7 +911,7 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(stats.summary.totals.inputTokens, 0);
@@ -978,7 +920,7 @@ test("CopilotUsageProvider ignores OTLP key/value attributes and unix nano times
   });
 });
 
-test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
+test("CopilotUsageProvider prefers completion time (startTime over hrTime)", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
@@ -993,11 +935,16 @@ test("CopilotUsageProvider uses only hrTime for timestamps", async () => {
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
+    // startTime (1782130578) wins over hrTime (1782206354), which are on
+    // different days; the day bucket reflects the startTime day.
+    const startDay = new Date(1782130578 * 1000).toISOString().slice(0, 10);
+    const hrDay = new Date(1782206354 * 1000).toISOString().slice(0, 10);
+    assert.notEqual(startDay, hrDay);
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
-    assert.equal(stats.dayUsage[0].dayKey, "2026-06-23");
+    assert.equal(stats.dayUsage[0].dayKey, startDay);
   });
 });
 
@@ -1016,7 +963,7 @@ test("CopilotUsageProvider parses file exporter hrTime timestamps", async () => 
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.dayUsage.length, 1);
@@ -1038,17 +985,14 @@ test("CopilotUsageProvider estimates credits when Copilot telemetry omits premiu
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5.4-2026-03-01");
     assert.equal(stats.modelUsage[0].totals.estimatedCredits, 0);
     assert.equal(stats.modelUsage[0].totals.estimatedCreditsStatus, "unavailable");
-    assert.equal(stats.modelUsage[0].totals.cacheStatus, "unavailable");
-    assert.equal(
-      stats.warnings.some((warning) => warning.includes("cache token attributes are unavailable")),
-      true
-    );
+    assert.equal(stats.modelUsage[0].totals.cacheReadStatus, "unavailable");
+    assert.equal(stats.modelUsage[0].totals.cacheWriteStatus, "unavailable");
   });
 });
 
@@ -1067,7 +1011,7 @@ test("CopilotUsageProvider estimates credits for GPT-5 mini OTEL usage", async (
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.modelUsage[0].modelId, "gpt-5-mini");
@@ -1092,16 +1036,18 @@ test("CopilotUsageProvider reads dotted cache attributes and Claude cache-write 
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
+    // Reported input INCLUDES cache-read but NOT cache-write, so uncached input
+    // subtracts only cache-read (100000 - 20000); cache-write is additive.
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 20000);
-    assert.equal(stats.summary.totals.inputTokens, 70000);
+    assert.equal(stats.summary.totals.inputTokens, 80000);
     assert.equal(stats.summary.totals.cacheWriteInputTokens, 10000);
     assert.equal(stats.summary.totals.outputTokens, 1000);
     assert.equal(stats.summary.totals.reasoningOutputTokens, 1000);
-    assert.equal(stats.summary.totals.totalTokens, 101000);
-    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 8.95) < 0.0000001);
+    assert.equal(stats.summary.totals.totalTokens, 111000);
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 9.95) < 0.0000001);
   });
 });
 
@@ -1128,7 +1074,7 @@ test("CopilotUsageProvider leaves GPT-4o mini credits unknown and estimates Clau
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(byModel.get("gpt-4o-mini-2024-07-18")?.estimatedCredits, 0);
@@ -1161,7 +1107,7 @@ test("CopilotUsageProvider treats Copilot NES and suggestion models as non-billa
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(stats.summary.totals.inputTokens, 3000);
@@ -1196,7 +1142,7 @@ test("CopilotUsageProvider applies long-context rates for large GPT-5.4 and GPT-
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCredits, 0);
@@ -1219,7 +1165,7 @@ test("CopilotUsageProvider applies model-specific long-context thresholds", asyn
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.totals.estimatedCredits, 0);
     assert.equal(stats.summary.totals.estimatedCreditsStatus, "unavailable");
@@ -1232,6 +1178,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       JSON.stringify({
         hrTime: [1782130578, 148000000],
         attributes: {
+          "gen_ai.trace.id": "trace-agent-1",
           "gen_ai.response.model": "gpt-5.4-2026-03-01",
           "gen_ai.operation.name": "chat",
           "gen_ai.usage.input_tokens": 84275,
@@ -1241,6 +1188,7 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       JSON.stringify({
         hrTime: [1782130578, 154000000],
         attributes: {
+          "gen_ai.trace.id": "trace-agent-1",
           "event.name": "copilot_chat.agent.turn",
           "gen_ai.operation.name": "invoke_agent",
           "turn.index": 0,
@@ -1250,8 +1198,10 @@ test("CopilotUsageProvider counts only Copilot chat spans instead of invoke_agen
       })
     ]);
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
+    // The invoke_agent record is an aggregate (agent-summary-span) sharing the
+    // chat span's trace, so it is suppressed; only the granular chat span counts.
     assert.equal(stats.summary.tokenEvents, 1);
     assert.equal(stats.summary.totals.inputTokens, 84275);
     assert.deepEqual(stats.modelUsage.map((row) => row.modelId), ["gpt-5.4-2026-03-01"]);
@@ -1334,13 +1284,282 @@ test("CopilotUsageProvider warns when VS Code logging is enabled but no OTEL fil
       "utf8"
     );
 
-    const stats = await new CopilotUsageProvider({ root }).getStats();
+    const stats = await new CopilotUsageProvider({ root, env: {}, fetchUserInfo: copilotNoQuota }).getStats();
 
     assert.equal(stats.summary.tokenEvents, 0);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("has not been created yet")),
       true
     );
+  });
+});
+
+test("CopilotUsageProvider returns OTEL usage even when quota loading fails", async () => {
+  await withTempRoot(async (root) => {
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [1782130578, 148000000],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 120,
+          "gen_ai.usage.output_tokens": 12
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => {
+        throw new Error("quota down");
+      }
+    }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.inputTokens, 120);
+    assert.equal(stats.primaryLimitWindows.length, 0);
+    assert.equal(
+      stats.warnings.some((w) => w.includes("plan and quota are unavailable")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider returns quota windows even when no OTEL files exist", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "copilot_pro",
+          quotas: [{ id: "chat", label: "Chat", usedPercent: 30, remainingPercent: 70 }]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.deepEqual(stats.summary.distinctPlanTypes, ["copilot_pro"]);
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].limitId, "chat");
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 30);
+    assert.equal(
+      stats.warnings.some((w) => w.includes("No Copilot OTEL files were found")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider joins the AI Credits window with in-window OTEL usage", async () => {
+  await withTempRoot(async (root) => {
+    const inWindowSec = Math.floor(Date.UTC(2026, 5, 15) / 1000); // 2026-06-15
+    const beforeWindowSec = Math.floor(Date.UTC(2026, 4, 15) / 1000); // 2026-05-15 (outside)
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [inWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "claude-haiku-4-5-20251001",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 100000,
+          "gen_ai.usage.cache_read.input_tokens": 20000,
+          "gen_ai.usage.cache_creation.input_tokens": 10000,
+          "gen_ai.usage.output_tokens": 1000
+        }
+      }),
+      JSON.stringify({
+        hrTime: [beforeWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 500,
+          "gen_ai.usage.output_tokens": 50
+        }
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [
+            { id: "chat", label: "Chat", unlimited: true },
+            { id: "completions", label: "Completions", unlimited: true },
+            {
+              id: "premium_interactions",
+              label: "Premium",
+              total: 1500,
+              used: 28.2,
+              remaining: 1471.8,
+              usedPercent: 1.9,
+              remainingPercent: 98.1
+            }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    // All-time summary counts BOTH events; the window must not restrict it.
+    assert.equal(stats.summary.tokenEvents, 2);
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows.length, 0); // chat/completions unlimited
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.limitId, "premium_interactions");
+    assert.equal(row.modelType, "AI Credits");
+    assert.equal(row.startTimeUtcIso, "2026-06-01T00:00:00.000Z");
+    assert.equal(row.endTimeUtcIso, "2026-07-01T00:00:00.000Z");
+    assert.equal(row.windowMinutes, 30 * 24 * 60); // June = 30 days
+    assert.equal(row.maxUsedPercent, 1.9); // official quota percentage from the API
+    // Totals = only the in-window OTEL event.
+    assert.equal(row.eventCount, 1);
+    assert.equal(row.totals.inputTokens, 80000);
+    assert.equal(row.totals.cacheReadInputTokens, 20000);
+    assert.equal(row.totals.cacheWriteInputTokens, 10000);
+    assert.ok(row.totals.estimatedCredits > 0); // API-equivalent cost from local pricing
+    assert.notEqual(row.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((w) => w.includes("cache token counts")),
+      false
+    ); // cache attributes were present, so no cache warning
+  });
+});
+
+test("CopilotUsageProvider warns when cache tokens are missing so cost cannot be estimated", async () => {
+  await withTempRoot(async (root) => {
+    const inWindowSec = Math.floor(Date.UTC(2026, 5, 15) / 1000);
+    await writeCopilotOtel(root, [
+      JSON.stringify({
+        hrTime: [inWindowSec, 0],
+        attributes: {
+          "gen_ai.response.model": "gpt-5-mini",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.usage.input_tokens": 1000,
+          "gen_ai.usage.output_tokens": 100
+        } // no cache_read / cache_write attributes
+      })
+    ]);
+
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [{ id: "premium_interactions", label: "Premium", total: 1500, used: 28.2, usedPercent: 1.9 }]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.eventCount, 1);
+    assert.equal(row.totals.estimatedCreditsStatus, "unavailable"); // cost unknown
+    assert.equal(
+      stats.warnings.some((w) => w.includes("cache token counts")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider flags incomplete telemetry when official usage has no local events", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          tokenBasedBilling: true,
+          resetAt: "2026-07-01T00:00:00.000Z",
+          quotas: [
+            { id: "premium_interactions", label: "Premium", total: 1500, used: 28.2, usedPercent: 1.9 }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    const row = stats.primaryLimitWindows[0];
+    assert.equal(row.eventCount, 0);
+    // Not a trusted $0 — cost is marked unknown for the UI to render "-".
+    assert.equal(row.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(
+      stats.warnings.some((w) => w.includes("Local token totals are incomplete")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider shows only metered quota buckets, not unlimited ones", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "individual",
+          quotas: [
+            { id: "chat", label: "Chat", unlimited: true, usedPercent: 0, remainingPercent: 100 },
+            { id: "completions", label: "Completions", unlimited: true, usedPercent: 0, remainingPercent: 100 },
+            { id: "premium_interactions", label: "Premium", usedPercent: 2, remainingPercent: 98 }
+          ]
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    const allWindows = [...stats.primaryLimitWindows, ...stats.secondaryLimitWindows];
+    assert.deepEqual(allWindows.map((w) => w.limitId), ["premium_interactions"]);
+    assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 2);
+    // Unlimited buckets are not "unknown" — they must not produce that warning.
+    assert.equal(
+      stats.warnings.some((w) => w.includes("quota usage is unknown")),
+      false
+    );
+  });
+});
+
+test("CopilotUsageProvider omits an unknown-usage quota window and warns", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: async () => ({
+        quotaInfo: {
+          plan: "copilot_pro",
+          quotas: [{ id: "chat", label: "Chat" }] // no usable percent/total
+        },
+        warnings: []
+      })
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 0);
+    assert.equal(stats.secondaryLimitWindows.length, 0);
+    assert.equal(
+      stats.warnings.some((w) => w.includes("quota usage is unknown for: Chat")),
+      true
+    );
+  });
+});
+
+test("CopilotUsageProvider does not duplicate warnings", async () => {
+  await withTempRoot(async (root) => {
+    const stats = await new CopilotUsageProvider({
+      root,
+      env: {},
+      fetchUserInfo: copilotNoQuota
+    }).getStats();
+    assert.equal(stats.warnings.length, new Set(stats.warnings).size);
   });
 });
 
@@ -2345,6 +2564,56 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
   });
 });
 
+test("ClaudeUsageProvider captures the Sonnet-only weekly window when its reset is omitted", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/sonnet-only.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-28T08:00:00.000Z",
+        requestId: "req-sonnet-week",
+        messageId: "msg-sonnet-week",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-4-6",
+        inputTokens: 40,
+        outputTokens: 4
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 4% used · resets Jun 29, 3:40pm (UTC)",
+          "Current week (all models): 0% used · resets Jun 30, 1pm (UTC)",
+          "Current week (Sonnet only): 0% used"
+        ].join("\n"),
+      readAuthStatusOutput: async () =>
+        JSON.stringify({
+          loggedIn: true,
+          authMethod: "claude.ai",
+          apiProvider: "firstParty",
+          email: "premium@devforth.io",
+          orgId: "premium-org",
+          orgName: "Premium Org",
+          subscriptionType: "team"
+        }),
+      now: () => new Date("2026-06-29T11:30:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows.length, 2);
+
+    const allModelsWeek = stats.secondaryLimitWindows.find((row) => row.limitId === "current-week");
+    const sonnetOnlyWeek = stats.secondaryLimitWindows.find(
+      (row) => row.limitId === "current-week-sonnet-only"
+    );
+    assert.ok(sonnetOnlyWeek, "expected a Sonnet-only weekly window even without an explicit reset");
+    assert.equal(sonnetOnlyWeek.modelType, "sonnet only");
+    // The Sonnet-only week inherits the weekly reset printed on the all-models week.
+    assert.equal(sonnetOnlyWeek.endTimeUtcIso, allModelsWeek.endTimeUtcIso);
+    assert.equal(sonnetOnlyWeek.totals.inputTokens, 40);
+  });
+});
+
 test("ClaudeUsageProvider prefers VSCode Claude binaries before falling back to other locations", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "trace-project/mixed.jsonl", [
@@ -3087,7 +3356,7 @@ test("buildAnonymousUsageReports derives used percents for saturated and live wi
       },
       {
         agent: "Claude",
-        model_type: "current-session",
+        model_type: "all",
         used_percents: 20.25,
         used_exhausted: false,
         value_dollars: 0.5,
@@ -3278,7 +3547,7 @@ test("buildAnonymousUsagePayload skips windows below one percent usage", async (
   assert.equal(payload.data[0].used_percents, 1);
 });
 
-test("buildAnonymousUsagePayload does not report Antigravity data", async () => {
+test("buildAnonymousUsagePayload reports Antigravity data", async () => {
   const totals = (overrides = {}) => ({
     inputTokens: 0,
     outputTokens: 0,
@@ -3324,7 +3593,7 @@ test("buildAnonymousUsagePayload does not report Antigravity data", async () => 
         totals: totals(),
         distinctModels: [],
         distinctPlanTypes: ["pro"],
-        rootLabel: "Tokscale usage + Antigravity local quota",
+        rootLabel: "Antigravity local trajectories",
         rootPath: "/tmp/antigravity"
       },
       modelUsage: [],
@@ -3339,7 +3608,20 @@ test("buildAnonymousUsagePayload does not report Antigravity data", async () => 
     }
   ]);
 
-  assert.deepEqual(payload.data, []);
+  assert.equal(payload.data.length, 2);
+  const byModelType = new Map(payload.data.map((report) => [report.model_type, report]));
+  const gemini = byModelType.get("gemini");
+  const thirdParty = byModelType.get("third-party");
+
+  assert.ok(gemini, "expected a gemini Antigravity report");
+  assert.ok(thirdParty, "expected a third-party Antigravity report");
+  assert.equal(gemini.agent, "Antigravity");
+  assert.equal(gemini.userid_hash, "antigravity-user");
+  assert.equal(gemini.plan_id, "pro");
+  assert.equal(gemini.used_percents, 10);
+  assert.equal(gemini.value_dollars, 1);
+  assert.equal(gemini.window_duration_seconds, 18000);
+  assert.equal(thirdParty.window_duration_seconds, 604800);
 });
 
 test("buildAnonymousUsageReports prefers explicit limit-window model types", async () => {
@@ -3426,5 +3708,5 @@ test("buildAnonymousUsageReports prefers explicit limit-window model types", asy
 
   assert.equal(reports.length, 1);
   assert.equal(reports[0].plan_id, "team_premium");
-  assert.equal(reports[0].model_type, "sonnet only");
+  assert.equal(reports[0].model_type, "sonnet-only");
 });

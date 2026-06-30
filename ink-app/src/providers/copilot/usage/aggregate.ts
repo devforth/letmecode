@@ -1,0 +1,127 @@
+import {
+  addUsageTotals,
+  sumUsageTotals,
+  type DailyUsageRow,
+  type ModelUsageRow,
+  type UsageTotals,
+  type UsageValueStatus
+} from "../../contract.js";
+import {
+  addDailyUsage,
+  buildDailyUsageRows,
+  createDailyUsageAggregates
+} from "../../daily.js";
+import {
+  isNonBillableCopilotModel,
+  normalizeCopilotModelId,
+  rateForCopilotModel
+} from "../models.js";
+import type { CopilotUsageEvent } from "../otel/parse.js";
+
+export type CopilotAggregatedUsage = {
+  modelUsage: ModelUsageRow[];
+  dayUsage: DailyUsageRow[];
+  summaryTotals: UsageTotals;
+  distinctModels: string[];
+  tokenEvents: number;
+};
+
+/**
+ * Select events whose timestamp falls in the half-open interval
+ * `[startTimeMs, endTimeMs)`. An event exactly at `endTimeMs` belongs to the
+ * next window and is excluded. Used to scope OTEL usage to a billing window
+ * without re-parsing — the same events feed all-time and per-window rollups.
+ */
+export function filterCopilotUsageEvents(
+  events: CopilotUsageEvent[],
+  startTimeMs: number,
+  endTimeMs: number
+): CopilotUsageEvent[] {
+  return events.filter(
+    (event) => event.timestampMs >= startTimeMs && event.timestampMs < endTimeMs
+  );
+}
+
+/**
+ * Aggregate normalized Copilot usage events into per-model and per-day rollups
+ * plus summary totals, applying the corrected cache accounting model where the
+ * reported input already INCLUDES cache-read tokens but NOT cache-write tokens.
+ * Pure and deterministic: independent of input ordering.
+ */
+export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggregatedUsage {
+  const byModel = new Map<string, UsageTotals>();
+  const byDay = createDailyUsageAggregates();
+
+  for (const event of events) {
+    const modelId = normalizeCopilotModelId(event.modelId);
+    const hasCacheInfo =
+      event.cacheReadStatus === "known" || event.cacheWriteStatus === "known";
+
+    // The reported input already INCLUDES cache-read but NOT cache-write. The
+    // cache-read bucket is preserved IN FULL; only the portion that overlaps the
+    // reported input is subtracted to derive the uncached input. Capping cacheRead
+    // at inputTokens would silently lose cache-only events (input 0, cacheRead N).
+    const reportedInput = Math.max(0, event.inputTokens);
+    const cacheRead = hasCacheInfo ? Math.max(0, event.cacheReadInputTokens) : 0;
+    const uncachedInput = hasCacheInfo
+      ? Math.max(0, reportedInput - cacheRead)
+      : reportedInput;
+    const cacheWrite = hasCacheInfo ? Math.max(0, event.cacheWriteInputTokens) : 0;
+    const output = event.outputTokens;
+    const reasoning = Math.min(event.reasoningOutputTokens, output);
+
+    const nonBillable = isNonBillableCopilotModel(modelId);
+    const rate = nonBillable ? undefined : rateForCopilotModel(modelId, event.inputTokens);
+
+    const creditsKnown = nonBillable || (hasCacheInfo && rate !== undefined);
+    const estimatedCreditsStatus: UsageValueStatus = creditsKnown ? "known" : "unavailable";
+    const estimatedCredits =
+      rate !== undefined && hasCacheInfo
+        ? (uncachedInput / 1_000_000) * rate.input +
+          (cacheRead / 1_000_000) * rate.cacheRead +
+          (cacheWrite / 1_000_000) * rate.cacheWrite +
+          (output / 1_000_000) * rate.output
+        : 0;
+
+    const totals: UsageTotals = {
+      inputTokens: uncachedInput,
+      outputTokens: output,
+      cacheReadInputTokens: cacheRead,
+      cacheWriteInputTokens: cacheWrite,
+      cacheWrite5mInputTokens: 0,
+      cacheWrite1hInputTokens: 0,
+      reasoningOutputTokens: reasoning,
+      totalTokens: uncachedInput + cacheRead + cacheWrite + output,
+      estimatedCredits,
+      eventCount: 1,
+      cacheReadStatus: event.cacheReadStatus,
+      cacheWriteStatus: event.cacheWriteStatus,
+      estimatedCreditsStatus
+    };
+
+    const existing = byModel.get(modelId);
+    if (existing) {
+      addUsageTotals(existing, totals);
+    } else {
+      byModel.set(modelId, { ...totals });
+    }
+
+    addDailyUsage(byDay, event.timestampMs, modelId, undefined, totals);
+  }
+
+  const modelUsage: ModelUsageRow[] = [...byModel.entries()]
+    .map(([modelId, totals]) => ({ modelId, totals }))
+    .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
+
+  const summaryTotals = sumUsageTotals(modelUsage.map((row) => row.totals));
+  const distinctModels = modelUsage.map((row) => row.modelId);
+  const dayUsage = buildDailyUsageRows(byDay);
+
+  return {
+    modelUsage,
+    dayUsage,
+    summaryTotals,
+    distinctModels,
+    tokenEvents: events.length
+  };
+}

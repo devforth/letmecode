@@ -59,7 +59,7 @@ const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
 
 const CODEX_CREDIT_COST_USD = 0.01;
 
-const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Window", "Used", "Start", "End", "API eq."] as const;
+const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Models", "Window", "Used", "Start", "End", "API eq."] as const;
 const DAILY_TABLE_HEADERS = ["Day", "Ev", "Input", "Output", "C read", "C write", "API eq."] as const;
 const MODEL_TABLE_HEADERS = ["Model", "Input", "Output", "C read", "C write", "API eq."] as const;
 
@@ -305,7 +305,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           {" beta "}
         </Text>
       </Box>
-      <Box marginTop={1}>
+      <Box>
         <Text color="gray">Provider  </Text>
         {sortedProviderStates.map((state) => (
           <ProviderTab
@@ -329,7 +329,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         ))}
       </Box>
 
-      <Box marginTop={1} flexDirection="column" flexGrow={1} overflow="hidden">
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
         <Box flexGrow={1} overflow="hidden">
           <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
             <ContentPanel
@@ -342,7 +342,6 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
             />
           </Box>
         </Box>
-
         <SelectionDetailsPanel
           providerState={selectedProvider}
           tabId={selectedDetailTab.id}
@@ -350,7 +349,6 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
           selectedDayRow={selectedDayRow}
           selectedModelRow={selectedModelRow}
         />
-
         <CopilotActionsPanel
           providerState={selectedProvider}
           actionMessage={copilotActionMessage}
@@ -358,7 +356,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
         />
 
         {selectedProvider.status === "ready" && selectedProvider.stats.warnings.length > 0 ? (
-          <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" overflow="hidden">
+          <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" overflow="hidden">
             <Text color="yellow">Warnings</Text>
             {selectedProvider.stats.warnings.map((warning) => (
               <Text key={warning}>{warning}</Text>
@@ -386,7 +384,7 @@ function CopilotActionsPanel(props: {
   const accentColor = hasNoUsage ? "red" : "cyan";
 
   return (
-    <Box marginTop={1} borderStyle="round" borderColor={accentColor} paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor={accentColor} paddingX={1} flexDirection="column">
       <Text color={accentColor}>Copilot setup</Text>
       <Box>
         {COPILOT_ACTIONS.map((action, index) => (
@@ -482,9 +480,8 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
       : 0;
 
   return (
-    <Box flexDirection="column">
-      <Text bold>{props.stats.providerLabel} overview</Text>
-      <Text> </Text>
+    <Box borderStyle="round" paddingX={1} flexDirection="column">
+      <Text color="cyan">Summary</Text>
       <Box>
         <Box flexDirection="column" width={45}>
           <DetailRow label="Plan" value={summary.distinctPlanTypes.join(", ") || "none"} />
@@ -495,7 +492,7 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
           <DetailRow label="Events" value={formatInteger(totals.eventCount)} />
           <DetailRow label="Input" value={formatOverviewTokenCount(totals.inputTokens)} />
           <DetailRow label="Output" value={formatOverviewTokenCount(totals.outputTokens)} />
-          <DetailRow label="Cache read" value={formatCacheOverviewTokenCount(totals, totals.cacheReadInputTokens)} />
+          <DetailRow label="Cache read" value={formatCacheOverviewTokenCount(totals.cacheReadStatus, totals.cacheReadInputTokens)} />
           <DetailRow label="Reasoning" value={formatOverviewTokenCount(totals.reasoningOutputTokens)} />
           <DetailRow label="Total" value={formatOverviewTokenCount(totals.totalTokens)} />
           <DetailRow label="API equiv." value={formatUsageUsd(totals)} />
@@ -503,7 +500,10 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
         <Box flexDirection="column">
           <Text color="cyan">Efficiency</Text>
           <DetailRow label="Cache ratio" value={formatPercent(cacheRatio)} />
-          <DetailRow label="Input/output" value={formatInputOutputRatio(totals)} />
+          {(() => {
+            const { label, value } = formatInputOutputRatio(totals, props.stats.providerId);
+            return <DetailRow label={label} value={value} padLength={Math.max(14, label.length + 1)} noSlice />
+          })()}
           <DetailRow label="Avg/event" value={`${formatOverviewTokenCount(averageTokensPerEvent)} tokens`} />
           <DetailRow label="Cost/event" value={formatUnitUsd(costPerEvent)} />
           <Text> </Text>
@@ -728,7 +728,6 @@ function buildTableRow(
 }
 
 function buildTextTableLines(options: {
-  title: string;
   lineKeyPrefix: string;
   headers: readonly string[];
   rows: TextTableRow[];
@@ -739,7 +738,6 @@ function buildTextTableLines(options: {
   if (options.rows.length === 0 && !options.totalRow) {
     return {
       bodyLines: [
-        { key: `${options.lineKeyPrefix}-title`, text: options.title, bold: true },
         { key: `${options.lineKeyPrefix}-empty`, text: "No rows found.", color: "gray" }
       ]
     };
@@ -753,7 +751,6 @@ function buildTextTableLines(options: {
     tableRows.map((row) => row.cells)
   );
   const headerLines: ScrollableLine[] = [
-    { key: `${options.lineKeyPrefix}-title`, text: options.title, bold: true },
     {
       key: `${options.lineKeyPrefix}-top-border`,
       text: buildTableBorder(table, "┌", "┬", "┐"),
@@ -830,7 +827,6 @@ function buildLimitWindowTableLines(
       : undefined;
 
   return buildTextTableLines({
-    title: "Limits",
     lineKeyPrefix: "limits",
     headers: LIMIT_TABLE_HEADERS,
     rows: [...primaryRows, ...secondaryRows],
@@ -845,11 +841,14 @@ function buildLimitWindowTableRow(window: LimitWindowRow): TextTableRow {
     cells: [
       window.scope,
       window.planType,
+      formatLimitWindowModels(window),
       formatCompactWindowMinutes(window.windowMinutes),
       formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent),
       formatCompactLocalDateTime(window.startTimeUtcIso),
       formatCompactLocalDateTime(window.endTimeUtcIso),
-      formatUsd(window.totals.estimatedCredits * CODEX_CREDIT_COST_USD)
+      // Status-aware: shows "-" when the API-equivalent cost is unknown rather
+      // than a misleading $0.00.
+      formatUsageUsd(window.totals)
     ]
   };
 }
@@ -859,7 +858,6 @@ function buildDailyUsageTableLines(
   selectedDayKey?: string
 ): ScrollableLines {
   return buildTextTableLines({
-    title: "Daily usage",
     lineKeyPrefix: "daily",
     headers: DAILY_TABLE_HEADERS,
     rows: rows.map<TextTableRow>((row) => ({
@@ -869,8 +867,8 @@ function buildDailyUsageTableLines(
         formatCompactTokenCount(row.totals.eventCount),
         formatCompactTokenCount(row.totals.inputTokens),
         formatCompactTokenCount(row.totals.outputTokens),
-        formatCompactCacheTokens(row.totals, row.totals.cacheReadInputTokens),
-        formatCompactCacheTokens(row.totals, row.totals.cacheWriteInputTokens),
+        formatCompactCacheTokens(row.totals.cacheReadStatus, row.totals.cacheReadInputTokens),
+        formatCompactCacheTokens(row.totals.cacheWriteStatus, row.totals.cacheWriteInputTokens),
         formatUsageUsd(row.totals)
       ]
     })),
@@ -884,7 +882,6 @@ function buildModelUsageTableLines(
   selectedModelId?: string
 ): ScrollableLines {
   return buildTextTableLines({
-    title: "Model usage",
     lineKeyPrefix: "model",
     headers: MODEL_TABLE_HEADERS,
     rows: rows.map<TextTableRow>((row) => ({
@@ -917,6 +914,7 @@ function SelectionDetailsPanel(props: {
         <Box>
           <Box flexDirection="column" width={25}>
             <DetailRow label="Plan" value={row.planType} />
+            <DetailRow label="Models" value={formatLimitWindowModels(row)} />
             <DetailRow label="Window" value={formatCompactWindowMinutes(row.windowMinutes)} />
             <DetailRow label="Usage" value={formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)} />
             <DetailRow label="Events" value={formatInteger(row.eventCount)} />
@@ -928,8 +926,8 @@ function SelectionDetailsPanel(props: {
               value={`${formatCompactLocalDateTime(row.startTimeUtcIso)} → ${formatCompactLocalDateTime(row.endTimeUtcIso)}`}
             />
             <DetailRow label="Input" value={formatInteger(row.totals.inputTokens)} />
-            <DetailRow label="Cache read" value={formatCacheTokens(row.totals, row.totals.cacheReadInputTokens)} />
-            <DetailRow label="Cache write" value={formatCacheTokens(row.totals, row.totals.cacheWriteInputTokens)} />
+            <DetailRow label="Cache read" value={formatCacheTokens(row.totals.cacheReadStatus, row.totals.cacheReadInputTokens)} />
+            <DetailRow label="Cache write" value={formatCacheTokens(row.totals.cacheWriteStatus, row.totals.cacheWriteInputTokens)} />
             <DetailRow label="Output" value={formatInteger(row.totals.outputTokens)} />
             <DetailRow label="Total" value={formatInteger(row.totals.totalTokens)} />
           </Box>
@@ -969,17 +967,20 @@ function SelectionDetailsPanel(props: {
 
 function DetailsPanelFrame(props: { children: React.ReactNode }): React.JSX.Element {
   return (
-    <Box marginTop={1} borderStyle="round" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" paddingX={1} flexDirection="column">
       <Text color="cyan">Details</Text>
       {props.children}
     </Box>
   );
 }
 
-function DetailRow(props: { label: string; value: string }): React.JSX.Element {
+function DetailRow(props: { label: string; value: string; padLength?: number; noSlice?: boolean }): React.JSX.Element {
+  const labelText = props.noSlice
+    ? props.label.padEnd(props.padLength ?? 14)
+    : pad(props.label, props.padLength ?? 14);
   return (
     <Text>
-      {pad(props.label, 14)}
+      {labelText}
       {props.value}
     </Text>
   );
@@ -1015,8 +1016,10 @@ function formatOverviewTokenCount(value: number): string {
   return formatInteger(roundedValue);
 }
 
-function formatCacheOverviewTokenCount(totals: UsageTotals, value: number): string {
-  return totals.cacheStatus === "unavailable" ? "-" : formatOverviewTokenCount(value);
+type CacheFieldStatus = UsageTotals["cacheReadStatus"];
+
+function formatCacheOverviewTokenCount(status: CacheFieldStatus, value: number): string {
+  return status === "unavailable" ? "-" : formatOverviewTokenCount(value);
 }
 
 function formatFixedCompactNumber(value: number): string {
@@ -1120,7 +1123,7 @@ function formatPercent(value: number): string {
 }
 
 function resolveCacheRatio(totals: UsageTotals): number {
-  if (totals.cacheStatus === "unavailable") {
+  if (totals.cacheReadStatus === "unavailable") {
     return NaN;
   }
 
@@ -1134,15 +1137,33 @@ function resolveCacheRatio(totals: UsageTotals): number {
     : 0;
 }
 
-function formatInputOutputRatio(totals: UsageTotals): string {
+function formatInputOutputRatio(totals: UsageTotals, providerId?: string): { label: string; value: string } {
   if (totals.outputTokens <= 0) {
-    return "-";
+    return {
+      label: providerId === "claude" ? "Input/Write/Read/W5m/W1h/Output" : "Input/ReadCache/Output",
+      value: "-"
+    };
   }
 
-  return `${(totals.inputTokens / totals.outputTokens).toLocaleString("en-US", {
-    maximumFractionDigits: 1,
-    minimumFractionDigits: 0
-  })} : 1`;
+  const fmt = (val: number) => {
+    const ratio = val / totals.outputTokens;
+    return ratio.toLocaleString("en-US", {
+      maximumFractionDigits: 1,
+      minimumFractionDigits: 0
+    });
+  };
+
+  if (providerId === "claude") {
+    return {
+      label: "Input/Write/Read/W5m/W1h/Output",
+      value: `${fmt(totals.inputTokens)} : ${fmt(totals.cacheWriteInputTokens)} : ${fmt(totals.cacheReadInputTokens)} : ${fmt(totals.cacheWrite5mInputTokens)} : ${fmt(totals.cacheWrite1hInputTokens)} : 1`
+    };
+  } else {
+    return {
+      label: "Input/ReadCache/Output",
+      value: `${fmt(totals.inputTokens)} : ${fmt(totals.cacheReadInputTokens)} : 1`
+    };
+  }
 }
 
 function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number): string {
@@ -1168,6 +1189,15 @@ function formatCompactWindowMinutes(value: number): string {
   }
 
   return `${formatCompactNumber(hours)}h`;
+}
+
+function formatLimitWindowModels(window: LimitWindowRow): string {
+  const label = window.modelType?.trim();
+  if (!label) {
+    return "All";
+  }
+
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function formatLocalDateTime(value: string): string {
@@ -1247,8 +1277,8 @@ function formatModelUsageTableCells(modelId: string, totals: UsageTotals): strin
     displayModelId,
     formatCompactTokenCount(totals.inputTokens),
     formatCompactTokenCount(totals.outputTokens),
-    formatCompactCacheTokens(totals, totals.cacheReadInputTokens),
-    formatCompactCacheTokens(totals, totals.cacheWriteInputTokens),
+    formatCompactCacheTokens(totals.cacheReadStatus, totals.cacheReadInputTokens),
+    formatCompactCacheTokens(totals.cacheWriteStatus, totals.cacheWriteInputTokens),
     formatUsageUsd(totals, modelId)
   ];
 }
@@ -1259,25 +1289,25 @@ function UsageBreakdownLines(props: { totals: UsageTotals }): React.JSX.Element 
   return (
     <Box flexDirection="column">
       <Text>
-        input: {formatInteger(totals.inputTokens)}  output: {formatInteger(totals.outputTokens)}  cacheRead: {formatCacheTokens(totals, totals.cacheReadInputTokens)}
+        input: {formatInteger(totals.inputTokens)}  output: {formatInteger(totals.outputTokens)}  cacheRead: {formatCacheTokens(totals.cacheReadStatus, totals.cacheReadInputTokens)}
       </Text>
       <Text>
-        cacheWrite: {formatCacheTokens(totals, totals.cacheWriteInputTokens)}  cacheW5m: {formatOptionalTokens(totals.cacheWrite5mInputTokens)}  cacheW1h: {formatOptionalTokens(totals.cacheWrite1hInputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
+        cacheWrite: {formatCacheTokens(totals.cacheWriteStatus, totals.cacheWriteInputTokens)}  cacheW5m: {formatOptionalTokens(totals.cacheWrite5mInputTokens)}  cacheW1h: {formatOptionalTokens(totals.cacheWrite1hInputTokens)}  reasoning: {formatInteger(totals.reasoningOutputTokens)}  total: {formatInteger(totals.totalTokens)}
       </Text>
     </Box>
   );
 }
 
-function formatCacheTokens(totals: UsageTotals, value: number): string {
-  if (totals.cacheStatus === "unavailable") {
+function formatCacheTokens(status: CacheFieldStatus, value: number): string {
+  if (status === "unavailable") {
     return "-";
   }
 
   return formatOptionalTokens(value);
 }
 
-function formatCompactCacheTokens(totals: UsageTotals, value: number): string {
-  if (totals.cacheStatus === "unavailable") {
+function formatCompactCacheTokens(status: CacheFieldStatus, value: number): string {
+  if (status === "unavailable") {
     return "-";
   }
 
@@ -1297,11 +1327,17 @@ function formatInputPerOutput(totals: UsageTotals): string {
     return "input:cacheRead:cacheWrite:output = 0:0:0:0";
   }
 
-  if (totals.cacheStatus === "unavailable") {
-    return `input:cacheRead:cacheWrite:output = ${formatInteger(Math.round(totals.inputTokens / totals.outputTokens))}:-:-:1`;
-  }
+  const inputRatio = formatInteger(Math.round(totals.inputTokens / totals.outputTokens));
+  const cacheReadRatio =
+    totals.cacheReadStatus === "unavailable"
+      ? "-"
+      : formatInteger(Math.round(totals.cacheReadInputTokens / totals.outputTokens));
+  const cacheWriteRatio =
+    totals.cacheWriteStatus === "unavailable"
+      ? "-"
+      : formatInteger(Math.round(totals.cacheWriteInputTokens / totals.outputTokens));
 
-  return `input:cacheRead:cacheWrite:output = ${formatInteger(Math.round(totals.inputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.cacheReadInputTokens / totals.outputTokens))}:${formatInteger(Math.round(totals.cacheWriteInputTokens / totals.outputTokens))}:1`;
+  return `input:cacheRead:cacheWrite:output = ${inputRatio}:${cacheReadRatio}:${cacheWriteRatio}:1`;
 }
 
 function useMeasuredElementSize(): {
@@ -1643,7 +1679,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
 
 function enterFullscreenMode(stdout: NodeJS.WriteStream): () => void {
   if (!stdout.isTTY) {
-    return () => {};
+    return () => { };
   }
 
   let restored = false;
@@ -1661,7 +1697,7 @@ function enterFullscreenMode(stdout: NodeJS.WriteStream): () => void {
 
 function enableMouseReporting(stdout: NodeJS.WriteStream): () => void {
   if (!stdout.isTTY) {
-    return () => {};
+    return () => { };
   }
 
   let disabled = false;
