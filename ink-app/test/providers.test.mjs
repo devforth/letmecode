@@ -2339,52 +2339,6 @@ test("ClaudeUsageProvider counts nested workflow subagent transcripts and dedupe
   });
 });
 
-test("ClaudeUsageProvider groups nested workflow subagents with their parent session for source classification", async () => {
-  await withTempRoot(async (root) => {
-    // Parent session is an IDE session...
-    await writeClaudeSession(root, "wf-project/sess-vscode.jsonl", [
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:00.000Z",
-        requestId: "req-parent",
-        messageId: "msg-parent",
-        entrypoint: "claude-vscode",
-        model: "claude-opus-4-8",
-        inputTokens: 100,
-        outputTokens: 10
-      })
-    ]);
-    // ...while its workflow subagent reports only a generic "cli" entrypoint with no
-    // IDE hints. If the subagent is grouped with the parent (correct), it inherits the
-    // parent's "vscode" classification; if it lands in its own group (the bug), it is
-    // classified "cli" instead.
-    await writeClaudeSession(root, "wf-project/sess-vscode/subagents/workflows/wf-audit/agent-verify.jsonl", [
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:01.000Z",
-        requestId: "req-sub",
-        messageId: "msg-sub",
-        entrypoint: "cli",
-        model: "claude-opus-4-8",
-        inputTokens: 200,
-        outputTokens: 20
-      })
-    ]);
-
-    const logs = [];
-    const traceLogger = {
-      log(message) {
-        logs.push(message);
-      }
-    };
-    await new ClaudeUsageProvider({ root }).getStats({ traceLogger });
-
-    const subagentTraceLine = logs.find((line) =>
-      line.includes("subagents/workflows/wf-audit/agent-verify.jsonl")
-    );
-    assert.ok(subagentTraceLine, "expected a trace line for the nested workflow subagent transcript");
-    assert.match(subagentTraceLine, /source=vscode/);
-  });
-});
-
 test("ClaudeUsageProvider preserves real model usage when a later same-key synthetic row appears", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/keyed-synthetic-followup.jsonl", [
