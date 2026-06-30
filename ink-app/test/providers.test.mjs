@@ -2103,7 +2103,7 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
   });
 });
 
-test("ClaudeUsageProvider merges keyed usage rows by per-field maxima instead of first-write-wins", async () => {
+test("ClaudeUsageProvider keeps the most complete keyed usage snapshot instead of first-write-wins", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/key-collision.jsonl", [
       claudeAssistantEvent({
@@ -2147,15 +2147,53 @@ test("ClaudeUsageProvider merges keyed usage rows by per-field maxima instead of
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
     assert.equal(
-      stats.warnings.some((warning) => warning.includes("per-field maxima")),
+      stats.warnings.some((warning) => warning.includes("kept the most complete same-key snapshot")),
       false
     );
 
     const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
     assert.equal(
-      verboseStats.warnings.some((warning) => warning.includes("per-field maxima")),
+      verboseStats.warnings.some((warning) => warning.includes("kept the most complete same-key snapshot")),
       true
     );
+  });
+});
+
+test("ClaudeUsageProvider does not fabricate cache-write tokens when same-key snapshots split the 5m/1h buckets", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/cache-bucket-split.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        requestId: "req-split",
+        messageId: "msg-split",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheCreation5mInputTokens: 100,
+        cacheCreation1hInputTokens: 0,
+        outputTokens: 10
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-18T20:00:02.000Z",
+        requestId: "req-split",
+        messageId: "msg-split",
+        model: "claude-sonnet-4-6",
+        inputTokens: 100,
+        cacheCreation5mInputTokens: 0,
+        cacheCreation1hInputTokens: 100,
+        outputTokens: 10
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 1);
+    // A field-wise maximum would report 200 cache-write tokens (5m=100 + 1h=100); a single
+    // coherent snapshot keeps the real total of 100.
+    assert.equal(
+      stats.summary.totals.cacheWrite5mInputTokens + stats.summary.totals.cacheWrite1hInputTokens,
+      100
+    );
+    assert.equal(stats.summary.totals.inputTokens, 100);
+    assert.equal(stats.summary.totals.outputTokens, 10);
   });
 });
 
@@ -2705,7 +2743,7 @@ exit 1
 
     const combinedLogs = logs.join("\n");
     assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.claude/projects -> ${path.join(root, ".claude", "projects")} (exists).`), true);
-    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=2 source=vscode entrypoints=claude-vscode:1, sdk-cli:1"), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file trace-project/mixed.jsonl: lines=2 malformed=0 assistantUsageEvents=2 matchingEvents=2 entrypoints=claude-vscode:1, sdk-cli:1"), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${vscodeMissingBinary} -> failure (`), true);
     assert.equal(combinedLogs.includes(`[Claude] Checked ${vscodeBinary} -> success.`), true);
     assert.equal(combinedLogs.includes(`[Claude] Binary detection result: found ${vscodeBinary}.`), true);
@@ -2941,7 +2979,7 @@ test("ClaudeUsageProvider traces Linux Claude limits from shared Claude transcri
 
     const combinedLogs = logs.join("\n");
     assert.equal(combinedLogs.includes(`[Claude] Session root candidate ~/.config/claude/projects -> ${sessionsRoot} (exists).`), true);
-    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=1 source=vscode entrypoints=claude-vscode:1"), true);
+    assert.equal(combinedLogs.includes("[Claude] Session file ubuntu-cli/session.jsonl: lines=1 malformed=0 assistantUsageEvents=1 matchingEvents=1 entrypoints=claude-vscode:1"), true);
     assert.equal(combinedLogs.includes("[Claude] Live window primary/session: used=44%"), true);
     assert.equal(combinedLogs.includes("matchedEvents=1 input=120 output=12"), true);
   });

@@ -89,15 +89,10 @@ type ParseTotals = {
   malformedLines: number;
 };
 
-type ClaudeUsageCommandKind = "cli" | "vscode";
-
 type ClaudeUsageProviderOptions = {
   root?: string;
   id?: string;
   label?: string;
-  // Legacy knobs kept for compatibility. Claude usage is now aggregated across all entrypoints.
-  entrypoints?: string[];
-  usageCommandKind?: ClaudeUsageCommandKind;
   readUsageCommandOutput?: () => Promise<string | null>;
   readAuthStatusOutput?: () => Promise<string | null>;
   now?: () => Date;
@@ -118,23 +113,9 @@ type ParsedUsageEvent = {
 
 type ParsedClaudeSessionFile = {
   filePath: string;
-  sessionGroupKey: string;
   linesRead: number;
   malformedLines: number;
-  sourceKind: ClaudeSessionSourceKind;
-  sourceReason: string;
-  signals: ParsedClaudeSessionFileSignals;
   events: ParsedUsageEvent[];
-};
-
-type ClaudeSessionSourceKind = "cli" | "vscode" | "unknown";
-
-type ParsedClaudeSessionFileSignals = {
-  assistantEntryPoints: string[];
-  hasIdeOpenedFileAttachment: boolean;
-  hasIdeOpenedFileMarker: boolean;
-  hasIdeTooling: boolean;
-  hasQueueOperations: boolean;
 };
 
 type ParsedUsageEventAccumulator = {
@@ -224,7 +205,6 @@ export class ClaudeUsageProvider extends UsageProviderBase {
           `malformed=${file.malformedLines}`,
           `assistantUsageEvents=${file.events.length}`,
           `matchingEvents=${matchingEvents.length}`,
-          `source=${file.sourceKind}`,
           `entrypoints=${summarizeEventCounts(file.events.map((event) => event.entrypoint || "<empty>"))}`,
           `models=${summarizeDistinctValues(file.events.map((event) => event.modelId || "unknown"))}`
         ].join(" ")
@@ -284,7 +264,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
 
     if (options.verbose && parsedEvents.duplicateUsageKeyCollisions > 0) {
       warnings.push(
-        `Detected ${parsedEvents.duplicateUsageKeyCollisions} Claude usage key collision(s) with different token usage; merged same-key rows by per-field maxima to avoid double-counting cumulative snapshots.`
+        `Detected ${parsedEvents.duplicateUsageKeyCollisions} Claude usage key collision(s) with different token usage; kept the most complete same-key snapshot to avoid double-counting cumulative snapshots.`
       );
     }
 
@@ -613,9 +593,8 @@ async function loadParsedClaudeSessionFiles(
     const files: ParsedClaudeSessionFile[] = [];
     traceClaude(traceLogger, `Scanning session files under ${sessionsRoot}.`);
     for await (const filePath of walkSessionFiles(sessionsRoot)) {
-      files.push(await parseSessionFile(filePath, sessionsRoot));
+      files.push(await parseSessionFile(filePath));
     }
-    inferClaudeSessionFileSources(files);
     traceClaude(
       traceLogger,
       `Completed session file scan under ${sessionsRoot}: ${files.length} file(s) parsed.`
@@ -628,18 +607,13 @@ async function loadParsedClaudeSessionFiles(
   return pending;
 }
 
-async function parseSessionFile(filePath: string, sessionsRoot: string): Promise<ParsedClaudeSessionFile> {
+async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFile> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   let linesRead = 0;
   let malformedLines = 0;
   const events: ParsedUsageEvent[] = [];
-  const assistantEntryPoints = new Set<string>();
-  let hasIdeOpenedFileAttachment = false;
-  let hasIdeOpenedFileMarker = false;
-  let hasIdeTooling = false;
-  let hasQueueOperations = false;
 
   for await (const line of lineReader) {
     linesRead += 1;
@@ -653,22 +627,6 @@ async function parseSessionFile(filePath: string, sessionsRoot: string): Promise
     } catch {
       malformedLines += 1;
       continue;
-    }
-
-    if (payloadObject.type === "queue-operation") {
-      hasQueueOperations = true;
-    }
-
-    if (messageContainsIdeOpenedFileMarker(asRecord(payloadObject.message))) {
-      hasIdeOpenedFileMarker = true;
-    }
-
-    const attachment = asRecord(payloadObject.attachment);
-    if (attachment?.type === "opened_file_in_ide") {
-      hasIdeOpenedFileAttachment = true;
-    }
-    if (attachmentHasIdeTooling(attachment)) {
-      hasIdeTooling = true;
     }
 
     if (payloadObject.type !== "assistant") {
@@ -688,7 +646,6 @@ async function parseSessionFile(filePath: string, sessionsRoot: string): Promise
     const normalizedUsage = normalizeUsage(usage);
     const usageKeys = buildUsageEventKeys(payloadObject, message);
     const usageSignature = buildUsageSignature(payloadObject, modelId, normalizedUsage);
-    assistantEntryPoints.add(entrypoint);
     events.push({
       entrypoint,
       filePath,
@@ -705,138 +662,10 @@ async function parseSessionFile(filePath: string, sessionsRoot: string): Promise
 
   return {
     filePath,
-    sessionGroupKey: buildClaudeSessionGroupKey(sessionsRoot, filePath),
     linesRead,
     malformedLines,
-    sourceKind: "unknown",
-    sourceReason: "unclassified",
-    signals: {
-      assistantEntryPoints: [...assistantEntryPoints].sort(),
-      hasIdeOpenedFileAttachment,
-      hasIdeOpenedFileMarker,
-      hasIdeTooling,
-      hasQueueOperations
-    },
     events
   };
-}
-
-function buildClaudeSessionGroupKey(sessionsRoot: string, filePath: string): string {
-  const relativePath = path.relative(sessionsRoot, filePath);
-  if (!relativePath || relativePath.startsWith("..")) {
-    return filePath;
-  }
-
-  const normalizedRelativePath = relativePath.split(path.sep).join("/");
-  // Group subagent transcripts under their parent session. This covers both the
-  // flat Task layout (`<session>/subagents/<agent>.jsonl`) and the nested workflow
-  // layout (`<session>/subagents/workflows/<wf>/<agent>.jsonl`), so workflow
-  // subagents inherit the parent session's source classification rather than each
-  // becoming its own group.
-  const subagentMatch = normalizedRelativePath.match(/^(.*\/[^/]+)\/subagents\/.*\.jsonl$/);
-  if (subagentMatch?.[1]) {
-    return subagentMatch[1];
-  }
-
-  return normalizedRelativePath.replace(/\.jsonl$/i, "");
-}
-
-function inferClaudeSessionFileSources(files: ParsedClaudeSessionFile[]): void {
-  const groups = new Map<
-    string,
-    {
-      assistantEntryPoints: Set<string>;
-      hasIdeHints: boolean;
-    }
-  >();
-
-  for (const file of files) {
-    const group = groups.get(file.sessionGroupKey) ?? {
-      assistantEntryPoints: new Set<string>(),
-      hasIdeHints: false
-    };
-
-    for (const entrypoint of file.signals.assistantEntryPoints) {
-      group.assistantEntryPoints.add(entrypoint);
-    }
-
-    group.hasIdeHints =
-      group.hasIdeHints ||
-      file.signals.hasIdeOpenedFileAttachment ||
-      file.signals.hasIdeOpenedFileMarker ||
-      file.signals.hasIdeTooling ||
-      file.signals.hasQueueOperations;
-
-    groups.set(file.sessionGroupKey, group);
-  }
-
-  for (const file of files) {
-    const group = groups.get(file.sessionGroupKey);
-    const { kind, reason } = classifyClaudeSessionGroup(group);
-    file.sourceKind = kind;
-    file.sourceReason = reason;
-  }
-}
-
-function classifyClaudeSessionGroup(
-  group:
-    | {
-      assistantEntryPoints: Set<string>;
-      hasIdeHints: boolean;
-    }
-    | undefined
-): { kind: ClaudeSessionSourceKind; reason: string } {
-  if (!group) {
-    return { kind: "unknown", reason: "missing session group signals" };
-  }
-
-  if (group.assistantEntryPoints.has("claude-vscode")) {
-    return { kind: "vscode", reason: "explicit claude-vscode entrypoint" };
-  }
-
-  if (group.assistantEntryPoints.has("sdk-cli") || group.assistantEntryPoints.has("claude")) {
-    return { kind: "cli", reason: "explicit sdk-cli/claude entrypoint" };
-  }
-
-  if (group.assistantEntryPoints.has("cli")) {
-    return group.hasIdeHints
-      ? { kind: "vscode", reason: "generic cli entrypoint with IDE session hints" }
-      : { kind: "cli", reason: "generic cli entrypoint without IDE session hints" };
-  }
-
-  return { kind: "unknown", reason: "no assistant entrypoints" };
-}
-
-function attachmentHasIdeTooling(attachment: Record<string, unknown> | null): boolean {
-  if (attachment?.type !== "deferred_tools_delta") {
-    return false;
-  }
-
-  return extractStringArray(attachment.addedNames).some((name) => name.startsWith("mcp__ide__"));
-}
-
-function messageContainsIdeOpenedFileMarker(message: Record<string, unknown> | null): boolean {
-  const content = message?.content;
-  if (typeof content === "string") {
-    return content.includes("<ide_opened_file>");
-  }
-
-  if (!Array.isArray(content)) {
-    return false;
-  }
-
-  return content.some((item) => {
-    const contentItem = asRecord(item);
-    return typeof contentItem?.text === "string" && contentItem.text.includes("<ide_opened_file>");
-  });
-}
-
-function extractStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value.filter((item): item is string => typeof item === "string");
 }
 
 function buildUsageEventKeys(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string[] {
@@ -930,8 +759,14 @@ function recordParsedUsageEvent(parsedEvents: ParsedUsageEventAccumulator, event
 }
 
 function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEvent): ParsedUsageEvent {
-  const mergedUsage = mergeClaudeUsage(previous.usage, next.usage);
-  const modelId = selectMergedEventModelId(previous, next);
+  // Same-key events are repeated/streamed snapshots of one logical request. Rather than
+  // synthesizing a field-wise maximum (which can fabricate token totals when a snapshot
+  // splits cache-write tokens across the 5m/1h buckets differently), keep the single most
+  // complete real snapshot and discard the rest.
+  const primaryEvent = selectMergedSnapshotEvent(previous, next);
+  const otherEvent = primaryEvent === previous ? next : previous;
+  const usage = primaryEvent.usage;
+  const modelId = selectMergedEventModelId(primaryEvent, otherEvent);
   const latestEvent = normalizeTimestamp(next.timestampMs) >= normalizeTimestamp(previous.timestampMs) ? next : previous;
   const sessionId = extractUsageKeySessionId(previous.usageKeys) || extractUsageKeySessionId(next.usageKeys);
 
@@ -940,43 +775,39 @@ function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEve
     filePath: latestEvent.filePath,
     lineNumber: latestEvent.lineNumber,
     usageKeys: [...new Set([...previous.usageKeys, ...next.usageKeys])],
-    usageSignature: buildUsageSignatureFromParts(sessionId, modelId, mergedUsage),
+    usageSignature: buildUsageSignatureFromParts(sessionId, modelId, usage),
     timestampMs: Math.max(normalizeTimestamp(previous.timestampMs), normalizeTimestamp(next.timestampMs)),
     modelId,
-    usage: mergedUsage,
-    totals: usageToTotals(modelId, mergedUsage),
+    usage,
+    totals: usageToTotals(modelId, usage),
     rateLimits: latestEvent.rateLimits ?? previous.rateLimits ?? next.rateLimits
   };
 }
 
-function mergeClaudeUsage(previous: ClaudeUsage, next: ClaudeUsage): ClaudeUsage {
-  return {
-    inputTokens: Math.max(previous.inputTokens, next.inputTokens),
-    cacheReadInputTokens: Math.max(previous.cacheReadInputTokens, next.cacheReadInputTokens),
-    cacheCreationInputTokens: Math.max(previous.cacheCreationInputTokens, next.cacheCreationInputTokens),
-    cacheCreation5mInputTokens: Math.max(previous.cacheCreation5mInputTokens, next.cacheCreation5mInputTokens),
-    cacheCreation1hInputTokens: Math.max(previous.cacheCreation1hInputTokens, next.cacheCreation1hInputTokens),
-    outputTokens: Math.max(previous.outputTokens, next.outputTokens),
-    inferenceGeo: next.inferenceGeo || previous.inferenceGeo
-  };
+// Pick the snapshot that carries the most usage. Cumulative snapshots are monotonic, so the
+// largest total is the final state; this also keeps a real synthetic-followup row (0 tokens)
+// from clobbering the real usage it follows. Ties fall back to the later, then the earlier-seen
+// event for deterministic output.
+function selectMergedSnapshotEvent(previous: ParsedUsageEvent, next: ParsedUsageEvent): ParsedUsageEvent {
+  if (next.totals.totalTokens !== previous.totals.totalTokens) {
+    return next.totals.totalTokens > previous.totals.totalTokens ? next : previous;
+  }
+
+  return normalizeTimestamp(next.timestampMs) > normalizeTimestamp(previous.timestampMs) ? next : previous;
 }
 
-function selectMergedEventModelId(previous: ParsedUsageEvent, next: ParsedUsageEvent): string {
-  if (previous.modelId === next.modelId) {
-    return previous.modelId;
+function selectMergedEventModelId(primary: ParsedUsageEvent, other: ParsedUsageEvent): string {
+  if (primary.modelId === other.modelId) {
+    return primary.modelId;
   }
 
-  if (isInternalClaudeModel(previous.modelId) && !isInternalClaudeModel(next.modelId)) {
-    return next.modelId;
+  // The chosen snapshot's own model is authoritative, except when it is the internal
+  // <synthetic> placeholder and the other event names a real, priceable model.
+  if (isInternalClaudeModel(primary.modelId) && !isInternalClaudeModel(other.modelId)) {
+    return other.modelId;
   }
 
-  if (isInternalClaudeModel(next.modelId) && !isInternalClaudeModel(previous.modelId)) {
-    return previous.modelId;
-  }
-
-  return next.totals.estimatedCredits >= previous.totals.estimatedCredits
-    ? next.modelId
-    : previous.modelId;
+  return primary.modelId;
 }
 
 function canCollapseAdjacentUnkeyedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEvent): boolean {
