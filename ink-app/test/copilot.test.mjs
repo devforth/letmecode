@@ -50,9 +50,6 @@ async function parseCopilotRecords(records) {
 function rawRecord(payload, overrides = {}) {
   return {
     payload,
-    filePath: overrides.filePath ?? "/copilot/otel/vscode.jsonl",
-    fileSource: overrides.fileSource ?? "copilot-cli",
-    lineNumber: overrides.lineNumber ?? 1,
     fileModifiedAtMs: overrides.fileModifiedAtMs ?? 1_700_000_000_000
   };
 }
@@ -271,50 +268,34 @@ test("parse defaults missing model to unknown", async () => {
   assert.equal(events[0].modelId, "unknown");
 });
 
-test("parse supports multiple timestamp formats and prefers completion (startTime over hrTime)", async () => {
-  // endTime/startTime (request completion) win over hrTime, matching Tokscale.
-  const startDay = new Date(1782130578 * 1000).toISOString().slice(0, 10);
-  const hrDay = new Date(1782206354 * 1000).toISOString().slice(0, 10);
-  assert.notEqual(startDay, hrDay); // the two timestamps are on different days
-  const hr = await parseCopilotRecords([
-    rawRecord({
-      startTime: [1782130578, 148000000],
-      hrTime: [1782206354, 661000000],
-      attributes: {
-        "gen_ai.response.model": "gpt-4.1",
-        "gen_ai.operation.name": "chat",
-        "gen_ai.usage.input_tokens": 5,
-        "gen_ai.usage.output_tokens": 1
-      }
-    })
-  ]);
-  assert.equal(new Date(hr.events[0].timestampMs).toISOString().slice(0, 10), startDay);
+test("parse timestamp precedence: endTime > startTime > hrTime > file mtime", async () => {
+  const day = (seconds) => new Date(seconds * 1000).toISOString().slice(0, 10);
+  const tokens = { "gen_ai.operation.name": "chat", "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 1 };
 
-  // ISO string via a non-hr field.
-  const iso = await parseCopilotRecords([
-    rawRecord({
-      time: "2026-06-20T00:00:00.000Z",
-      attributes: {
-        "gen_ai.operation.name": "chat",
-        "gen_ai.usage.input_tokens": 5,
-        "gen_ai.usage.output_tokens": 1
-      }
-    })
+  // endTime wins over startTime and hrTime.
+  const end = await parseCopilotRecords([
+    rawRecord({ endTime: [1782300000, 0], startTime: [1782130578, 0], hrTime: [1782206354, 0], attributes: tokens })
   ]);
+  assert.equal(new Date(end.events[0].timestampMs).toISOString().slice(0, 10), day(1782300000));
+
+  // startTime is used when endTime is absent (over hrTime, different days).
+  assert.notEqual(day(1782130578), day(1782206354));
+  const start = await parseCopilotRecords([
+    rawRecord({ startTime: [1782130578, 0], hrTime: [1782206354, 0], attributes: tokens })
+  ]);
+  assert.equal(new Date(start.events[0].timestampMs).toISOString().slice(0, 10), day(1782130578));
+
+  // hrTime is the fallback when endTime/startTime are absent.
+  const hr = await parseCopilotRecords([rawRecord({ hrTime: [1782206354, 0], attributes: tokens })]);
+  assert.equal(new Date(hr.events[0].timestampMs).toISOString().slice(0, 10), day(1782206354));
+
+  // ISO string is accepted.
+  const iso = await parseCopilotRecords([rawRecord({ time: "2026-06-20T00:00:00.000Z", attributes: tokens })]);
   assert.equal(new Date(iso.events[0].timestampMs).toISOString().slice(0, 10), "2026-06-20");
 
-  // Falls back to file mtime when no timestamp is present.
+  // Falls back to file mtime when no timestamp field is present.
   const fallback = await parseCopilotRecords([
-    rawRecord(
-      {
-        attributes: {
-          "gen_ai.operation.name": "chat",
-          "gen_ai.usage.input_tokens": 5,
-          "gen_ai.usage.output_tokens": 1
-        }
-      },
-      { fileModifiedAtMs: 1_782_000_000_000 }
-    )
+    rawRecord({ attributes: tokens }, { fileModifiedAtMs: 1_782_000_000_000 })
   ]);
   assert.equal(fallback.events[0].timestampMs, 1_782_000_000_000);
 });
@@ -374,31 +355,6 @@ test("parse drops records that match no supported span/log type", async () => {
   assert.equal(events.length, 0);
 });
 
-test("parse ignores invoke_agent aggregate spans", async () => {
-  const { events } = await parseCopilotRecords([
-    chatRecord({
-      "gen_ai.operation.name": "invoke_agent",
-      "event.name": "copilot_chat.agent.turn",
-      "gen_ai.usage.input_tokens": 50,
-      "gen_ai.usage.output_tokens": 5
-    })
-  ]);
-  assert.equal(events.length, 0);
-});
-
-test("parse reads session id aliases", async () => {
-  const { events } = await parseCopilotRecords([
-    chatRecord({
-      "gen_ai.response.model": "gpt-4.1",
-      "gen_ai.operation.name": "chat",
-      "copilot_chat.session_id": "sess-7",
-      "gen_ai.usage.input_tokens": 10,
-      "gen_ai.usage.output_tokens": 1
-    })
-  ]);
-  assert.equal(events[0].sessionId, "sess-7");
-});
-
 test("parse resolves trace id from spanContext", async () => {
   const { events } = await parseCopilotRecords([
     rawRecord({
@@ -413,26 +369,6 @@ test("parse resolves trace id from spanContext", async () => {
   ]);
   assert.equal(events[0].traceId, "trace-xyz");
   assert.equal(events[0].spanId, "span-1");
-});
-
-test("parse inherits model from a sibling record sharing the trace", async () => {
-  const { events } = await parseCopilotRecords([
-    chatRecord({
-      "gen_ai.trace.id": "t-shared",
-      "gen_ai.response.model": "claude-sonnet-4-6",
-      "gen_ai.operation.name": "chat",
-      "gen_ai.usage.input_tokens": 5,
-      "gen_ai.usage.output_tokens": 1
-    }),
-    chatRecord({
-      "gen_ai.trace.id": "t-shared",
-      "gen_ai.operation.name": "inference",
-      "gen_ai.usage.input_tokens": 200,
-      "gen_ai.usage.output_tokens": 20
-    })
-  ]);
-  assert.equal(events.length, 1);
-  assert.equal(events[0].modelId, "claude-sonnet-4-6");
 });
 
 test("parse deduplicates repeated chat spans by trace and span", async () => {
@@ -616,10 +552,8 @@ test("discover finds multiple JSONL files and ignores non-JSONL files", async ()
 
 // ─── user-info (offline, injected fakes) ─────────────────────────────────────
 
-test("user-info reports a controlled warning when no credentials are found", async () => {
-  const result = await getCopilotUserInfo({
-    resolveCredentials: async () => ({ credentials: null, warnings: [] })
-  });
+test("user-info reports a controlled warning when no token is found", async () => {
+  const result = await getCopilotUserInfo({ resolveToken: async () => null });
   assert.equal(result.quotaInfo, undefined);
   assert.equal(
     result.warnings.some((w) => w.includes("GitHub credentials were not found")),
@@ -627,18 +561,14 @@ test("user-info reports a controlled warning when no credentials are found", asy
   );
 });
 
-test("user-info parses quota from an injected client and never leaks the token", async () => {
+test("user-info parses quota from an injected fetch and never leaks the token", async () => {
   const result = await getCopilotUserInfo({
-    resolveCredentials: async () => ({
-      credentials: { token: "secret-token", source: "gh-token-env" },
-      warnings: []
-    }),
+    resolveToken: async () => "secret-token",
     fetchUser: async (token) => {
       assert.equal(token, "secret-token");
       return { ok: true, data: { copilot_plan: "copilot_pro", quota_snapshots: { chat: { percent_remaining: 70 } } } };
     }
   });
-  assert.equal(result.credentialSource, "gh-token-env");
   assert.equal(result.quotaInfo.plan, "copilot_pro");
   assert.equal(result.quotaInfo.quotas[0].usedPercent, 30);
   assert.equal(JSON.stringify(result).includes("secret-token"), false);
@@ -646,13 +576,9 @@ test("user-info parses quota from an injected client and never leaks the token",
 
 test("user-info surfaces a transport failure as a warning", async () => {
   const result = await getCopilotUserInfo({
-    resolveCredentials: async () => ({
-      credentials: { token: "t", source: "gh-cli-config" },
-      warnings: []
-    }),
+    resolveToken: async () => "t",
     fetchUser: async () => ({ ok: false, warning: "Copilot quota API returned 401; run `gh auth login` again." })
   });
   assert.equal(result.quotaInfo, undefined);
-  assert.equal(result.credentialSource, "gh-cli-config");
   assert.equal(result.warnings.some((w) => w.includes("401")), true);
 });

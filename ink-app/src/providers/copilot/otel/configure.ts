@@ -86,17 +86,6 @@ export function getVsCodeUserRoots(root: string): string[] {
   return [path.join(configRoot, "Code", "User"), path.join(configRoot, "Code - Insiders", "User")];
 }
 
-export async function isCopilotVsCodeLoggingEnabled(root: string, outfile: string): Promise<boolean> {
-  const settings = await readJsonSettings(await getVsCodeSettingsPath(root));
-  const configuredOutfile = settings["github.copilot.chat.otel.outfile"];
-  return (
-    settings["github.copilot.chat.otel.enabled"] === true &&
-    settings["github.copilot.chat.otel.exporterType"] === "file" &&
-    typeof configuredOutfile === "string" &&
-    normalizeComparablePath(configuredOutfile) === normalizeComparablePath(toVsCodeOutfilePath(outfile))
-  );
-}
-
 /**
  * For each VS Code user root (stable + Insiders), read settings.json and report
  * the configured Copilot OTEL outfile when file export is enabled. Used by the
@@ -117,11 +106,6 @@ export async function getConfiguredCopilotOutfiles(
   }
 
   return results;
-}
-
-function normalizeComparablePath(filePath: string): string {
-  const normalized = path.resolve(filePath).replace(/\\/g, "/");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 async function isDirectory(filePath: string): Promise<boolean> {
