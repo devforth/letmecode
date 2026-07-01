@@ -38,6 +38,19 @@ const RATE_CARD: Record<string, UsageRate> = {
   "claude-opus-4-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-1": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
   "claude-opus-4": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
+  "claude-sonnet-5": {
+    input: 3,
+    cacheRead: 0.3,
+    cacheWrite: 3.75,
+    cacheWrite5m: 3.75,
+    cacheWrite1h: 6,
+    output: 15,
+    // Intro pricing (~0.66x) through 2026-08-31; reverts to the standard rate above on 2026-09-01.
+    introOffer: {
+      effectiveUntilMs: Date.UTC(2026, 8, 1),
+      rate: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 4, output: 10 }
+    }
+  },
   "claude-sonnet-4-6": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
   "claude-sonnet-4-5": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
   "claude-sonnet-4": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
@@ -71,6 +84,12 @@ const parsedClaudeSessionFilesCache = new Map<string, Promise<ParsedClaudeSessio
 const claudeBinaryPathCache = new Map<string, Promise<string | null>>();
 const claudeUsageOutputCache = new Map<string, Promise<string | null>>();
 const claudeAuthStatusOutputCache = new Map<string, Promise<string | null>>();
+const claudeOauthCredentialsOutputCache = new Map<string, Promise<string | null>>();
+
+// The claude.ai OAuth `rateLimitTier` for Team Premium workspaces. Team Standard exposes a
+// different tier string; a missing/null tier is treated as unknown rather than guessed at,
+// because the field is occasionally absent or stale after subscription changes.
+const CLAUDE_TEAM_PREMIUM_RATE_LIMIT_TIERS = new Set(["default_claude_max_5x"]);
 
 type ClaudeUsage = {
   inputTokens: number;
@@ -95,7 +114,13 @@ type ClaudeUsageProviderOptions = {
   label?: string;
   readUsageCommandOutput?: () => Promise<string | null>;
   readAuthStatusOutput?: () => Promise<string | null>;
+  readOauthCredentials?: () => Promise<string | null>;
   now?: () => Date;
+};
+
+type ClaudeOauthCredentials = {
+  subscriptionType: string | null;
+  rateLimitTier: string | null;
 };
 
 type ParsedUsageEvent = {
@@ -152,6 +177,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
   private readonly root: string;
   private readonly readUsageCommandOutput?: () => Promise<string | null>;
   private readonly readAuthStatusOutput?: () => Promise<string | null>;
+  private readonly readOauthCredentials?: () => Promise<string | null>;
   private readonly now: () => Date;
 
   constructor(options: ClaudeUsageProviderOptions = {}) {
@@ -159,6 +185,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     this.root = path.resolve(options.root ?? os.homedir());
     this.readUsageCommandOutput = options.readUsageCommandOutput;
     this.readAuthStatusOutput = options.readAuthStatusOutput;
+    this.readOauthCredentials = options.readOauthCredentials;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -295,7 +322,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     const liveLimitWindows = await buildLiveLimitWindows({
       root: this.root,
       readUsageCommandOutput: this.readUsageCommandOutput,
-      readAuthStatusOutput: this.readAuthStatusOutput,
+      readOauthCredentials: this.readOauthCredentials,
       traceLogger: options.traceLogger,
       now: this.now(),
       selectedEvents
@@ -373,16 +400,16 @@ function normalizeUsage(value: unknown): ClaudeUsage {
   };
 }
 
-function resolveRate(modelId: string): UsageRate | undefined {
-  return resolveUsageRate(RATE_CARD, modelId, 0, { prefixMatch: true });
+function resolveRate(modelId: string, timestampMs?: number): UsageRate | undefined {
+  return resolveUsageRate(RATE_CARD, modelId, 0, { prefixMatch: true, timestampMs });
 }
 
 function isInternalClaudeModel(modelId: string): boolean {
   return modelId === "<synthetic>";
 }
 
-function creditsFor(modelId: string, usage: ClaudeUsage): number {
-  const rate = resolveRate(modelId);
+function creditsFor(modelId: string, usage: ClaudeUsage, timestampMs?: number): number {
+  const rate = resolveRate(modelId, timestampMs);
   if (!rate) {
     return 0;
   }
@@ -401,7 +428,7 @@ function creditsFor(modelId: string, usage: ClaudeUsage): number {
   );
 }
 
-function usageToTotals(modelId: string, usage: ClaudeUsage): UsageTotals {
+function usageToTotals(modelId: string, usage: ClaudeUsage, timestampMs?: number): UsageTotals {
   const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
   const cacheWriteInputTokens =
     cacheWriteBreakdown.cacheWrite5mInputTokens +
@@ -420,7 +447,7 @@ function usageToTotals(modelId: string, usage: ClaudeUsage): UsageTotals {
       usage.cacheReadInputTokens +
       cacheWriteInputTokens +
       usage.outputTokens,
-    estimatedCredits: creditsFor(modelId, usage),
+    estimatedCredits: creditsFor(modelId, usage, timestampMs),
     eventCount: 1
   };
 }
@@ -655,7 +682,7 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
       timestampMs: eventTimeMs,
       modelId,
       usage: normalizedUsage,
-      totals: usageToTotals(modelId, normalizedUsage),
+      totals: usageToTotals(modelId, normalizedUsage, eventTimeMs),
       rateLimits
     });
   }
@@ -779,7 +806,7 @@ function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEve
     timestampMs: Math.max(normalizeTimestamp(previous.timestampMs), normalizeTimestamp(next.timestampMs)),
     modelId,
     usage,
-    totals: usageToTotals(modelId, usage),
+    totals: usageToTotals(modelId, usage, primaryEvent.timestampMs),
     rateLimits: latestEvent.rateLimits ?? previous.rateLimits ?? next.rateLimits
   };
 }
@@ -914,21 +941,21 @@ function buildClaudeCommandEnvironment(): NodeJS.ProcessEnv {
 async function buildLiveLimitWindows(options: {
   root: string;
   readUsageCommandOutput?: () => Promise<string | null>;
-  readAuthStatusOutput?: () => Promise<string | null>;
+  readOauthCredentials?: () => Promise<string | null>;
   traceLogger?: ProviderTraceLogger;
   now: Date;
   selectedEvents: ParsedUsageEvent[];
 }): Promise<{ primaryLimitWindows: LimitWindowRow[]; secondaryLimitWindows: LimitWindowRow[] }> {
-  const [usageOutput, subscriptionType] = await Promise.all([
+  const [usageOutput, credentials] = await Promise.all([
     readClaudeUsageCommandOutput(options.root, options.readUsageCommandOutput, options.traceLogger),
-    readClaudeSubscriptionType(options.root, options.readAuthStatusOutput, options.traceLogger)
+    readClaudeOauthCredentials(options.root, options.readOauthCredentials, options.traceLogger)
   ]);
   const snapshots = parseLiveUsageWindowSnapshots(usageOutput, options.now);
   traceClaude(options.traceLogger, `Parsed ${snapshots.length} live usage snapshot(s) from /usage output.`);
   if (snapshots.length === 0) {
     traceClaude(options.traceLogger, "No live usage snapshots matched the expected /usage format.");
   }
-  const resolvedPlanType = resolveClaudeLivePlanType(subscriptionType, snapshots);
+  const resolvedPlanType = resolveClaudeLivePlanType(credentials);
   traceClaude(options.traceLogger, `Resolved live plan type ${resolvedPlanType}.`);
 
   const primaryLimitWindows = snapshots
@@ -970,29 +997,124 @@ async function buildLiveLimitWindows(options: {
   };
 }
 
-function resolveClaudeLivePlanType(
-  subscriptionType: string | null,
-  snapshots: LiveUsageWindowSnapshot[]
-): string {
-  if (snapshots.some((snapshot) => snapshot.modelScope === "sonnet-only")) {
+function resolveClaudeLivePlanType(credentials: ClaudeOauthCredentials | null): string {
+  const teamPlan = resolveClaudeTeamPlan(credentials?.subscriptionType, credentials?.rateLimitTier);
+  if (teamPlan) {
+    return teamPlan;
+  }
+
+  return credentials?.subscriptionType || "live";
+}
+
+// Anthropic reports every Team workspace as subscriptionType "team"; the tier is only
+// distinguishable via the claude.ai OAuth `rateLimitTier`. A present-but-unrecognized tier is
+// treated as standard, while a missing tier stays "team_unknown" rather than being guessed at.
+function resolveClaudeTeamPlan(
+  subscriptionType: string | null | undefined,
+  rateLimitTier: string | null | undefined
+): "team_premium" | "team_standard" | "team_unknown" | undefined {
+  if (subscriptionType !== "team") {
+    return undefined;
+  }
+
+  if (rateLimitTier && CLAUDE_TEAM_PREMIUM_RATE_LIMIT_TIERS.has(rateLimitTier)) {
     return "team_premium";
   }
 
-  return subscriptionType || "live";
+  if (rateLimitTier) {
+    return "team_standard";
+  }
+
+  return "team_unknown";
 }
 
-async function readClaudeSubscriptionType(
+async function readClaudeOauthCredentials(
   root: string,
-  override?: () => Promise<string | null>,
+  override: (() => Promise<string | null>) | undefined,
+  traceLogger?: ProviderTraceLogger
+): Promise<ClaudeOauthCredentials | null> {
+  const output = await readClaudeOauthCredentialsOutput(root, override, traceLogger);
+  const credentials = parseClaudeOauthCredentials(output);
+  if (output && !credentials) {
+    traceClaude(traceLogger, "Could not parse claude.ai OAuth credentials from credentials file.");
+  }
+  traceClaude(
+    traceLogger,
+    `OAuth credentials result: subscriptionType=${credentials?.subscriptionType ?? "<none>"} rateLimitTier=${credentials?.rateLimitTier ?? "<none>"}.`
+  );
+  return credentials;
+}
+
+async function readClaudeOauthCredentialsOutput(
+  root: string,
+  override: (() => Promise<string | null>) | undefined,
   traceLogger?: ProviderTraceLogger
 ): Promise<string | null> {
-  const output = await readClaudeAuthStatusOutput(root, override, traceLogger);
-  const subscriptionType = parseClaudeSubscriptionType(output);
-  if (output && !subscriptionType) {
-    traceClaude(traceLogger, "Could not parse subscription type from auth status output.");
+  if (override) {
+    try {
+      const output = await override();
+      traceClaude(traceLogger, "Using injected OAuth credentials override.");
+      return output;
+    } catch {
+      traceClaude(traceLogger, "Injected OAuth credentials override failed.");
+      return null;
+    }
   }
-  traceClaude(traceLogger, `Subscription type result: ${subscriptionType ?? "<none>"}.`);
-  return subscriptionType;
+
+  const credentialsPath = path.join(path.resolve(root), ".claude", ".credentials.json");
+  const cacheKey = credentialsPath;
+  const cached = claudeOauthCredentialsOutputCache.get(cacheKey);
+  if (cached) {
+    traceClaude(traceLogger, "OAuth credentials cache hit.");
+    return cached;
+  }
+
+  const pending = (async () => {
+    try {
+      const output = await fs.promises.readFile(credentialsPath, { encoding: "utf8" });
+      traceClaude(traceLogger, `Read OAuth credentials from ${credentialsPath}.`);
+      return output;
+    } catch {
+      traceClaude(traceLogger, `No readable OAuth credentials at ${credentialsPath}.`);
+      return null;
+    }
+  })();
+
+  claudeOauthCredentialsOutputCache.set(cacheKey, pending);
+  return pending;
+}
+
+function parseClaudeOauthCredentials(output: string | null): ClaudeOauthCredentials | null {
+  if (!output) {
+    return null;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(output);
+  } catch {
+    return null;
+  }
+
+  const oauth = asRecord(asRecord(payload)?.claudeAiOauth);
+  if (!oauth) {
+    return null;
+  }
+
+  const subscriptionType =
+    typeof oauth.subscriptionType === "string" && oauth.subscriptionType.trim()
+      ? oauth.subscriptionType.trim()
+      : null;
+  const rateLimitTier =
+    typeof oauth.rateLimitTier === "string" && oauth.rateLimitTier.trim()
+      ? oauth.rateLimitTier.trim()
+      : null;
+
+  if (!subscriptionType && !rateLimitTier) {
+    return null;
+  }
+
+  return { subscriptionType, rateLimitTier };
 }
 
 async function readClaudeAuthStatusOutput(
@@ -1046,11 +1168,6 @@ async function readClaudeAuthStatusOutput(
 
   claudeAuthStatusOutputCache.set(cacheKey, pending);
   return pending;
-}
-
-function parseClaudeSubscriptionType(output: string | null): string | null {
-  const snapshot = parseClaudeAuthStatusSnapshot(output);
-  return snapshot?.subscriptionType ?? null;
 }
 
 function parseClaudeAuthStatusSnapshot(output: string | null): {

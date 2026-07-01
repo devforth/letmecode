@@ -62,6 +62,12 @@ async function writeClaudeSessionAt(targetRoot, relativePath, lines) {
   await fs.writeFile(target, lines.join("\n"), "utf8");
 }
 
+async function writeClaudeCredentials(root, claudeAiOauth) {
+  const target = path.join(root, ".claude", ".credentials.json");
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, JSON.stringify({ claudeAiOauth }, null, 2), "utf8");
+}
+
 async function writeExecutable(target, contents) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, contents, "utf8");
@@ -2437,12 +2443,20 @@ test("ClaudeUsageProvider aggregates Claude entrypoints and builds live usage wi
         null,
         2
       );
+    const readOauthCredentials = async () =>
+      JSON.stringify({
+        claudeAiOauth: {
+          subscriptionType: "team",
+          rateLimitTier: "default_claude_max_1x"
+        }
+      });
     const now = () => new Date("2026-06-25T10:00:00.000Z");
 
     const stats = await new ClaudeUsageProvider({
       root,
       readUsageCommandOutput,
       readAuthStatusOutput,
+      readOauthCredentials,
       now
     }).getStats();
 
@@ -2455,14 +2469,14 @@ test("ClaudeUsageProvider aggregates Claude entrypoints and builds live usage wi
       ["claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6"]
     );
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].planType, "team");
+    assert.equal(stats.primaryLimitWindows[0].planType, "team_standard");
     assert.equal(stats.primaryLimitWindows[0].windowMinutes, 300);
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 20);
     assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 20);
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 1169);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 116);
     assert.equal(stats.secondaryLimitWindows.length, 1);
-    assert.equal(stats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team_standard");
     assert.equal(stats.secondaryLimitWindows[0].windowMinutes, 10080);
     assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 63);
     assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 63);
@@ -2526,6 +2540,13 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
           orgName: "Premium Org",
           subscriptionType: "team"
         }),
+      readOauthCredentials: async () =>
+        JSON.stringify({
+          claudeAiOauth: {
+            subscriptionType: "team",
+            rateLimitTier: "default_claude_max_5x"
+          }
+        }),
       now: () => new Date("2026-06-25T10:00:00.000Z")
     }).getStats();
 
@@ -2553,6 +2574,59 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
       sonnetOnlyWeek?.modelUsage.map((row) => row.modelId).sort(),
       ["claude-sonnet-4-5", "claude-sonnet-4-6"]
     );
+  });
+});
+
+test("ClaudeUsageProvider marks a Team account with a missing rate-limit tier as team_unknown", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/team-unknown.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-team-unknown",
+        messageId: "msg-team-unknown",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 100,
+        outputTokens: 10
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () => "Current session: 2% used · resets Jun 25, 12:30pm (UTC)",
+      readOauthCredentials: async () =>
+        JSON.stringify({ claudeAiOauth: { subscriptionType: "team" } }),
+      now: () => new Date("2026-06-25T10:00:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].planType, "team_unknown");
+  });
+});
+
+test("ClaudeUsageProvider falls back to a live plan when OAuth credentials are absent", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/no-credentials.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T08:00:00.000Z",
+        requestId: "req-no-credentials",
+        messageId: "msg-no-credentials",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 100,
+        outputTokens: 10
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () => "Current session: 2% used · resets Jun 25, 12:30pm (UTC)",
+      readOauthCredentials: async () => null,
+      now: () => new Date("2026-06-25T10:00:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].planType, "live");
   });
 });
 
@@ -2800,6 +2874,11 @@ test("ClaudeUsageProvider forces TZ=UTC for Claude command execution", async () 
       })
     ]);
 
+    await writeClaudeCredentials(root, {
+      subscriptionType: "team",
+      rateLimitTier: "default_claude_max_5x"
+    });
+
     const vscodeBinary = path.join(
       root,
       ".vscode",
@@ -2846,13 +2925,13 @@ exit 1
     }).getStats();
 
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].planType, "team");
+    assert.equal(stats.primaryLimitWindows[0].planType, "team_premium");
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 26);
     assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 26);
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 120);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 12);
     assert.equal(stats.secondaryLimitWindows.length, 1);
-    assert.equal(stats.secondaryLimitWindows[0].planType, "team");
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team_premium");
     assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 34);
     assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 34);
     assert.equal(stats.secondaryLimitWindows[0].totals.inputTokens, 200);
