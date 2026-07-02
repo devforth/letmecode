@@ -1,13 +1,22 @@
 {
   "name": "letmecode",
   "version": "0.1.22",
-  "description": "Provider-based terminal usage dashboard for LetMeCode.",
-  "author": "devforth.io",
+  "description": "Terminal AI usage dashboard for Codex, Claude, Copilot, and Antigravity.",
+  "author": "Devforth (https://devforth.io)",
   "license": "MIT",
   "packageManager": "pnpm@10.28.2",
   "type": "commonjs",
+  "main": "./dist/index.js",
   "bin": {
     "letmecode": "./bin/letmecode.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devforth/letmecode.git"
+  },
+  "homepage": "https://github.com/devforth/letmecode#readme",
+  "bugs": {
+    "url": "https://github.com/devforth/letmecode/issues"
   },
   "files": [
     "bin",
@@ -32,9 +41,18 @@
     "test": "node --test ink-app/test/*.test.mjs"
   },
   "keywords": [
+    "ai",
+    "agents",
     "cli",
-    "ink",
+    "dashboard",
+    "usage",
+    "terminal",
+    "codex",
+    "claude",
+    "copilot",
+    "antigravity",
     "npx",
+    "ink",
     "typescript"
   ],
   "dependencies": {

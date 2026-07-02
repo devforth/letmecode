@@ -18,16 +18,18 @@ async function withTempRoot(run) {
   }
 }
 
-test("parseCliOptions recognizes help, verbose, and log destination flags", () => {
+test("parseCliOptions recognizes help, verbose, no-usage, and log destination flags", () => {
   assert.deepEqual(parseCliOptions(["-h", "-v", "--log-to", "trace.log"]), {
     showHelp: true,
     verbose: true,
-    logToPath: "trace.log"
+    logToPath: "trace.log",
+    enableAnonymousUsageReporting: true
   });
-  assert.deepEqual(parseCliOptions(["--help", "--log-to=trace.txt"]), {
+  assert.deepEqual(parseCliOptions(["--help", "--log-to=trace.txt", "--no-usage"]), {
     showHelp: true,
     verbose: false,
-    logToPath: "trace.txt"
+    logToPath: "trace.txt",
+    enableAnonymousUsageReporting: false
   });
 });
 
@@ -50,5 +52,6 @@ test("buildHelpText documents the help and trace flags", () => {
   const helpText = buildHelpText();
   assert.match(helpText, /-h, --help/);
   assert.match(helpText, /--log-to PATH/);
+  assert.match(helpText, /--no-usage/);
   assert.match(helpText, /Trace logging:/);
 });

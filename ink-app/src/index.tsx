@@ -82,7 +82,10 @@ const EXIT_FULLSCREEN_MODE = "\u001B[?1049l";
 const SCROLLBAR_TRACK_GLYPH = "│";
 const SCROLLBAR_THUMB_GLYPH = "█";
 
-function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
+function App(props: {
+  statsOptions: ProviderStatsOptions;
+  usageReportingEnabled: boolean;
+}): React.JSX.Element {
   const { exit } = useApp();
   const viewportHeight = useViewportHeight();
   const { ref: contentPanelRef, height: contentPanelHeight } = useMeasuredElementSize();
@@ -172,7 +175,11 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
   }, [hasUserSelectedProvider, providerStates, sortedProviderStates]);
 
   useEffect(() => {
-    if (hasReportedAnonymousUsageRef.current || providerStates.some((state) => state.status === "loading")) {
+    if (
+      !props.usageReportingEnabled ||
+      hasReportedAnonymousUsageRef.current ||
+      providerStates.some((state) => state.status === "loading")
+    ) {
       return;
     }
 
@@ -184,7 +191,7 @@ function App(props: { statsOptions: ProviderStatsOptions }): React.JSX.Element {
     void reportAnonymousUsage(readyStats).catch(() => {
       // Anonymous usage reporting is best-effort and must never disturb the TUI.
     });
-  }, [providerStates]);
+  }, [props.usageReportingEnabled, providerStates]);
 
   useMouseClick((click) => {
     const regionId = resolveClick(click);
@@ -1663,11 +1670,17 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   };
   process.once("exit", exitHandler);
 
-  const instance = render(<App statsOptions={statsOptions} />, {
+  const instance = render(
+    <App
+      statsOptions={statsOptions}
+      usageReportingEnabled={cliOptions.enableAnonymousUsageReporting}
+    />,
+    {
     stdout: process.stdout,
     stdin: process.stdin,
     stderr: process.stderr
-  });
+    }
+  );
 
   void instance.waitUntilExit().finally(() => {
     process.off("exit", exitHandler);

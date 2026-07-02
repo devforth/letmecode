@@ -6,12 +6,14 @@ export type ParsedCliOptions = {
   showHelp: boolean;
   verbose: boolean;
   logToPath?: string;
+  enableAnonymousUsageReporting: boolean;
 };
 
 export function parseCliOptions(argv: string[]): ParsedCliOptions {
   let showHelp = false;
   let verbose = false;
   let logToPath: string | undefined;
+  let enableAnonymousUsageReporting = true;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] ?? "";
@@ -44,10 +46,15 @@ export function parseCliOptions(argv: string[]): ParsedCliOptions {
       }
 
       logToPath = value;
+      continue;
+    }
+
+    if (argument === "--no-usage") {
+      enableAnonymousUsageReporting = false;
     }
   }
 
-  return { showHelp, verbose, logToPath };
+  return { showHelp, verbose, logToPath, enableAnonymousUsageReporting };
 }
 
 export function buildProviderStatsOptions(options: ParsedCliOptions): ProviderStatsOptions {
@@ -59,7 +66,7 @@ export function buildProviderStatsOptions(options: ParsedCliOptions): ProviderSt
 
 export function buildHelpText(): string {
   return [
-    "letmecode - provider-based terminal usage dashboard",
+    "letmecode - terminal AI usage dashboard",
     "",
     "Usage:",
     "  letmecode [options]",
@@ -68,6 +75,7 @@ export function buildHelpText(): string {
     "  -h, --help         Show this help and exit",
     "  -v, --verbose      Show extra provider warnings",
     "  --log-to PATH      Write trace logs to PATH",
+    "  --no-usage         Disable anonymous usage reporting",
     "",
     "Controls:",
     "  [ ] / Tab          Switch providers",
@@ -82,7 +90,11 @@ export function buildHelpText(): string {
     "  --log-to PATH writes Claude detection details,",
     "  session root selection, parsed session file summaries, aggregated usage selection,",
     "  every candidate binary path check, the final found/not-found result,",
-    "  and the raw /usage command output plus live window matching details."
+    "  and the raw /usage command output plus live window matching details.",
+    "",
+    "Anonymous reporting:",
+    "  Enabled by default. Use --no-usage to disable the best-effort",
+    "  anonymous usage summary upload."
   ].join("\n");
 }
 
