@@ -87,11 +87,6 @@ const claudeUsageOutputCache = new Map<string, Promise<string | null>>();
 const claudeAuthStatusOutputCache = new Map<string, Promise<string | null>>();
 const claudeOauthCredentialsOutputCache = new Map<string, Promise<string | null>>();
 
-// The claude.ai OAuth `rateLimitTier` for Team Premium workspaces. Team Standard exposes a
-// different tier string; a missing/null tier is treated as unknown rather than guessed at,
-// because the field is occasionally absent or stale after subscription changes.
-const CLAUDE_TEAM_PREMIUM_RATE_LIMIT_TIERS = new Set(["default_claude_max_5x"]);
-
 type ClaudeUsage = {
   inputTokens: number;
   cacheReadInputTokens: number;
@@ -998,35 +993,15 @@ async function buildLiveLimitWindows(options: {
   };
 }
 
+// Reported as-is: the claude.ai OAuth `rateLimitTier` is not mapped to a friendly tier name
+// anymore, it is combined with `subscriptionType` verbatim (e.g. "team|default_claude_max_5x").
 function resolveClaudeLivePlanType(credentials: ClaudeOauthCredentials | null): string {
-  const teamPlan = resolveClaudeTeamPlan(credentials?.subscriptionType, credentials?.rateLimitTier);
-  if (teamPlan) {
-    return teamPlan;
+  const subscriptionType = credentials?.subscriptionType;
+  if (!subscriptionType) {
+    return "live";
   }
 
-  return credentials?.subscriptionType || "live";
-}
-
-// Anthropic reports every Team workspace as subscriptionType "team"; the tier is only
-// distinguishable via the claude.ai OAuth `rateLimitTier`. A present-but-unrecognized tier is
-// treated as standard, while a missing tier stays "team_unknown" rather than being guessed at.
-function resolveClaudeTeamPlan(
-  subscriptionType: string | null | undefined,
-  rateLimitTier: string | null | undefined
-): "team_premium" | "team_standard" | "team_unknown" | undefined {
-  if (subscriptionType !== "team") {
-    return undefined;
-  }
-
-  if (rateLimitTier && CLAUDE_TEAM_PREMIUM_RATE_LIMIT_TIERS.has(rateLimitTier)) {
-    return "team_premium";
-  }
-
-  if (rateLimitTier) {
-    return "team_standard";
-  }
-
-  return "team_unknown";
+  return credentials?.rateLimitTier ? `${subscriptionType}|${credentials.rateLimitTier}` : subscriptionType;
 }
 
 async function readClaudeOauthCredentials(

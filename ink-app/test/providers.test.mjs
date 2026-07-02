@@ -2469,14 +2469,14 @@ test("ClaudeUsageProvider aggregates Claude entrypoints and builds live usage wi
       ["claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6"]
     );
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].planType, "team_standard");
+    assert.equal(stats.primaryLimitWindows[0].planType, "team|default_claude_max_1x");
     assert.equal(stats.primaryLimitWindows[0].windowMinutes, 300);
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 20);
     assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 20);
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 1169);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 116);
     assert.equal(stats.secondaryLimitWindows.length, 1);
-    assert.equal(stats.secondaryLimitWindows[0].planType, "team_standard");
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team|default_claude_max_1x");
     assert.equal(stats.secondaryLimitWindows[0].windowMinutes, 10080);
     assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 63);
     assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 63);
@@ -2551,7 +2551,7 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
     }).getStats();
 
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].planType, "team_premium");
+    assert.equal(stats.primaryLimitWindows[0].planType, "team|default_claude_max_5x");
     assert.equal(stats.primaryLimitWindows[0].limitId, "current-session");
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 180);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 18);
@@ -2559,14 +2559,14 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
     assert.equal(stats.secondaryLimitWindows.length, 2);
 
     const allModelsWeek = stats.secondaryLimitWindows.find((row) => row.limitId === "current-week");
-    assert.equal(allModelsWeek?.planType, "team_premium");
+    assert.equal(allModelsWeek?.planType, "team|default_claude_max_5x");
     assert.equal(allModelsWeek?.totals.inputTokens, 230);
     assert.equal(allModelsWeek?.totals.outputTokens, 23);
 
     const sonnetOnlyWeek = stats.secondaryLimitWindows.find(
       (row) => row.limitId === "current-week-sonnet-only"
     );
-    assert.equal(sonnetOnlyWeek?.planType, "team_premium");
+    assert.equal(sonnetOnlyWeek?.planType, "team|default_claude_max_5x");
     assert.equal(sonnetOnlyWeek?.modelType, "sonnet only");
     assert.equal(sonnetOnlyWeek?.totals.inputTokens, 150);
     assert.equal(sonnetOnlyWeek?.totals.outputTokens, 15);
@@ -2577,7 +2577,7 @@ test("ClaudeUsageProvider detects Team Premium Sonnet-only weekly windows", asyn
   });
 });
 
-test("ClaudeUsageProvider marks a Team account with a missing rate-limit tier as team_unknown", async () => {
+test("ClaudeUsageProvider falls back to the bare subscription type when rate-limit tier is missing", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/team-unknown.jsonl", [
       claudeAssistantEvent({
@@ -2600,7 +2600,7 @@ test("ClaudeUsageProvider marks a Team account with a missing rate-limit tier as
     }).getStats();
 
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].planType, "team_unknown");
+    assert.equal(stats.primaryLimitWindows[0].planType, "team");
   });
 });
 
@@ -2979,13 +2979,13 @@ exit 1
     }).getStats();
 
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].planType, "team_premium");
+    assert.equal(stats.primaryLimitWindows[0].planType, "team|default_claude_max_5x");
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 26);
     assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 26);
     assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 120);
     assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 12);
     assert.equal(stats.secondaryLimitWindows.length, 1);
-    assert.equal(stats.secondaryLimitWindows[0].planType, "team_premium");
+    assert.equal(stats.secondaryLimitWindows[0].planType, "team|default_claude_max_5x");
     assert.equal(stats.secondaryLimitWindows[0].minUsedPercent, 34);
     assert.equal(stats.secondaryLimitWindows[0].maxUsedPercent, 34);
     assert.equal(stats.secondaryLimitWindows[0].totals.inputTokens, 200);
