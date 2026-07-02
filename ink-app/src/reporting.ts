@@ -116,7 +116,12 @@ function resolveReportModelType(stats: ProviderStats, window: LimitWindowRow): s
 }
 
 function resolveClaudeReportModelType(window: LimitWindowRow): string {
-  return window.modelType?.toLowerCase().includes("sonnet") ? "sonnet-only" : "all";
+  const modelFamily = window.modelType?.toLowerCase().replace(/\s+only$/, "").trim();
+  if (!modelFamily) {
+    return "all";
+  }
+
+  return truncateSchemaString(`${modelFamily.replace(/\s+/g, "-")}-only`, 128);
 }
 
 function resolveAntigravityReportModelType(

@@ -2680,6 +2680,60 @@ test("ClaudeUsageProvider captures the Sonnet-only weekly window when its reset 
   });
 });
 
+test("ClaudeUsageProvider tracks the Fable weekly window separately from the all-models week", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/fable-week.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-28T08:00:00.000Z",
+        requestId: "req-fable-week",
+        messageId: "msg-fable-week",
+        entrypoint: "claude-vscode",
+        model: "claude-fable-5",
+        inputTokens: 60,
+        outputTokens: 6
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-28T09:00:00.000Z",
+        requestId: "req-fable-week-sonnet",
+        messageId: "msg-fable-week-sonnet",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 40,
+        outputTokens: 4
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 2% used · resets Jun 29, 12:39pm (UTC)",
+          "Current week (all models): 9% used · resets Jun 30, 12:59pm (UTC)",
+          "Current week (Fable): 4% used · resets Jun 30, 12:59pm (UTC)"
+        ].join("\n"),
+      now: () => new Date("2026-06-29T11:30:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.secondaryLimitWindows.length, 2);
+
+    const allModelsWeek = stats.secondaryLimitWindows.find((row) => row.limitId === "current-week");
+    assert.equal(allModelsWeek?.maxUsedPercent, 9);
+    assert.equal(allModelsWeek?.totals.inputTokens, 100);
+
+    const fableWeek = stats.secondaryLimitWindows.find(
+      (row) => row.limitId === "current-week-fable-only"
+    );
+    assert.ok(fableWeek, "expected a Fable weekly window alongside the all-models week");
+    assert.equal(fableWeek.modelType, "fable");
+    assert.equal(fableWeek.maxUsedPercent, 4);
+    assert.equal(fableWeek.totals.inputTokens, 60);
+    assert.deepEqual(
+      fableWeek.modelUsage.map((row) => row.modelId),
+      ["claude-fable-5"]
+    );
+  });
+});
+
 test("ClaudeUsageProvider prefers VSCode Claude binaries before falling back to other locations", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "trace-project/mixed.jsonl", [

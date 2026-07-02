@@ -32,6 +32,7 @@ import {
 import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
 const RATE_CARD: Record<string, UsageRate> = {
+  "claude-fable-5": { input: 10, cacheRead: 1, cacheWrite: 12.5, cacheWrite5m: 12.5, cacheWrite1h: 20, output: 50 },
   "claude-opus-4-8": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-7": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-6": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
@@ -156,7 +157,7 @@ type LiveUsageWindowSnapshot = {
   scope: "primary" | "secondary";
   label: "session" | "week";
   limitId: string;
-  modelScope: "all-models" | "sonnet-only";
+  modelFamily: string | null;
   modelType?: string;
   usedPercent: number;
   resetsAtMs: number;
@@ -1470,9 +1471,6 @@ function parseLiveUsageWindowSnapshots(usageOutput: string | null, now: Date): L
     });
   }
 
-  // Per-scope reset times printed by Claude. Lines like "Current week (Sonnet
-  // only)" omit the reset because it is identical to the "all models" week, so
-  // a missing reset inherits the resolved reset of the same scope.
   const resetMsByLabel = new Map<"session" | "week", number>();
   for (const parsed of parsedLines) {
     if (!parsed.resetString || resetMsByLabel.has(parsed.label)) {
@@ -1492,14 +1490,18 @@ function parseLiveUsageWindowSnapshots(usageOutput: string | null, now: Date): L
       continue;
     }
 
-    const isSonnetOnlyWeek = parsed.label === "week" && parsed.windowQualifier === "sonnet only";
-    const limitId = isSonnetOnlyWeek ? "current-week-sonnet-only" : `current-${parsed.label}`;
+    const isModelScopedWeek =
+      parsed.label === "week" && parsed.windowQualifier !== "" && parsed.windowQualifier !== "all models";
+    const modelFamily = isModelScopedWeek ? parsed.windowQualifier.replace(/\s+only$/, "") : null;
+    const limitId = modelFamily
+      ? `current-week-${modelFamily.replace(/\s+/g, "-")}-only`
+      : `current-${parsed.label}`;
     snapshots.set(limitId, {
       scope: parsed.label === "session" ? "primary" : "secondary",
       label: parsed.label,
       limitId,
-      modelScope: isSonnetOnlyWeek ? "sonnet-only" : "all-models",
-      modelType: isSonnetOnlyWeek ? "sonnet only" : undefined,
+      modelFamily,
+      modelType: modelFamily ? parsed.windowQualifier : undefined,
       usedPercent: parsed.usedPercent,
       resetsAtMs,
       windowMinutes: parsed.windowMinutes
@@ -1622,11 +1624,11 @@ function matchesClaudeLiveSnapshotModelScope(
   snapshot: LiveUsageWindowSnapshot,
   modelId: string
 ): boolean {
-  if (snapshot.modelScope !== "sonnet-only") {
+  if (!snapshot.modelFamily) {
     return true;
   }
 
-  return modelId.toLowerCase().includes("sonnet");
+  return modelId.toLowerCase().includes(snapshot.modelFamily);
 }
 
 function buildModelUsageRowsForEvents(events: ParsedUsageEvent[]): ModelUsageRow[] {
