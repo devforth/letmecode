@@ -15,7 +15,8 @@ import {
 import { reportAnonymousUsage } from "./reporting.js";
 import { estimateLimitFullValue, type LimitFullValueEstimate } from "./providers/limits.js";
 
-type DetailTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
+type DetailViewId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
+type ControlSectionId = "provider" | "view" | "table";
 
 type ProviderLoadState =
   | { provider: UsageProviderBase; status: "loading" }
@@ -44,19 +45,20 @@ type Rect = { left: number; top: number; width: number; height: number };
 
 const ESC = String.fromCharCode(0x1b);
 // Normal mouse tracking (button press/release only) + SGR extended coordinates.
-// This makes the tabs clickable while leaving Shift+drag native text selection
+// This makes the controls clickable while leaving Shift+drag native text selection
 // available everywhere else, exactly like Midnight Commander.
 const ENABLE_MOUSE_TRACKING = `${ESC}[?1000h${ESC}[?1006h`;
 const DISABLE_MOUSE_TRACKING = `${ESC}[?1006l${ESC}[?1000l`;
 // SGR mouse report: ESC [ < button ; column ; row, ending in M (press) or m (release).
 const SGR_MOUSE_SEQUENCE = new RegExp(`${ESC}\\[<(\\d+);(\\d+);(\\d+)([Mm])`, "g");
 
-const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
+const DETAIL_VIEWS: Array<{ id: DetailViewId; label: string }> = [
   { id: "limit-windows", label: "Limits" },
   { id: "summary", label: "Summary" },
   { id: "day-to-day-analyses", label: "Daily" },
   { id: "usage-by-model", label: "Models" }
 ];
+const CONTROL_SECTIONS: ControlSectionId[] = ["provider", "view", "table"];
 
 const CODEX_CREDIT_COST_USD = 0.01;
 
@@ -97,10 +99,11 @@ function App(props: {
   );
   const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id ?? "");
   const [hasUserSelectedProvider, setHasUserSelectedProvider] = useState(false);
-  const [selectedDetailTabIndex, setSelectedDetailTabIndex] = useState(0);
-  const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState(0);
-  const [selectedDayRowIndex, setSelectedDayRowIndex] = useState(0);
-  const [selectedModelRowIndex, setSelectedModelRowIndex] = useState(0);
+  const [selectedDetailViewIndex, setSelectedDetailViewIndex] = useState(0);
+  const [selectedControlSectionIndex, setSelectedControlSectionIndex] = useState(0);
+  const [selectedLimitRowIndex, setSelectedLimitRowIndex] = useState<number | undefined>();
+  const [selectedDayRowIndex, setSelectedDayRowIndex] = useState<number | undefined>();
+  const [selectedModelRowIndex, setSelectedModelRowIndex] = useState<number | undefined>();
   const [selectedCopilotActionIndex, setSelectedCopilotActionIndex] = useState(0);
   const [copilotActionMessage, setCopilotActionMessage] = useState<string | undefined>();
   const hasReportedAnonymousUsageRef = useRef(false);
@@ -111,16 +114,18 @@ function App(props: {
     sortedProviderStates.findIndex((state) => state.provider.id === selectedProviderId)
   );
   const selectedProvider = sortedProviderStates[selectedProviderIndex];
-  const selectedDetailTab = DETAIL_TABS[selectedDetailTabIndex];
+  const selectedDetailView = DETAIL_VIEWS[selectedDetailViewIndex];
+  const selectedControlSection = CONTROL_SECTIONS[selectedControlSectionIndex];
+  const isTableControlSelected = selectedControlSection === "table";
   const limitRows = getLimitRows(selectedProvider);
   const dayRows = getDayRows(selectedProvider);
   const modelRows = getModelRows(selectedProvider);
-  const activeLimitRowIndex = clampSelectionIndex(selectedLimitRowIndex, limitRows.length);
-  const activeDayRowIndex = clampSelectionIndex(selectedDayRowIndex, dayRows.length);
-  const activeModelRowIndex = clampSelectionIndex(selectedModelRowIndex, modelRows.length);
-  const selectedLimitRow = activeLimitRowIndex >= 0 ? limitRows[activeLimitRowIndex] : undefined;
-  const selectedDayRow = activeDayRowIndex >= 0 ? dayRows[activeDayRowIndex] : undefined;
-  const selectedModelRow = activeModelRowIndex >= 0 ? modelRows[activeModelRowIndex] : undefined;
+  const activeLimitRowIndex = clampOptionalSelectionIndex(selectedLimitRowIndex, limitRows.length);
+  const activeDayRowIndex = clampOptionalSelectionIndex(selectedDayRowIndex, dayRows.length);
+  const activeModelRowIndex = clampOptionalSelectionIndex(selectedModelRowIndex, modelRows.length);
+  const selectedLimitRow = isTableControlSelected && activeLimitRowIndex >= 0 ? limitRows[activeLimitRowIndex] : undefined;
+  const selectedDayRow = isTableControlSelected && activeDayRowIndex >= 0 ? dayRows[activeDayRowIndex] : undefined;
+  const selectedModelRow = isTableControlSelected && activeModelRowIndex >= 0 ? modelRows[activeModelRowIndex] : undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -194,6 +199,12 @@ function App(props: {
     });
   }, [props.usageReportingEnabled, providerStates]);
 
+  const clearSelectedTableRows = useCallback(() => {
+    setSelectedLimitRowIndex(undefined);
+    setSelectedDayRowIndex(undefined);
+    setSelectedModelRowIndex(undefined);
+  }, []);
+
   useMouseClick((click) => {
     const regionId = resolveClick(click);
     if (!regionId) {
@@ -203,27 +214,49 @@ function App(props: {
     if (regionId.startsWith("provider:")) {
       setSelectedProviderId(regionId.slice("provider:".length));
       setHasUserSelectedProvider(true);
+      setSelectedControlSectionIndex(CONTROL_SECTIONS.indexOf("provider"));
+      clearSelectedTableRows();
       return;
     }
 
-    if (regionId.startsWith("vtab:")) {
-      setSelectedDetailTabIndex(Number(regionId.slice("vtab:".length)));
+    if (regionId.startsWith("view:")) {
+      setSelectedDetailViewIndex(Number(regionId.slice("view:".length)));
+      setSelectedControlSectionIndex(CONTROL_SECTIONS.indexOf("view"));
+      clearSelectedTableRows();
     }
   });
 
-  const moveSelectedTableRow = useCallback((delta: number) => {
-    if (selectedDetailTab.id === "limit-windows") {
-      setSelectedLimitRowIndex(clampSelectionIndex(activeLimitRowIndex + delta, limitRows.length));
+  const moveSelectedTableRow = useCallback((delta: number): void => {
+    if (selectedDetailView.id === "limit-windows") {
+      if (limitRows.length === 0) {
+        return;
+      }
+
+      setSelectedLimitRowIndex(
+        clampSelectionIndex(activeLimitRowIndex < 0 ? 0 : activeLimitRowIndex + delta, limitRows.length)
+      );
       return;
     }
 
-    if (selectedDetailTab.id === "usage-by-model") {
-      setSelectedModelRowIndex(clampSelectionIndex(activeModelRowIndex + delta, modelRows.length));
+    if (selectedDetailView.id === "usage-by-model") {
+      if (modelRows.length === 0) {
+        return;
+      }
+
+      setSelectedModelRowIndex(
+        clampSelectionIndex(activeModelRowIndex < 0 ? 0 : activeModelRowIndex + delta, modelRows.length)
+      );
       return;
     }
 
-    if (selectedDetailTab.id === "day-to-day-analyses") {
-      setSelectedDayRowIndex(clampSelectionIndex(activeDayRowIndex + delta, dayRows.length));
+    if (selectedDetailView.id === "day-to-day-analyses") {
+      if (dayRows.length === 0) {
+        return;
+      }
+
+      setSelectedDayRowIndex(
+        clampSelectionIndex(activeDayRowIndex < 0 ? 0 : activeDayRowIndex + delta, dayRows.length)
+      );
     }
   }, [
     activeDayRowIndex,
@@ -232,8 +265,77 @@ function App(props: {
     dayRows.length,
     limitRows.length,
     modelRows.length,
-    selectedDetailTab.id
+    selectedDetailView.id
   ]);
+
+  const canMoveTableRowUp = useCallback((): boolean => {
+    if (selectedDetailView.id === "limit-windows") {
+      return activeLimitRowIndex > 0;
+    }
+
+    if (selectedDetailView.id === "usage-by-model") {
+      return activeModelRowIndex > 0;
+    }
+
+    if (selectedDetailView.id === "day-to-day-analyses") {
+      return activeDayRowIndex > 0;
+    }
+
+    return false;
+  }, [activeDayRowIndex, activeLimitRowIndex, activeModelRowIndex, selectedDetailView.id]);
+
+  const moveSelectionDown = useCallback(() => {
+    if (selectedControlSection === "table") {
+      moveSelectedTableRow(1);
+      return;
+    }
+
+    setSelectedControlSectionIndex((current) => {
+      const next = Math.min(current + 1, CONTROL_SECTIONS.length - 1);
+      if (CONTROL_SECTIONS[next] === "table") {
+        moveSelectedTableRow(1);
+      }
+
+      return next;
+    });
+  }, [moveSelectedTableRow, selectedControlSection]);
+
+  const moveSelectionUp = useCallback(() => {
+    if (selectedControlSection === "table" && canMoveTableRowUp()) {
+      moveSelectedTableRow(-1);
+      return;
+    }
+
+    if (selectedControlSection === "table") {
+      clearSelectedTableRows();
+    }
+
+    setSelectedControlSectionIndex((current) => Math.max(current - 1, 0));
+  }, [canMoveTableRowUp, clearSelectedTableRows, moveSelectedTableRow, selectedControlSection]);
+
+  const changeSelectedProvider = useCallback((delta: number) => {
+    setSelectedProviderId(
+      sortedProviderStates[
+        (selectedProviderIndex + delta + sortedProviderStates.length) % sortedProviderStates.length
+      ].provider.id
+    );
+    setHasUserSelectedProvider(true);
+  }, [selectedProviderIndex, sortedProviderStates]);
+
+  const changeSelectedDetailView = useCallback((delta: number) => {
+    setSelectedDetailViewIndex((current) => (current + delta + DETAIL_VIEWS.length) % DETAIL_VIEWS.length);
+  }, []);
+
+  const changeSelectedSectionValue = useCallback((delta: number) => {
+    if (selectedControlSection === "provider") {
+      changeSelectedProvider(delta);
+      return;
+    }
+
+    if (selectedControlSection === "view") {
+      changeSelectedDetailView(delta);
+    }
+  }, [changeSelectedDetailView, changeSelectedProvider, selectedControlSection]);
 
   useInput((input, key) => {
     // Mouse reports arrive as SGR escape sequences and are handled by useMouseClick.
@@ -253,52 +355,47 @@ function App(props: {
     }
 
     if (selectedProvider.provider.id === "copilot" && key.return) {
-      runCopilotAction(COPILOT_ACTIONS[selectedCopilotActionIndex].id, setCopilotActionMessage);
+      runCopilotAction(setCopilotActionMessage);
       return;
     }
 
-    if (selectedProvider.provider.id === "copilot" && input === "l") {
-      setSelectedCopilotActionIndex((current) => (current + 1) % COPILOT_ACTIONS.length);
+    if (key.tab && !key.shift) {
+      changeSelectedProvider(1);
       return;
     }
 
-    if (selectedProvider.provider.id === "copilot" && input === "h") {
-      setSelectedCopilotActionIndex((current) => (current - 1 + COPILOT_ACTIONS.length) % COPILOT_ACTIONS.length);
+    if (key.tab && key.shift) {
+      changeSelectedProvider(-1);
+      return;
+    }
+
+    if (input === "]") {
+      changeSelectedDetailView(1);
+      return;
+    }
+
+    if (input === "[") {
+      changeSelectedDetailView(-1);
       return;
     }
 
     if (key.rightArrow) {
-      setSelectedDetailTabIndex((current) => (current + 1) % DETAIL_TABS.length);
+      changeSelectedSectionValue(1);
       return;
     }
 
     if (key.leftArrow) {
-      setSelectedDetailTabIndex((current) => (current - 1 + DETAIL_TABS.length) % DETAIL_TABS.length);
+      changeSelectedSectionValue(-1);
       return;
     }
 
-    if ((key.tab && !key.shift) || input === "]") {
-      setSelectedProviderId(sortedProviderStates[(selectedProviderIndex + 1) % sortedProviderStates.length].provider.id);
-      setHasUserSelectedProvider(true);
+    if (key.downArrow) {
+      moveSelectionDown();
       return;
     }
 
-    if ((key.tab && key.shift) || input === "[") {
-      setSelectedProviderId(
-        sortedProviderStates[(selectedProviderIndex - 1 + sortedProviderStates.length) % sortedProviderStates.length]
-          .provider.id
-      );
-      setHasUserSelectedProvider(true);
-      return;
-    }
-
-    if (key.downArrow || input === "j") {
-      moveSelectedTableRow(1);
-      return;
-    }
-
-    if (key.upArrow || input === "k") {
-      moveSelectedTableRow(-1);
+    if (key.upArrow) {
+      moveSelectionUp();
     }
   });
 
@@ -314,9 +411,9 @@ function App(props: {
         </Text>
       </Box>
       <Box>
-        <Text color="gray">Provider  </Text>
+        <ControlSectionLabel label="Provider" active={selectedControlSection === "provider"} />
         {sortedProviderStates.map((state) => (
-          <ProviderTab
+          <ProviderOption
             key={state.provider.id}
             label={state.provider.label}
             active={state.provider.id === selectedProvider.provider.id}
@@ -326,13 +423,13 @@ function App(props: {
         ))}
       </Box>
       <Box>
-        <Text color="gray">View      </Text>
-        {DETAIL_TABS.map((tab, index) => (
-          <DetailTab
-            key={tab.id}
-            label={tab.label}
-            active={index === selectedDetailTabIndex}
-            regionRef={getRegionRef(`vtab:${index}`)}
+        <ControlSectionLabel label="View" active={selectedControlSection === "view"} />
+        {DETAIL_VIEWS.map((view, index) => (
+          <ViewOption
+            key={view.id}
+            label={view.label}
+            active={index === selectedDetailViewIndex}
+            regionRef={getRegionRef(`view:${index}`)}
           />
         ))}
       </Box>
@@ -342,7 +439,7 @@ function App(props: {
           <Box ref={contentPanelRef} flexDirection="column" flexGrow={1} overflow="hidden">
             <ContentPanel
               providerState={selectedProvider}
-              tabId={selectedDetailTab.id}
+              viewId={selectedDetailView.id}
               selectedLimitRowKey={selectedLimitRow ? getLimitRowKey(selectedLimitRow) : undefined}
               selectedDayKey={selectedDayRow?.dayKey}
               selectedModelId={selectedModelRow?.modelId}
@@ -352,7 +449,7 @@ function App(props: {
         </Box>
         <SelectionDetailsPanel
           providerState={selectedProvider}
-          tabId={selectedDetailTab.id}
+          viewId={selectedDetailView.id}
           selectedLimitRow={selectedLimitRow}
           selectedDayRow={selectedDayRow}
           selectedModelRow={selectedModelRow}
@@ -373,7 +470,7 @@ function App(props: {
         ) : null}
       </Box>
       <Text color="gray">
-        Tab provider · ←/→ view · ↑/↓ row · q quit
+        ↑/↓ move · ←/→ selected · Tab provider · [/] view · q quit
       </Text>
     </Box>
   );
@@ -407,16 +504,13 @@ function CopilotActionsPanel(props: {
           </Box>
         ))}
       </Box>
-      <Text color={hasNoUsage ? accentColor : "gray"}>Press 1 or h/l to select an action, enter to run selected.</Text>
+      <Text color={hasNoUsage ? accentColor : "gray"}>Press 1 to select an action, enter to run selected.</Text>
       {props.actionMessage ? <Text>{props.actionMessage}</Text> : null}
     </Box>
   );
 }
 
-function runCopilotAction(
-  actionId: CopilotActionId,
-  setCopilotActionMessage: React.Dispatch<React.SetStateAction<string | undefined>>
-): void {
+function runCopilotAction(setCopilotActionMessage: React.Dispatch<React.SetStateAction<string | undefined>>): void {
   setCopilotActionMessage("Updating VS Code settings...");
   void configureCopilotVsCodeLogging()
     .then((result) => {
@@ -442,34 +536,46 @@ function formatCopilotLoggingResult(result: Awaited<ReturnType<typeof configureC
   ].join("\n");
 }
 
-function ProviderTab(props: {
+function ProviderOption(props: {
   label: string;
   active: boolean;
   status: ProviderLoadState["status"];
   regionRef?: (node: DOMElement | null) => void;
 }): React.JSX.Element {
   const statusColor = props.status === "error" ? "red" : props.status === "loading" ? "yellow" : "green";
-  const tabLabel = props.active ? `[${props.label}]` : ` ${props.label} `;
+  const optionLabel = props.active ? `[${props.label}]` : ` ${props.label} `;
   return (
     <Box marginRight={2} ref={props.regionRef}>
       <Text color={statusColor} bold={props.active}>
-        {tabLabel}
+        {optionLabel}
       </Text>
     </Box>
   );
 }
 
-function DetailTab(props: {
+function ControlSectionLabel(props: {
+  label: string;
+  active: boolean;
+}): React.JSX.Element {
+  return (
+    <Text color={props.active ? "cyan" : "gray"} bold={props.active}>
+      {props.active ? "› " : "  "}
+      {pad(props.label, 10)}
+    </Text>
+  );
+}
+
+function ViewOption(props: {
   label: string;
   active: boolean;
   regionRef?: (node: DOMElement | null) => void;
 }): React.JSX.Element {
-  const tabLabel = props.active ? `[${props.label}]` : ` ${props.label} `;
+  const optionLabel = props.active ? `[${props.label}]` : ` ${props.label} `;
 
   return (
     <Box marginRight={2} ref={props.regionRef}>
       <Text wrap="truncate-end" bold={props.active}>
-        {tabLabel}
+        {optionLabel}
       </Text>
     </Box>
   );
@@ -527,7 +633,7 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
 
 function ContentPanel(props: {
   providerState: ProviderLoadState;
-  tabId: DetailTabId;
+  viewId: DetailViewId;
   selectedLimitRowKey?: string;
   selectedDayKey?: string;
   selectedModelId?: string;
@@ -541,7 +647,7 @@ function ContentPanel(props: {
     return <Text color="red">Provider error: {props.providerState.errorMessage}</Text>;
   }
 
-  if (props.tabId === "limit-windows") {
+  if (props.viewId === "limit-windows") {
     return (
       <LimitWindowsPanel
         stats={props.providerState.stats}
@@ -551,11 +657,11 @@ function ContentPanel(props: {
     );
   }
 
-  if (props.tabId === "summary") {
+  if (props.viewId === "summary") {
     return <SummaryPanel stats={props.providerState.stats} />;
   }
 
-  if (props.tabId === "day-to-day-analyses") {
+  if (props.viewId === "day-to-day-analyses") {
     return (
       <DayToDayPanel
         stats={props.providerState.stats}
@@ -909,7 +1015,7 @@ function buildModelUsageTableLines(
 
 function SelectionDetailsPanel(props: {
   providerState: ProviderLoadState;
-  tabId: DetailTabId;
+  viewId: DetailViewId;
   selectedLimitRow?: LimitWindowRow;
   selectedDayRow?: DailyUsageRow;
   selectedModelRow?: ModelUsageRow;
@@ -918,7 +1024,7 @@ function SelectionDetailsPanel(props: {
     return null;
   }
 
-  if (props.tabId === "limit-windows" && props.selectedLimitRow) {
+  if (props.viewId === "limit-windows" && props.selectedLimitRow) {
     const row = props.selectedLimitRow;
     return (
       <DetailsPanelFrame>
@@ -952,7 +1058,7 @@ function SelectionDetailsPanel(props: {
     );
   }
 
-  if (props.tabId === "day-to-day-analyses" && props.selectedDayRow) {
+  if (props.viewId === "day-to-day-analyses" && props.selectedDayRow) {
     const row = props.selectedDayRow;
     return (
       <DetailsPanelFrame>
@@ -967,7 +1073,7 @@ function SelectionDetailsPanel(props: {
     );
   }
 
-  if (props.tabId === "usage-by-model" && props.selectedModelRow) {
+  if (props.viewId === "usage-by-model" && props.selectedModelRow) {
     return (
       <DetailsPanelFrame>
         <Text>
@@ -1075,25 +1181,6 @@ function formatCompactNumber(value: number): string {
     maximumFractionDigits,
     minimumFractionDigits: 0
   });
-}
-
-function formatCredits(value: number): string {
-  if (value > 0 && value < 0.01) {
-    return "<0.01";
-  }
-
-  return value.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  });
-}
-
-function formatUsageCredits(totals: UsageTotals, modelId?: string): string {
-  if (isInternalUsageModel(modelId)) {
-    return "N/A";
-  }
-
-  return totals.estimatedCreditsStatus === "unavailable" ? "-" : formatCredits(totals.estimatedCredits);
 }
 
 function formatUsageUsd(totals: UsageTotals, modelId?: string): string {
@@ -1231,15 +1318,6 @@ function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number):
   return minUsedPercent === maxUsedPercent
     ? fmt(minUsedPercent)
     : `${fmt(minUsedPercent)}–${fmt(maxUsedPercent)}`;
-}
-
-function formatWindowMinutes(value: number): string {
-  const hours = value / 60;
-  if (hours >= 24) {
-    return `${(hours / 24).toFixed(2)}d`;
-  }
-
-  return `${hours.toFixed(2)}h`;
 }
 
 function formatCompactWindowMinutes(value: number): string {
@@ -1470,7 +1548,7 @@ function parseMouseClicks(chunk: string): MouseClick[] {
   return clicks;
 }
 
-// Tracks the on-screen rectangle of named clickable regions (the tabs) via Ink
+// Tracks the on-screen rectangle of named clickable regions via Ink
 // refs and resolves a click coordinate back to a region id.
 function useClickRegions(): {
   getRegionRef: (id: string) => (node: DOMElement | null) => void;
@@ -1627,6 +1705,14 @@ function clampSelectionIndex(value: number, rowCount: number): number {
   }
 
   return Math.max(0, Math.min(value, rowCount - 1));
+}
+
+function clampOptionalSelectionIndex(value: number | undefined, rowCount: number): number {
+  if (value === undefined) {
+    return -1;
+  }
+
+  return clampSelectionIndex(value, rowCount);
 }
 
 function sortProviderStatesByUsage(states: ProviderLoadState[]): ProviderLoadState[] {
