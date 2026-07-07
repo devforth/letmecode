@@ -6,7 +6,9 @@ import type { LimitWindowRow, ModelUsageRow, ProviderStats } from "./providers/i
 
 const REPORTING_ENDPOINT = "https://devforth.io/admin/api/report_ussage_anonymous";
 const CREDIT_TO_DOLLARS = 0.01;
-const MIN_REPORTED_USED_PERCENTS = 1;
+// Limit windows at or below this used-percent carry too little signal to be
+// worth reporting, so they are dropped from the anonymous usage payload.
+const SKIP_REPORT_USED_PERCENTS = 3;
 
 let versionCache: Promise<string> | null = null;
 
@@ -168,7 +170,7 @@ function resolveReportedUsedPercents(window: LimitWindowRow): number {
 }
 
 function shouldReportUsageWindow(window: LimitWindowRow): boolean {
-  return resolveReportedUsedPercents(window) >= MIN_REPORTED_USED_PERCENTS;
+  return resolveReportedUsedPercents(window) > SKIP_REPORT_USED_PERCENTS;
 }
 
 function clampPercent(value: number): number {

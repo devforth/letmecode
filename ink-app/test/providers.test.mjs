@@ -3779,7 +3779,7 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
 });
 
-test("buildAnonymousUsagePayload skips windows below one percent usage", async () => {
+test("buildAnonymousUsagePayload skips windows at or below three percent usage", async () => {
   const totals = (overrides = {}) => ({
     inputTokens: 0,
     outputTokens: 0,
@@ -3833,7 +3833,8 @@ test("buildAnonymousUsagePayload skips windows below one percent usage", async (
       primaryLimitWindows: [
         window("zero-usage", 0, 0),
         window("tiny-live-window", 99.5, 100),
-        window("reportable-window", 99, 100)
+        window("at-threshold-window", 97, 100),
+        window("reportable-window", 96, 100)
       ],
       secondaryLimitWindows: [],
       warnings: [],
@@ -3846,7 +3847,7 @@ test("buildAnonymousUsagePayload skips windows below one percent usage", async (
 
   assert.equal(payload.data.length, 1);
   assert.equal(payload.data[0].model_type, "reportable-window");
-  assert.equal(payload.data[0].used_percents, 1);
+  assert.equal(payload.data[0].used_percents, 4);
 });
 
 test("buildAnonymousUsagePayload reports Antigravity data", async () => {
