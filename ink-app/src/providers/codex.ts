@@ -29,10 +29,17 @@ import {
 } from "./daily.js";
 import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
+// One credit equals $0.01 (see CODEX_CREDIT_COST_USD in index.tsx), so credits
+// equal USD * 100. Rate cards are expressed in the model's actual API price in
+// USD per 1M tokens and scaled to credits in creditsFor, matching the Claude
+// provider. These are the real gpt-5.* API prices, not the (4x cheaper) Codex
+// subscription credit prices.
+const USD_TO_CREDITS = 100;
+
 const RATE_CARD: Record<string, UsageRate> = {
-  "gpt-5.5": { input: 125, cacheRead: 12.5, cacheWrite: 125, cacheWrite5m: 125, cacheWrite1h: 125, output: 750 },
-  "gpt-5.4": { input: 62.5, cacheRead: 6.25, cacheWrite: 62.5, cacheWrite5m: 62.5, cacheWrite1h: 62.5, output: 375 },
-  "gpt-5.4-mini": { input: 18.75, cacheRead: 1.875, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 18.75, output: 113 }
+  "gpt-5.5": { input: 5, cacheRead: 0.5, cacheWrite: 5, cacheWrite5m: 5, cacheWrite1h: 5, output: 30 },
+  "gpt-5.4": { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 15 },
+  "gpt-5.4-mini": { input: 0.75, cacheRead: 0.075, cacheWrite: 0.75, cacheWrite5m: 0.75, cacheWrite1h: 0.75, output: 4.5 }
 };
 
 type RawUsage = {
@@ -317,9 +324,10 @@ function creditsFor(modelId: string, usage: RawUsage): number {
   const nonCachedInputTokens = Math.max(0, usage.inputTokens - cachedInputTokens);
 
   return (
-    (nonCachedInputTokens / 1_000_000) * rate.input +
-    (cachedInputTokens / 1_000_000) * rate.cacheRead +
-    (usage.outputTokens / 1_000_000) * rate.output
+    ((nonCachedInputTokens / 1_000_000) * rate.input +
+      (cachedInputTokens / 1_000_000) * rate.cacheRead +
+      (usage.outputTokens / 1_000_000) * rate.output) *
+    USD_TO_CREDITS
   );
 }
 
