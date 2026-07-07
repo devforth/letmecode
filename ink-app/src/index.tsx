@@ -929,7 +929,6 @@ function SelectionDetailsPanel(props: {
             <DetailRow label="Window" value={formatCompactWindowMinutes(row.windowMinutes)} />
             <DetailRow label="Usage" value={formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)} />
             <DetailRow label="Events" value={formatInteger(row.eventCount)} />
-            <DetailRow label="API eq." value={formatUsageUsd(row.totals)} />
           </Box>
           <Box flexDirection="column">
             <DetailRow
@@ -943,9 +942,11 @@ function SelectionDetailsPanel(props: {
             <DetailRow label="Total" value={formatInteger(row.totals.totalTokens)} />
           </Box>
         </Box>
+        <DetailRow label="API eq." value={formatUsageUsd(row.totals)} note="API equivalent cost" />
         <DetailRow
           label="Full value"
           value={formatLimitFullValueRange(row.totals, row.maxUsedPercent)}
+          note="API equivalent cost if 100% will be used"
         />
       </DetailsPanelFrame>
     );
@@ -989,7 +990,13 @@ function DetailsPanelFrame(props: { children: React.ReactNode }): React.JSX.Elem
   );
 }
 
-function DetailRow(props: { label: string; value: string; padLength?: number; noSlice?: boolean }): React.JSX.Element {
+function DetailRow(props: {
+  label: string;
+  value: string;
+  padLength?: number;
+  noSlice?: boolean;
+  note?: string;
+}): React.JSX.Element {
   const labelText = props.noSlice
     ? props.label.padEnd(props.padLength ?? 14)
     : pad(props.label, props.padLength ?? 14);
@@ -997,6 +1004,7 @@ function DetailRow(props: { label: string; value: string; padLength?: number; no
     <Text>
       {labelText}
       {props.value}
+      {props.note ? <Text color="gray">{`   ${props.note}`}</Text> : null}
     </Text>
   );
 }
