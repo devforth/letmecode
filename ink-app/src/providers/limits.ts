@@ -52,6 +52,45 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
+export type LimitFullValueEstimate = {
+  /** Point estimate, in the same unit as `usedValue` (e.g. credits or USD). */
+  point: number;
+  /** Lower bound (from the higher `usedPercent + tolerance`). */
+  low: number;
+  /**
+   * Upper bound (from the lower `usedPercent - tolerance`). `Infinity` when that
+   * lower percent bound is non-positive, i.e. the full value is unbounded above.
+   */
+  high: number;
+};
+
+/**
+ * Extrapolate the full value of a limit from a partial observation: if
+ * `usedValue` represents `usedPercent` of the limit, the full limit is
+ * `usedValue / (usedPercent / 100)`. Because `usedPercent` is only known
+ * approximately, a `±percentTolerance` band yields a low/high range around the
+ * point estimate. Returns null when there is nothing to extrapolate from
+ * (no observed value, or a non-positive percent).
+ */
+export function estimateLimitFullValue(
+  usedValue: number,
+  usedPercent: number,
+  percentTolerance = 1
+): LimitFullValueEstimate | null {
+  if (!(usedValue > 0) || !(usedPercent > 0)) {
+    return null;
+  }
+
+  const toFull = (percent: number) => usedValue / (percent / 100);
+  const upperPercent = usedPercent - percentTolerance;
+
+  return {
+    point: toFull(usedPercent),
+    low: toFull(usedPercent + percentTolerance),
+    high: upperPercent > 0 ? toFull(upperPercent) : Infinity
+  };
+}
+
 export function applyRateLimits(
   windows: LimitWindowAggregates,
   rateLimits: Record<string, unknown> | null,

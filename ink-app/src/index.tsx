@@ -13,6 +13,7 @@ import {
   type UsageTotals
 } from "./providers/index.js";
 import { reportAnonymousUsage } from "./reporting.js";
+import { estimateLimitFullValue, type LimitFullValueEstimate } from "./providers/limits.js";
 
 type DetailTabId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 
@@ -59,7 +60,7 @@ const DETAIL_TABS: Array<{ id: DetailTabId; label: string }> = [
 
 const CODEX_CREDIT_COST_USD = 0.01;
 
-const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Models", "Window", "Used", "Start", "End", "API eq."] as const;
+const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Models", "Window", "Used", "Start", "End", "API eq.", "Full"] as const;
 const DAILY_TABLE_HEADERS = ["Day", "Ev", "Input", "Output", "C read", "C write", "API eq."] as const;
 const MODEL_TABLE_HEADERS = ["Model", "Input", "Output", "C read", "C write", "API eq."] as const;
 
@@ -855,7 +856,10 @@ function buildLimitWindowTableRow(window: LimitWindowRow): TextTableRow {
       formatCompactLocalDateTime(window.endTimeUtcIso),
       // Status-aware: shows "-" when the API-equivalent cost is unknown rather
       // than a misleading $0.00.
-      formatUsageUsd(window.totals)
+      formatUsageUsd(window.totals),
+      // Extrapolated full value of the limit, rounded to a single figure here;
+      // the details panel shows the unrounded ±1% range.
+      formatLimitFullValueCompact(window.totals, window.maxUsedPercent)
     ]
   };
 }
@@ -939,6 +943,10 @@ function SelectionDetailsPanel(props: {
             <DetailRow label="Total" value={formatInteger(row.totals.totalTokens)} />
           </Box>
         </Box>
+        <DetailRow
+          label="Full value"
+          value={formatLimitFullValueRange(row.totals, row.maxUsedPercent)}
+        />
       </DetailsPanelFrame>
     );
   }
@@ -1103,6 +1111,43 @@ function formatUsd(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
+}
+
+function formatUsdWhole(value: number): string {
+  return Math.round(value).toLocaleString("en-US", {
+    currency: "USD",
+    style: "currency",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
+  });
+}
+
+// Extrapolate the limit's full USD value from the observed API-equivalent cost
+// and how much of the limit it represents. Uses the highest reported percent
+// (the latest cumulative usage) and returns "-" when the cost is unknown or the
+// percent is missing.
+function limitFullValueUsd(totals: UsageTotals, usedPercent: number): LimitFullValueEstimate | null {
+  if (totals.estimatedCreditsStatus === "unavailable") {
+    return null;
+  }
+
+  const usedUsd = totals.estimatedCredits * CODEX_CREDIT_COST_USD;
+  return estimateLimitFullValue(usedUsd, usedPercent);
+}
+
+function formatLimitFullValueCompact(totals: UsageTotals, usedPercent: number): string {
+  const estimate = limitFullValueUsd(totals, usedPercent);
+  return estimate ? formatUsdWhole(estimate.point) : "-";
+}
+
+function formatLimitFullValueRange(totals: UsageTotals, usedPercent: number): string {
+  const estimate = limitFullValueUsd(totals, usedPercent);
+  if (!estimate) {
+    return "-";
+  }
+
+  const low = formatUsd(estimate.low);
+  return Number.isFinite(estimate.high) ? `${low} – ${formatUsd(estimate.high)}` : `≥ ${low}`;
 }
 
 function formatUnitUsd(value: number): string {

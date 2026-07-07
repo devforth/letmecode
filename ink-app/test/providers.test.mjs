@@ -17,7 +17,7 @@ import {
   configureCopilotVsCodeLogging
 } from "../dist/providers/copilot.js";
 import { createProviders } from "../dist/providers/index.js";
-import { numberOrZero } from "../dist/providers/limits.js";
+import { numberOrZero, estimateLimitFullValue } from "../dist/providers/limits.js";
 
 // Keep the Copilot provider tests hermetic: never resolve a real GitHub token or
 // hit the network for quota. OTEL-focused tests inject "no quota"; quota-focused
@@ -268,6 +268,38 @@ test("numberOrZero accepts numeric strings without dropping them to zero", () =>
   assert.equal(numberOrZero(undefined), 0);
   assert.equal(numberOrZero({}), 0);
   assert.equal(numberOrZero(true), 0);
+});
+
+test("estimateLimitFullValue extrapolates a point estimate and a ±1% range", () => {
+  // $29 used at 1.9% of the limit implies a ~$1526 full value; the ±1% band
+  // spans [1.9%+1% => low, 1.9%-1% => high].
+  const estimate = estimateLimitFullValue(29, 1.9);
+  assert.ok(Math.abs(estimate.point - 29 / 0.019) < 1e-9); // ≈ 1526.32
+  assert.ok(Math.abs(estimate.low - 29 / 0.029) < 1e-9); // ≈ 1000.00 (at 2.9%)
+  assert.ok(Math.abs(estimate.high - 29 / 0.009) < 1e-9); // ≈ 3222.22 (at 0.9%)
+  assert.ok(estimate.low < estimate.point && estimate.point < estimate.high);
+});
+
+test("estimateLimitFullValue reports an unbounded upper bound when percent ≤ tolerance", () => {
+  // At 0.5% the lower edge of the ±1% band is negative, so the full value has no
+  // finite upper bound.
+  const estimate = estimateLimitFullValue(50, 0.5);
+  assert.ok(Math.abs(estimate.point - 50 / 0.005) < 1e-9); // ≈ 10000
+  assert.ok(Math.abs(estimate.low - 50 / 0.015) < 1e-9); // ≈ 3333.33 (at 1.5%)
+  assert.equal(estimate.high, Infinity);
+});
+
+test("estimateLimitFullValue honors a custom tolerance", () => {
+  const estimate = estimateLimitFullValue(10, 5, 2);
+  assert.ok(Math.abs(estimate.low - 10 / 0.07) < 1e-9); // at 7%
+  assert.ok(Math.abs(estimate.high - 10 / 0.03) < 1e-9); // at 3%
+});
+
+test("estimateLimitFullValue returns null when there is nothing to extrapolate", () => {
+  assert.equal(estimateLimitFullValue(0, 5), null); // no observed value
+  assert.equal(estimateLimitFullValue(-3, 5), null);
+  assert.equal(estimateLimitFullValue(29, 0), null); // no observed percent
+  assert.equal(estimateLimitFullValue(29, -1), null);
 });
 
 test("AntigravityUsageProvider parses one normalized usage record", async () => {
