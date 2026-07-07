@@ -17,6 +17,7 @@ import {
   configureCopilotVsCodeLogging
 } from "../dist/providers/copilot.js";
 import { createProviders } from "../dist/providers/index.js";
+import { numberOrZero } from "../dist/providers/limits.js";
 
 // Keep the Copilot provider tests hermetic: never resolve a real GitHub token or
 // hit the network for quota. OTEL-focused tests inject "no quota"; quota-focused
@@ -166,6 +167,7 @@ function claudeAssistantEvent({
   cacheCreation5mInputTokens = 0,
   cacheCreation1hInputTokens = 0,
   outputTokens,
+  inferenceGeo,
   rateLimits
 }) {
   return JSON.stringify({
@@ -184,6 +186,7 @@ function claudeAssistantEvent({
         cache_read_input_tokens: cacheReadInputTokens,
         cache_creation_input_tokens: cacheCreation5mInputTokens + cacheCreation1hInputTokens,
         output_tokens: outputTokens,
+        ...(inferenceGeo !== undefined ? { inference_geo: inferenceGeo } : {}),
         cache_creation: {
           ephemeral_5m_input_tokens: cacheCreation5mInputTokens,
           ephemeral_1h_input_tokens: cacheCreation1hInputTokens
@@ -243,6 +246,28 @@ test("provider registry stays UI-generic", async () => {
   assert.equal(typeof providers[1].getStats, "function");
   assert.equal(typeof providers[2].getStats, "function");
   assert.equal(typeof providers[3].getStats, "function");
+});
+
+test("numberOrZero accepts numeric strings without dropping them to zero", () => {
+  // Native numbers pass through; non-finite numbers still floor to zero.
+  assert.equal(numberOrZero(300), 300);
+  assert.equal(numberOrZero(72.5), 72.5);
+  assert.equal(numberOrZero(0), 0);
+  assert.equal(numberOrZero(Number.NaN), 0);
+  assert.equal(numberOrZero(Number.POSITIVE_INFINITY), 0);
+  // Numeric strings are parsed instead of silently zeroed.
+  assert.equal(numberOrZero("300"), 300);
+  assert.equal(numberOrZero("1750000000000"), 1750000000000);
+  assert.equal(numberOrZero("72.5"), 72.5);
+  assert.equal(numberOrZero("  42 "), 42);
+  // Non-numeric and non-scalar inputs remain zero.
+  assert.equal(numberOrZero(""), 0);
+  assert.equal(numberOrZero("abc"), 0);
+  assert.equal(numberOrZero("Infinity"), 0);
+  assert.equal(numberOrZero(null), 0);
+  assert.equal(numberOrZero(undefined), 0);
+  assert.equal(numberOrZero({}), 0);
+  assert.equal(numberOrZero(true), 0);
 });
 
 test("AntigravityUsageProvider parses one normalized usage record", async () => {
@@ -423,6 +448,69 @@ test("AntigravityUsageProvider deduplicates duplicate responses", async () => {
   assert.equal(stats.summary.totals.eventCount, 1);
   assert.equal(stats.summary.totals.inputTokens, 10);
   assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate")), true);
+});
+
+test("AntigravityUsageProvider keeps the largest-total duplicate regardless of order", async () => {
+  const base = {
+    type: "usage",
+    sessionId: "s1",
+    responseId: "r1",
+    timestamp: 1782304784564,
+    modelId: "gemini-3-flash-a",
+    reasoning: 1
+  };
+  // The complete snapshot arrives first and a smaller/partial copy arrives last,
+  // so first-write-wins or last-write-wins would both drop tokens.
+  const complete = { ...base, input: 100, cacheRead: 200, cacheWrite: 0, output: 10 };
+  const partial = { ...base, input: 10, cacheRead: 20, cacheWrite: 0, output: 1 };
+
+  const stats = await new AntigravityUsageProvider({
+    collectUsage: async () => [complete, partial]
+  }).getStats();
+
+  assert.equal(stats.summary.totals.eventCount, 1);
+  assert.equal(stats.summary.totals.inputTokens, 100);
+  assert.equal(stats.summary.totals.cacheReadInputTokens, 200);
+  assert.equal(stats.summary.totals.outputTokens, 10);
+  assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate")), true);
+});
+
+test("AntigravityUsageProvider marks reported cache writes known but leaves unreported ones unavailable", async () => {
+  const stats = await new AntigravityUsageProvider({
+    collectUsage: async () => [
+      {
+        type: "usage",
+        sessionId: "s1",
+        responseId: "with-cache-write",
+        timestamp: 1782304784564,
+        modelId: "gemini-3-flash-a",
+        input: 1000,
+        cacheRead: 0,
+        cacheWrite: 100,
+        output: 10,
+        reasoning: 0
+      },
+      {
+        type: "usage",
+        sessionId: "s2",
+        responseId: "without-cache-write",
+        timestamp: 1782304784564,
+        modelId: "claude-sonnet-4-6",
+        input: 1000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 10,
+        reasoning: 0
+      }
+    ]
+  }).getStats();
+  const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+
+  // A reported cache write is billed, so it must be shown (not hidden as "-").
+  assert.equal(byModel.get("gemini-3-flash")?.cacheWriteInputTokens, 100);
+  assert.notEqual(byModel.get("gemini-3-flash")?.cacheWriteStatus, "unavailable");
+  // The local RPC's unreported cache write stays unknown.
+  assert.equal(byModel.get("claude-sonnet-4-6")?.cacheWriteStatus, "unavailable");
 });
 
 test("AntigravityUsageProvider does not warn that IDE is closed after empty successful sync", async () => {
@@ -1788,6 +1876,34 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
   });
 });
 
+test("CodexUsageProvider builds limit windows when rate limits arrive as numeric strings", async () => {
+  await withTempRoot(async (root) => {
+    const lines = [
+      turnContext("gpt-5.5"),
+      tokenEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        total: {
+          input_tokens: 100,
+          cached_input_tokens: 10,
+          output_tokens: 20,
+          total_tokens: 120
+        },
+        // Numeric fields serialized as strings must not zero out the window,
+        // which would otherwise be dropped by the windowMinutes/resets_at guard.
+        primary: { used_percent: "5", window_minutes: "300", resets_at: "1780589753" }
+      })
+    ];
+
+    await writeSession(root, "2026/06/18/string-limits.jsonl", lines);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].windowMinutes, 300);
+    assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 5);
+    assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
+  });
+});
+
 test("CodexUsageProvider suppresses missing-rate warnings for hidden internal Codex models", async () => {
   await withTempRoot(async (root) => {
     await writeCodexModelsCache(root, [
@@ -2106,6 +2222,35 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
 
     const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
     assert.equal(verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), true);
+  });
+});
+
+test("ClaudeUsageProvider applies the US inference surcharge case-insensitively", async () => {
+  await withTempRoot(async (root) => {
+    // One clean input-only million tokens per event keeps the credit math exact:
+    // claude-sonnet-4-6 input is $3/1M, credits are USD * 100, US adds 10%.
+    const makeEvent = (suffix, inferenceGeo) =>
+      claudeAssistantEvent({
+        timestamp: `2026-06-18T20:00:0${suffix}.000Z`,
+        requestId: `req-${suffix}`,
+        messageId: `msg-${suffix}`,
+        model: "claude-sonnet-4-6",
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        inferenceGeo
+      });
+
+    await writeClaudeSession(root, "geo-project/session.jsonl", [
+      makeEvent("1", "us"),
+      makeEvent("2", "US"),
+      makeEvent("3", "eu")
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 3);
+    // 330 ("us") + 330 ("US", surcharged) + 300 ("eu", no surcharge) = 960.
+    // Without case-insensitive matching "US" would drop to 300 and total 930.
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 960) < 0.0000001);
   });
 });
 

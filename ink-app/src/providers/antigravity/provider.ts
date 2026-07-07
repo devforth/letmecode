@@ -373,13 +373,21 @@ function deduplicateRecords(
   const byKey = new Map<string, AntigravityUsageRecord>();
 
   for (const record of records) {
-    byKey.set(
-      `${record.sessionId}:${record.responseId}`,
-      record
-    );
+    const key = `${record.sessionId}:${record.responseId}`;
+    const existing = byKey.get(key);
+    // The RPC may surface the same response more than once (e.g. progressive
+    // snapshots in unspecified order). Keep the largest coherent total rather
+    // than trusting iteration order, so we never undercount a final snapshot.
+    if (!existing || recordTokenTotal(record) > recordTokenTotal(existing)) {
+      byKey.set(key, record);
+    }
   }
 
   return [...byKey.values()];
+}
+
+function recordTokenTotal(record: AntigravityUsageRecord): number {
+  return record.input + record.cacheRead + record.cacheWrite + record.output;
 }
 
 function usageRecordToTotals(
@@ -404,11 +412,12 @@ function usageRecordToTotals(
       record.output,
     estimatedCredits: creditsFor(modelId, record),
     eventCount: 1,
-    // The local RPC reports cache reads but never cache writes, so cache reads
-    // are accurate while cache writes are genuinely unknown (not a confirmed
-    // zero) — surfaced as "-" everywhere, including the input/output ratio.
+    // The local RPC reports cache reads but never cache writes, so a zero cache
+    // write is genuinely unknown (not a confirmed zero) and is surfaced as "-".
+    // A positive value only appears when a source explicitly reports it, in
+    // which case it is both billed (see creditsFor) and shown as known.
     cacheReadStatus: "known",
-    cacheWriteStatus: "unavailable",
+    cacheWriteStatus: record.cacheWrite > 0 ? "known" : "unavailable",
     estimatedCreditsStatus: rateForModel(modelId, record.input)
       ? "known"
       : "unavailable"

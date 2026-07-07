@@ -411,7 +411,10 @@ function creditsFor(modelId: string, usage: ClaudeUsage, timestampMs?: number): 
   }
 
   const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
-  const inferenceMultiplier = usage.inferenceGeo === "us" ? 1.1 : 1;
+  // The US inference surcharge must match regardless of the casing the source
+  // reports (e.g. "us", "US"), so compare case-insensitively.
+  const inferenceMultiplier =
+    usage.inferenceGeo.trim().toLowerCase() === "us" ? 1.1 : 1;
 
   return (
     ((usage.inputTokens / 1_000_000) * rate.input +
@@ -807,16 +810,21 @@ function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEve
   };
 }
 
-// Pick the snapshot that carries the most usage. Cumulative snapshots are monotonic, so the
-// largest total is the final state; this also keeps a real synthetic-followup row (0 tokens)
-// from clobbering the real usage it follows. Ties fall back to the later, then the earlier-seen
-// event for deterministic output.
+// Pick the snapshot with the latest timestamp. Same-key events are repeated/streamed snapshots
+// of one logical request, so the most recent one reflects the final state. The one exception is
+// a zero-usage internal <synthetic> completion marker, which is a real followup row rather than
+// an updated snapshot and must not clobber the real usage it follows.
 function selectMergedSnapshotEvent(previous: ParsedUsageEvent, next: ParsedUsageEvent): ParsedUsageEvent {
-  if (next.totals.totalTokens !== previous.totals.totalTokens) {
-    return next.totals.totalTokens > previous.totals.totalTokens ? next : previous;
+  const previousIsHollowSynthetic = isInternalClaudeModel(previous.modelId) && previous.totals.totalTokens === 0;
+  const nextIsHollowSynthetic = isInternalClaudeModel(next.modelId) && next.totals.totalTokens === 0;
+  if (nextIsHollowSynthetic && !previousIsHollowSynthetic) {
+    return previous;
+  }
+  if (previousIsHollowSynthetic && !nextIsHollowSynthetic) {
+    return next;
   }
 
-  return normalizeTimestamp(next.timestampMs) > normalizeTimestamp(previous.timestampMs) ? next : previous;
+  return normalizeTimestamp(next.timestampMs) >= normalizeTimestamp(previous.timestampMs) ? next : previous;
 }
 
 function selectMergedEventModelId(primary: ParsedUsageEvent, other: ParsedUsageEvent): string {
