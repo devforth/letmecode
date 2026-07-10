@@ -13,7 +13,7 @@ import {
   type UsageTotals
 } from "./providers/index.js";
 import { reportAnonymousUsage } from "./reporting.js";
-import { estimateLimitFullValue, type LimitFullValueEstimate } from "./providers/limits.js";
+import { estimateLimitFullValue, selectLatestActiveLimitWindows, type LimitFullValueEstimate } from "./providers/limits.js";
 
 type DetailViewId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 type ControlSectionId = "provider" | "view" | "table";
@@ -61,8 +61,9 @@ const DETAIL_VIEWS: Array<{ id: DetailViewId; label: string }> = [
 const CONTROL_SECTIONS: ControlSectionId[] = ["provider", "view", "table"];
 
 const CODEX_CREDIT_COST_USD = 0.01;
+const ACTIVE_LIMIT_WINDOW_COLOR = "#FFA500";
 
-const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Models", "Window", "Used", "Start", "End", "API eq.", "Full"] as const;
+const LIMIT_TABLE_HEADERS = ["Scope", "Plan", "Models", "Window", "Used", "Tokens", "Start", "End", "API eq.", "Full"] as const;
 const DAILY_TABLE_HEADERS = ["Day", "Ev", "Input", "Output", "C read", "C write", "API eq."] as const;
 const MODEL_TABLE_HEADERS = ["Model", "Input", "Output", "C read", "C write", "API eq."] as const;
 
@@ -74,6 +75,7 @@ type TextTable = {
 type TextTableRow = {
   key: string;
   cells: string[];
+  color?: string;
 };
 
 const COPILOT_ACTIONS: Array<{ id: CopilotActionId; label: string; enabled: boolean }> = [
@@ -887,7 +889,7 @@ function buildTextTableLines(options: {
       key: row.key,
       text: buildTableRow(table, row.cells),
       inverse: isSelected,
-      color: isSelected ? "cyan" : undefined
+      color: isSelected ? "cyan" : row.color
     }];
 
     if (options.separatorAfterRowKeys?.has(row.key)) {
@@ -933,8 +935,10 @@ function buildLimitWindowTableLines(
   stats: ProviderStats,
   selectedRowKey?: string
 ): ScrollableLines {
-  const primaryRows = stats.primaryLimitWindows.map((window) => buildLimitWindowTableRow(window));
-  const secondaryRows = stats.secondaryLimitWindows.map((window) => buildLimitWindowTableRow(window));
+  const allWindows = [...stats.primaryLimitWindows, ...stats.secondaryLimitWindows];
+  const activeWindows = selectLatestActiveLimitWindows(allWindows);
+  const primaryRows = stats.primaryLimitWindows.map((window) => buildLimitWindowTableRow(window, activeWindows.has(window)));
+  const secondaryRows = stats.secondaryLimitWindows.map((window) => buildLimitWindowTableRow(window, activeWindows.has(window)));
   const separatorAfterRowKeys =
     primaryRows.length > 0 && secondaryRows.length > 0
       ? new Set([primaryRows[primaryRows.length - 1].key])
@@ -949,15 +953,17 @@ function buildLimitWindowTableLines(
   });
 }
 
-function buildLimitWindowTableRow(window: LimitWindowRow): TextTableRow {
+function buildLimitWindowTableRow(window: LimitWindowRow, isActive: boolean): TextTableRow {
   return {
     key: `limit-row:${getLimitRowKey(window)}`,
+    color: isActive ? ACTIVE_LIMIT_WINDOW_COLOR : undefined,
     cells: [
       window.scope,
       window.planType,
       formatLimitWindowModels(window),
       formatCompactWindowMinutes(window.windowMinutes),
       formatUsedPercentRange(window.minUsedPercent, window.maxUsedPercent),
+      formatCompactTokenCount(window.totals.totalTokens),
       formatCompactLocalDateTime(window.startTimeUtcIso),
       formatCompactLocalDateTime(window.endTimeUtcIso),
       // Status-aware: shows "-" when the API-equivalent cost is unknown rather

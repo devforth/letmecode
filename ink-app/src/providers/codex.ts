@@ -36,7 +36,45 @@ import { resolveUsageRate, type UsageRate } from "./pricing.js";
 // subscription credit prices.
 const USD_TO_CREDITS = 100;
 
+const GPT_5_6_SOL_RATE: UsageRate = {
+  input: 5,
+  cacheRead: 0.5,
+  cacheWrite: 6.25,
+  cacheWrite5m: 6.25,
+  cacheWrite1h: 6.25,
+  output: 30,
+  longContext: {
+    thresholdTokens: 272_000,
+    rate: { input: 10, cacheRead: 1, cacheWrite: 12.5, cacheWrite5m: 12.5, cacheWrite1h: 12.5, output: 45 }
+  }
+};
+
 const RATE_CARD: Record<string, UsageRate> = {
+  "gpt-5.6-sol": GPT_5_6_SOL_RATE,
+  "gpt-5.6-terra": {
+    input: 2.5,
+    cacheRead: 0.25,
+    cacheWrite: 3.125,
+    cacheWrite5m: 3.125,
+    cacheWrite1h: 3.125,
+    output: 15,
+    longContext: {
+      thresholdTokens: 272_000,
+      rate: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 6.25, output: 22.5 }
+    }
+  },
+  "gpt-5.6-luna": {
+    input: 1,
+    cacheRead: 0.1,
+    cacheWrite: 1.25,
+    cacheWrite5m: 1.25,
+    cacheWrite1h: 1.25,
+    output: 6,
+    longContext: {
+      thresholdTokens: 272_000,
+      rate: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 9 }
+    }
+  },
   "gpt-5.5": { input: 5, cacheRead: 0.5, cacheWrite: 5, cacheWrite5m: 5, cacheWrite1h: 5, output: 30 },
   "gpt-5.4": { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 2.5, output: 15 },
   "gpt-5.4-mini": { input: 0.75, cacheRead: 0.075, cacheWrite: 0.75, cacheWrite5m: 0.75, cacheWrite1h: 0.75, output: 4.5 }
@@ -107,7 +145,7 @@ export class CodexUsageProvider extends UsageProviderBase {
 
     const unknownPricedModels = modelUsage
       .map((row) => row.modelId)
-      .filter((modelId) => !RATE_CARD[modelId] && !isAssumedZeroRatedCodexModel(modelId, knownModels));
+      .filter((modelId) => !rateForCodexModel(modelId) && !isAssumedZeroRatedCodexModel(modelId, knownModels));
     if (unknownPricedModels.length > 0) {
       warnings.push(`No credit rate configured for: ${unknownPricedModels.join(", ")}.`);
     }
@@ -315,7 +353,7 @@ function subtractRawUsage(current: RawUsage, previous: RawUsage): RawUsage {
 }
 
 function creditsFor(modelId: string, usage: RawUsage): number {
-  const rate = resolveUsageRate(RATE_CARD, modelId);
+  const rate = rateForCodexModel(modelId, usage.inputTokens);
   if (!rate) {
     return 0;
   }
@@ -329,6 +367,13 @@ function creditsFor(modelId: string, usage: RawUsage): number {
       (usage.outputTokens / 1_000_000) * rate.output) *
     USD_TO_CREDITS
   );
+}
+
+function rateForCodexModel(modelId: string, inputTokens = 0) {
+  // The unsuffixed API alias routes to Sol. Normalize only the exact alias so
+  // an unknown future gpt-5.6-* tier is not accidentally charged at Sol rates.
+  const pricedModelId = modelId === "gpt-5.6" ? "gpt-5.6-sol" : modelId;
+  return resolveUsageRate(RATE_CARD, pricedModelId, inputTokens, { prefixMatch: true });
 }
 
 function rawUsageToTotals(usage: RawUsage): UsageTotals {
@@ -358,7 +403,7 @@ function createUsageTotalsForModel(
   const deltaTotals = rawUsageToTotals(usage);
   deltaTotals.estimatedCredits = creditsFor(resolvedModelId, usage);
   deltaTotals.eventCount = 1;
-  if (!RATE_CARD[resolvedModelId] && !isAssumedZeroRatedCodexModel(resolvedModelId, knownModels)) {
+  if (!rateForCodexModel(resolvedModelId, usage.inputTokens) && !isAssumedZeroRatedCodexModel(resolvedModelId, knownModels)) {
     deltaTotals.estimatedCreditsStatus = "unavailable";
   }
   return deltaTotals;

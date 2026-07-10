@@ -17,7 +17,12 @@ import {
   configureCopilotVsCodeLogging
 } from "../dist/providers/copilot.js";
 import { createProviders } from "../dist/providers/index.js";
-import { numberOrZero, estimateLimitFullValue } from "../dist/providers/limits.js";
+import {
+  numberOrZero,
+  estimateLimitFullValue,
+  isLimitWindowActive,
+  selectLatestActiveLimitWindows
+} from "../dist/providers/limits.js";
 
 // Keep the Copilot provider tests hermetic: never resolve a real GitHub token or
 // hit the network for quota. OTEL-focused tests inject "no quota"; quota-focused
@@ -268,6 +273,46 @@ test("numberOrZero accepts numeric strings without dropping them to zero", () =>
   assert.equal(numberOrZero(undefined), 0);
   assert.equal(numberOrZero({}), 0);
   assert.equal(numberOrZero(true), 0);
+});
+
+test("isLimitWindowActive includes both time boundaries and rejects invalid ranges", () => {
+  const window = {
+    startTimeUtcIso: "2026-07-10T10:00:00.000Z",
+    endTimeUtcIso: "2026-07-10T11:00:00.000Z"
+  };
+
+  assert.equal(isLimitWindowActive(window, Date.parse("2026-07-10T09:59:59.999Z")), false);
+  assert.equal(isLimitWindowActive(window, Date.parse(window.startTimeUtcIso)), true);
+  assert.equal(isLimitWindowActive(window, Date.parse("2026-07-10T10:30:00.000Z")), true);
+  assert.equal(isLimitWindowActive(window, Date.parse(window.endTimeUtcIso)), true);
+  assert.equal(isLimitWindowActive(window, Date.parse("2026-07-10T11:00:00.001Z")), false);
+  assert.equal(
+    isLimitWindowActive({ startTimeUtcIso: "invalid", endTimeUtcIso: window.endTimeUtcIso }, Date.now()),
+    false
+  );
+});
+
+test("selectLatestActiveLimitWindows picks one latest-start row per plan and duration", () => {
+  const nowMs = Date.parse("2026-07-10T12:00:00.000Z");
+  const window = (planType, windowMinutes, startTimeUtcIso, endTimeUtcIso) => ({
+    planType,
+    windowMinutes,
+    startTimeUtcIso,
+    endTimeUtcIso
+  });
+  const olderMonthly = window("team", 43800, "2026-07-08T00:00:00.000Z", "2026-08-08T00:00:00.000Z");
+  const latestMonthly = window("team", 43800, "2026-07-10T10:00:00.000Z", "2026-08-10T20:00:00.000Z");
+  const futureMonthly = window("team", 43800, "2026-07-11T00:00:00.000Z", "2026-08-11T10:00:00.000Z");
+  const expiredMonthly = window("team", 43800, "2026-06-01T00:00:00.000Z", "2026-07-09T00:00:00.000Z");
+  const weeklyTeam = window("team", 10080, "2026-07-09T00:00:00.000Z", "2026-07-16T00:00:00.000Z");
+  const monthlyPlus = window("plus", 43800, "2026-07-09T00:00:00.000Z", "2026-08-09T10:00:00.000Z");
+
+  const selected = selectLatestActiveLimitWindows(
+    [olderMonthly, latestMonthly, futureMonthly, expiredMonthly, weeklyTeam, monthlyPlus],
+    nowMs
+  );
+
+  assert.deepEqual([...selected], [latestMonthly, weeklyTeam, monthlyPlus]);
 });
 
 test("estimateLimitFullValue extrapolates a point estimate and a ±1% range", () => {
@@ -1933,6 +1978,106 @@ test("CodexUsageProvider builds limit windows when rate limits arrive as numeric
     assert.equal(stats.primaryLimitWindows[0].windowMinutes, 300);
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 5);
     assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
+  });
+});
+
+test("CodexUsageProvider coalesces monthly reset jitter into logical cycles", async () => {
+  await withTempRoot(async (root) => {
+    const monthlyReset = 1780589753;
+    await writeSession(root, "2026/06/18/monthly-window.jsonl", [
+      turnContext("gpt-5.6-sol"),
+      tokenEvent({
+        timestamp: "2026-06-18T20:00:01.000Z",
+        total: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110 },
+        last: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110 },
+        primary: { used_percent: 0, window_minutes: 43800, resets_at: monthlyReset }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-18T20:01:01.000Z",
+        total: { input_tokens: 220, cached_input_tokens: 50, output_tokens: 25, total_tokens: 245 },
+        last: { input_tokens: 120, cached_input_tokens: 30, output_tokens: 15, total_tokens: 135 },
+        primary: { used_percent: 1, window_minutes: 43800, resets_at: monthlyReset + 180 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-18T20:02:01.000Z",
+        total: { input_tokens: 360, cached_input_tokens: 90, output_tokens: 45, total_tokens: 405 },
+        last: { input_tokens: 140, cached_input_tokens: 40, output_tokens: 20, total_tokens: 160 },
+        primary: { used_percent: 2, window_minutes: 43800, resets_at: monthlyReset + 600 }
+      }),
+      tokenEvent({
+        timestamp: "2026-06-19T16:00:01.000Z",
+        total: { input_tokens: 410, cached_input_tokens: 100, output_tokens: 50, total_tokens: 460 },
+        last: { input_tokens: 50, cached_input_tokens: 10, output_tokens: 5, total_tokens: 55 },
+        primary: { used_percent: 0, window_minutes: 43800, resets_at: monthlyReset + 20 * 60 * 60 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.primaryLimitWindows.length, 2);
+
+    const jitteredWindow = stats.primaryLimitWindows[1];
+    assert.equal(jitteredWindow.windowMinutes, 43800);
+    assert.equal(jitteredWindow.minUsedPercent, 0);
+    assert.equal(jitteredWindow.maxUsedPercent, 2);
+    assert.equal(jitteredWindow.eventCount, 3);
+    assert.equal(jitteredWindow.totals.inputTokens, 270);
+    assert.equal(jitteredWindow.totals.cacheReadInputTokens, 90);
+    assert.equal(jitteredWindow.totals.outputTokens, 45);
+    assert.equal(jitteredWindow.totals.totalTokens, 405);
+  });
+});
+
+test("CodexUsageProvider prices the GPT-5.6 family, alias, snapshots, and long context", async () => {
+  await withTempRoot(async (root) => {
+    const standardUsage = {
+      input_tokens: 100_000,
+      cached_input_tokens: 10_000,
+      output_tokens: 10_000,
+      total_tokens: 110_000
+    };
+    const lines = [];
+    for (const [index, model] of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"].entries()) {
+      lines.push(turnContext(model));
+      lines.push(
+        tokenEvent({
+          timestamp: `2026-07-10T10:0${index}:01.000Z`,
+          total: standardUsage,
+          last: standardUsage
+        })
+      );
+    }
+
+    lines.push(turnContext("gpt-5.6-sol-2026-07-09"));
+    lines.push(
+      tokenEvent({
+        timestamp: "2026-07-10T10:04:01.000Z",
+        total: {
+          input_tokens: 300_000,
+          cached_input_tokens: 100_000,
+          output_tokens: 100_000,
+          total_tokens: 400_000
+        },
+        last: {
+          input_tokens: 300_000,
+          cached_input_tokens: 100_000,
+          output_tokens: 100_000,
+          total_tokens: 400_000
+        }
+      })
+    );
+
+    await writeSession(root, "2026/07/10/gpt-5.6.jsonl", lines);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol")?.estimatedCredits ?? 0) - 75.5) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-terra")?.estimatedCredits ?? 0) - 37.75) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-luna")?.estimatedCredits ?? 0) - 15.1) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6")?.estimatedCredits ?? 0) - 75.5) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 660) < 1e-9);
+    assert.equal(stats.warnings.some((warning) => warning.includes("gpt-5.6")), false);
+    assert.notEqual(stats.summary.totals.estimatedCreditsStatus, "unavailable");
   });
 });
 

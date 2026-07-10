@@ -29,8 +29,44 @@ type LimitWindowAggregate = {
 
 export type LimitWindowAggregates = Map<string, LimitWindowAggregate>;
 
+// Recent Codex monthly windows can report a reset timestamp that jitters by a
+// few minutes while the logical quota cycle remains unchanged. Short and weekly
+// windows retain exact reset identity so their established behavior is stable.
+const MONTHLY_WINDOW_MINUTES = 30 * 24 * 60;
+const MONTHLY_RESET_JITTER_SECONDS = 15 * 60;
+
 export function createLimitWindowAggregates(): LimitWindowAggregates {
   return new Map<string, LimitWindowAggregate>();
+}
+
+export function isLimitWindowActive(
+  window: Pick<LimitWindowRow, "startTimeUtcIso" | "endTimeUtcIso">,
+  nowMs = Date.now()
+): boolean {
+  const startMs = Date.parse(window.startTimeUtcIso);
+  const endMs = Date.parse(window.endTimeUtcIso);
+  return Number.isFinite(startMs) && Number.isFinite(endMs) && startMs <= nowMs && nowMs <= endMs;
+}
+
+export function selectLatestActiveLimitWindows<
+  T extends Pick<LimitWindowRow, "planType" | "windowMinutes" | "startTimeUtcIso" | "endTimeUtcIso">
+>(windows: T[], nowMs = Date.now()): Set<T> {
+  const latestByPlanAndWindow = new Map<string, { window: T; startMs: number }>();
+
+  for (const window of windows) {
+    if (!isLimitWindowActive(window, nowMs)) {
+      continue;
+    }
+
+    const startMs = Date.parse(window.startTimeUtcIso);
+    const groupKey = JSON.stringify([window.planType, window.windowMinutes]);
+    const current = latestByPlanAndWindow.get(groupKey);
+    if (!current || startMs > current.startMs) {
+      latestByPlanAndWindow.set(groupKey, { window, startMs });
+    }
+  }
+
+  return new Set([...latestByPlanAndWindow.values()].map((entry) => entry.window));
 }
 
 export function numberOrZero(value: unknown): number {
@@ -161,6 +197,49 @@ function makeWindowKey(scope: LimitWindowScope, rateLimits: Record<string, unkno
   ].join("|");
 }
 
+function findMatchingWindowKey(
+  windows: LimitWindowAggregates,
+  scope: LimitWindowScope,
+  rateLimits: Record<string, unknown>,
+  windowMinutes: number,
+  resetsAt: number
+): string {
+  const exactKey = makeWindowKey(scope, rateLimits, { window_minutes: windowMinutes, resets_at: resetsAt });
+  if (windows.has(exactKey) || windowMinutes < MONTHLY_WINDOW_MINUTES) {
+    return exactKey;
+  }
+
+  const limitId = String(rateLimits.limit_id ?? "unknown");
+  const planType = String(rateLimits.plan_type ?? "unknown");
+  let closestKey = exactKey;
+  let closestDistance = Number.POSITIVE_INFINITY;
+
+  for (const [key, candidate] of windows) {
+    if (
+      candidate.scope !== scope ||
+      candidate.limitId !== limitId ||
+      candidate.planType !== planType ||
+      candidate.windowMinutes !== windowMinutes
+    ) {
+      continue;
+    }
+
+    const minResetsAt = candidate.minStartsAt + candidate.windowMinutes * 60;
+    const distance =
+      resetsAt < minResetsAt
+        ? minResetsAt - resetsAt
+        : resetsAt > candidate.maxResetsAt
+          ? resetsAt - candidate.maxResetsAt
+          : 0;
+    if (distance <= MONTHLY_RESET_JITTER_SECONDS && distance < closestDistance) {
+      closestKey = key;
+      closestDistance = distance;
+    }
+  }
+
+  return closestKey;
+}
+
 function collapseNearbyWindows(rows: LimitWindowRow[]): LimitWindowRow[] {
   const collapsed = new Map<string, LimitWindowRow>();
 
@@ -256,7 +335,7 @@ function upsertWindow(
 
   const startsAt = resetsAt - windowMinutes * 60;
   const usedPercent = numberOrZero(window.used_percent);
-  const key = makeWindowKey(scope, rateLimits, window);
+  const key = findMatchingWindowKey(windows, scope, rateLimits, windowMinutes, resetsAt);
   const existing = windows.get(key);
 
   if (!existing) {
