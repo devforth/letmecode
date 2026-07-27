@@ -39,7 +39,7 @@ const RATE_CARD: Record<string, UsageRate> = {
   "claude-opus-4-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-1": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
   "claude-opus-4": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
-  "claude-opus-5": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
+  "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-sonnet-5": {
     input: 3,
     cacheRead: 0.3,
