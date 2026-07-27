@@ -20,6 +20,7 @@ export const RATE_CARD: Record<string, UsageRate> = {
   "claude-opus-4-6": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
   "claude-opus-4-7": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
   "claude-opus-4-8": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
+  "claude-opus-5": { input: 500, cacheRead: 50, cacheWrite: 625, cacheWrite5m: 625, cacheWrite1h: 1000, output: 2500 },
   "claude-fable-5": { input: 1000, cacheRead: 100, cacheWrite: 1250, cacheWrite5m: 1250, cacheWrite1h: 2000, output: 5000 },
   "gemini-2.5-pro": { input: 125, cacheRead: 12.5, cacheWrite: 125, cacheWrite5m: 125, cacheWrite1h: 125, output: 1000 },
   "gemini-3-flash": { input: 50, cacheRead: 5, cacheWrite: 50, cacheWrite5m: 50, cacheWrite1h: 50, output: 300 },
