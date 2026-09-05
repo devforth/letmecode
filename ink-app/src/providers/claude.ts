@@ -31,28 +31,19 @@ import {
 } from "./daily.js";
 import { resolveUsageRate, type UsageRate } from "./pricing.js";
 
+// Source: https://platform.claude.com/docs/en/about-claude/pricing
+// (checked 2026-09-05).
 const RATE_CARD: Record<string, UsageRate> = {
+  "claude-fable-5-1": { input: 10, cacheRead: 0.25, cacheWrite: 12.5, cacheWrite5m: 12.5, cacheWrite1h: 20, output: 50 },
   "claude-fable-5": { input: 10, cacheRead: 1, cacheWrite: 12.5, cacheWrite5m: 12.5, cacheWrite1h: 20, output: 50 },
+  "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-8": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-7": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-6": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
   "claude-opus-4-1": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
   "claude-opus-4": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
-  "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
-  "claude-sonnet-5": {
-    input: 3,
-    cacheRead: 0.3,
-    cacheWrite: 3.75,
-    cacheWrite5m: 3.75,
-    cacheWrite1h: 6,
-    output: 15,
-    // Intro pricing (~0.66x) through 2026-08-31; reverts to the standard rate above on 2026-09-01.
-    introOffer: {
-      effectiveUntilMs: Date.UTC(2026, 8, 1),
-      rate: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 4, output: 10 }
-    }
-  },
+  "claude-sonnet-5": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 4, output: 10 },
   "claude-sonnet-4-6": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
   "claude-sonnet-4-5": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
   "claude-sonnet-4": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
@@ -91,11 +82,12 @@ const claudeOauthCredentialsOutputCache = new Map<string, Promise<string | null>
 type ClaudeUsage = {
   inputTokens: number;
   cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
   cacheCreation5mInputTokens: number;
   cacheCreation1hInputTokens: number;
   outputTokens: number;
   inferenceGeo: string;
+  speed: string;
+  webSearchRequests: number;
 };
 
 type ParseTotals = {
@@ -142,11 +134,8 @@ type ParsedClaudeSessionFile = {
 
 type ParsedUsageEventAccumulator = {
   keyedEvents: Map<string, ParsedUsageEvent>;
-  unkeyedEvents: ParsedUsageEvent[];
-  lastUnkeyedEventsBySignature: Map<string, { event: ParsedUsageEvent; index: number }>;
   duplicateUsageKeys: number;
   duplicateUsageKeyCollisions: number;
-  duplicateUnkeyedEvents: number;
 };
 
 type LiveUsageWindowSnapshot = {
@@ -247,8 +236,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
     }
 
     const selectedEvents = [
-      ...new Set(parsedEvents.keyedEvents.values()),
-      ...parsedEvents.unkeyedEvents
+      ...new Set(parsedEvents.keyedEvents.values())
     ];
     traceClaude(
       options.traceLogger,
@@ -256,8 +244,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
         `Transcript selection summary: filesWithMatches=${parseTotals.filesScanned}/${parsedSessionFiles.length}`,
         `selectedEvents=${selectedEvents.length}`,
         `duplicateUsageKeys=${parsedEvents.duplicateUsageKeys}`,
-        `duplicateUsageKeyCollisions=${parsedEvents.duplicateUsageKeyCollisions}`,
-        `duplicateUnkeyedEvents=${parsedEvents.duplicateUnkeyedEvents}`
+        `duplicateUsageKeyCollisions=${parsedEvents.duplicateUsageKeyCollisions}`
       ].join(" ")
     );
     if (selectedEvents.length === 0 && parsedSessionFiles.length > 0) {
@@ -292,12 +279,6 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       );
     }
 
-    if (options.verbose && parsedEvents.duplicateUnkeyedEvents > 0) {
-      warnings.push(
-        `Collapsed ${parsedEvents.duplicateUnkeyedEvents} adjacent duplicate unkeyed Claude usage event(s) by usage signature.`
-      );
-    }
-
     const modelUsage = [...byModel.entries()]
       .map<ModelUsageRow>(([modelId, totals]) => ({ modelId, totals }))
       .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
@@ -306,7 +287,7 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       .map((row) => row.modelId)
       .filter((modelId) => !resolveRate(modelId) && !isInternalClaudeModel(modelId));
     if (unknownPricedModels.length > 0) {
-      warnings.push(`No credit rate configured for: ${unknownPricedModels.join(", ")}.`);
+      warnings.push(`No API-equivalent rate configured for: ${unknownPricedModels.join(", ")}.`);
     }
 
     if (parsedSessionFiles.length === 0) {
@@ -379,21 +360,19 @@ export class ClaudeUsageProvider extends UsageProviderBase {
 function normalizeUsage(value: unknown): ClaudeUsage {
   const usage = asRecord(value) ?? {};
   const cacheCreation = asRecord(usage.cache_creation);
+  const serverToolUse = asRecord(usage.server_tool_use);
   const cacheCreation5mInputTokens = numberOrZero(cacheCreation?.ephemeral_5m_input_tokens);
   const cacheCreation1hInputTokens = numberOrZero(cacheCreation?.ephemeral_1h_input_tokens);
-  const cacheCreationInputTokens = Math.max(
-    numberOrZero(usage.cache_creation_input_tokens),
-    cacheCreation5mInputTokens + cacheCreation1hInputTokens
-  );
 
   return {
     inputTokens: numberOrZero(usage.input_tokens),
     cacheReadInputTokens: numberOrZero(usage.cache_read_input_tokens),
-    cacheCreationInputTokens,
     cacheCreation5mInputTokens,
     cacheCreation1hInputTokens,
     outputTokens: numberOrZero(usage.output_tokens),
-    inferenceGeo: String(usage.inference_geo ?? "")
+    inferenceGeo: String(usage.inference_geo ?? ""),
+    speed: String(usage.speed ?? ""),
+    webSearchRequests: numberOrZero(serverToolUse?.web_search_requests)
   };
 }
 
@@ -416,15 +395,24 @@ function creditsFor(modelId: string, usage: ClaudeUsage, timestampMs?: number): 
   // reports (e.g. "us", "US"), so compare case-insensitively.
   const inferenceMultiplier =
     usage.inferenceGeo.trim().toLowerCase() === "us" ? 1.1 : 1;
+  const speedMultiplier =
+    usage.speed.trim().toLowerCase() === "fast" && isClaudeFastPricedModel(modelId)
+      ? 2
+      : 1;
+  const tokenCostUsd =
+    (usage.inputTokens / 1_000_000) * rate.input +
+    (usage.cacheReadInputTokens / 1_000_000) * rate.cacheRead +
+    (cacheWriteBreakdown.cacheWrite5mInputTokens / 1_000_000) * rate.cacheWrite5m +
+    (cacheWriteBreakdown.cacheWrite1hInputTokens / 1_000_000) * rate.cacheWrite1h +
+    (usage.outputTokens / 1_000_000) * rate.output;
+  const webSearchCostUsd = usage.webSearchRequests * 0.01;
 
-  return (
-    ((usage.inputTokens / 1_000_000) * rate.input +
-      (usage.cacheReadInputTokens / 1_000_000) * rate.cacheRead +
-      (cacheWriteBreakdown.cacheWrite5mInputTokens / 1_000_000) * rate.cacheWrite5m +
-      (cacheWriteBreakdown.cacheWrite1hInputTokens / 1_000_000) * rate.cacheWrite1h +
-      (usage.outputTokens / 1_000_000) * rate.output) *
-    inferenceMultiplier *
-    USD_TO_CREDITS
+  return (tokenCostUsd * speedMultiplier * inferenceMultiplier + webSearchCostUsd) * USD_TO_CREDITS;
+}
+
+function isClaudeFastPricedModel(modelId: string): boolean {
+  return ["claude-opus-5", "claude-opus-4-8"].some(
+    (candidate) => modelId === candidate || modelId.startsWith(`${candidate}-`)
   );
 }
 
@@ -434,6 +422,7 @@ function usageToTotals(modelId: string, usage: ClaudeUsage, timestampMs?: number
     cacheWriteBreakdown.cacheWrite5mInputTokens +
     cacheWriteBreakdown.cacheWrite1hInputTokens;
 
+  const rateKnown = Boolean(resolveRate(modelId, timestampMs)) || isInternalClaudeModel(modelId);
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
@@ -448,7 +437,8 @@ function usageToTotals(modelId: string, usage: ClaudeUsage, timestampMs?: number
       cacheWriteInputTokens +
       usage.outputTokens,
     estimatedCredits: creditsFor(modelId, usage, timestampMs),
-    eventCount: 1
+    eventCount: 1,
+    estimatedCreditsStatus: rateKnown ? "known" : "unavailable"
   };
 }
 
@@ -463,11 +453,8 @@ function resolveClaudeCacheWriteBreakdown(usage: ClaudeUsage): {
   cacheWrite5mInputTokens: number;
   cacheWrite1hInputTokens: number;
 } {
-  const cacheWriteKnownTokens = usage.cacheCreation5mInputTokens + usage.cacheCreation1hInputTokens;
-  const cacheWriteFallbackTokens = Math.max(0, usage.cacheCreationInputTokens - cacheWriteKnownTokens);
-
   return {
-    cacheWrite5mInputTokens: usage.cacheCreation5mInputTokens + cacheWriteFallbackTokens,
+    cacheWrite5mInputTokens: usage.cacheCreation5mInputTokens,
     cacheWrite1hInputTokens: usage.cacheCreation1hInputTokens
   };
 }
@@ -662,7 +649,7 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
 
     const message = asRecord(payloadObject.message);
     const usage = asRecord(message?.usage);
-    if (!usage) {
+    if (!usage || !isCurrentClaudeUsageEvent(payloadObject, message, usage)) {
       continue;
     }
 
@@ -695,6 +682,28 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
   };
 }
 
+function isCurrentClaudeUsageEvent(
+  payloadObject: Record<string, unknown>,
+  message: Record<string, unknown> | null,
+  usage: Record<string, unknown>
+): boolean {
+  return (
+    typeof payloadObject.version === "string" &&
+    payloadObject.version.length > 0 &&
+    typeof payloadObject.sessionId === "string" &&
+    payloadObject.sessionId.length > 0 &&
+    typeof payloadObject.requestId === "string" &&
+    payloadObject.requestId.length > 0 &&
+    typeof message?.id === "string" &&
+    message.id.length > 0 &&
+    typeof usage.service_tier === "string" &&
+    typeof usage.speed === "string" &&
+    typeof usage.inference_geo === "string" &&
+    asRecord(usage.cache_creation) !== null &&
+    asRecord(usage.server_tool_use) !== null
+  );
+}
+
 function buildUsageEventKeys(payloadObject: Record<string, unknown>, message: Record<string, unknown> | null): string[] {
   const sessionId = String(payloadObject.sessionId ?? "");
   const requestId = typeof payloadObject.requestId === "string" ? payloadObject.requestId : "";
@@ -715,23 +724,21 @@ function buildUsageSignatureFromParts(sessionId: string, modelId: string, usage:
     sessionId,
     modelId,
     usage.inputTokens,
-    usage.cacheCreationInputTokens,
     usage.cacheCreation5mInputTokens,
     usage.cacheCreation1hInputTokens,
     usage.cacheReadInputTokens,
     usage.outputTokens,
-    usage.inferenceGeo
+    usage.inferenceGeo,
+    usage.speed,
+    usage.webSearchRequests
   ].join("|");
 }
 
 function createParsedUsageEventAccumulator(): ParsedUsageEventAccumulator {
   return {
     keyedEvents: new Map<string, ParsedUsageEvent>(),
-    unkeyedEvents: [],
-    lastUnkeyedEventsBySignature: new Map<string, { event: ParsedUsageEvent; index: number }>(),
     duplicateUsageKeys: 0,
-    duplicateUsageKeyCollisions: 0,
-    duplicateUnkeyedEvents: 0
+    duplicateUsageKeyCollisions: 0
   };
 }
 
@@ -765,24 +772,6 @@ function recordParsedUsageEvent(parsedEvents: ParsedUsageEventAccumulator, event
     return;
   }
 
-  const previousRecord = parsedEvents.lastUnkeyedEventsBySignature.get(event.usageSignature);
-  if (!previousRecord || !canCollapseAdjacentUnkeyedUsageEvents(previousRecord.event, event)) {
-    parsedEvents.unkeyedEvents.push(event);
-    parsedEvents.lastUnkeyedEventsBySignature.set(event.usageSignature, {
-      event,
-      index: parsedEvents.unkeyedEvents.length - 1
-    });
-    return;
-  }
-
-  parsedEvents.duplicateUnkeyedEvents += 1;
-  if (normalizeTimestamp(event.timestampMs) > normalizeTimestamp(previousRecord.event.timestampMs)) {
-    parsedEvents.unkeyedEvents[previousRecord.index] = event;
-    parsedEvents.lastUnkeyedEventsBySignature.set(event.usageSignature, {
-      event,
-      index: previousRecord.index
-    });
-  }
 }
 
 function mergeParsedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEvent): ParsedUsageEvent {
@@ -840,10 +829,6 @@ function selectMergedEventModelId(primary: ParsedUsageEvent, other: ParsedUsageE
   }
 
   return primary.modelId;
-}
-
-function canCollapseAdjacentUnkeyedUsageEvents(previous: ParsedUsageEvent, next: ParsedUsageEvent): boolean {
-  return previous.filePath === next.filePath && next.lineNumber === previous.lineNumber + 1;
 }
 
 function extractUsageKeySessionId(usageKeys: string[]): string {
@@ -1467,6 +1452,23 @@ function parseLiveUsageWindowSnapshots(usageOutput: string | null, now: Date): L
     }
   }
 
+  // Claude omits reset timestamps while an entire bucket is displayed as 0%.
+  // Keep that authoritative zero instead of silently dropping the window. The
+  // provisional range starts at the sample time, so no earlier transcript
+  // events are falsely paired with the zero-percent measurement.
+  for (const label of ["session", "week"] as const) {
+    const sameLabelLines = parsedLines.filter((parsed) => parsed.label === label);
+    if (
+      !resetMsByLabel.has(label) &&
+      sameLabelLines.length > 0 &&
+      sameLabelLines.every((parsed) => parsed.usedPercent === 0)
+    ) {
+      const windowMinutes =
+        label === "session" ? CLAUDE_SESSION_WINDOW_MINUTES : CLAUDE_WEEK_WINDOW_MINUTES;
+      resetMsByLabel.set(label, now.getTime() + windowMinutes * 60_000);
+    }
+  }
+
   const snapshots = new Map<string, LiveUsageWindowSnapshot>();
   for (const parsed of parsedLines) {
     const resetsAtMs = resetMsByLabel.get(parsed.label) ?? null;
@@ -1598,6 +1600,10 @@ function buildLiveLimitWindowRow(
     lastSeenUtcIso: toUtcIso(Number.isFinite(lastSeenMs) ? lastSeenMs : fallbackLastSeenMs),
     minUsedPercent: snapshot.usedPercent,
     maxUsedPercent: snapshot.usedPercent,
+    measuredUsedPercent:
+      snapshot.usedPercent > 0 && totals.eventCount === 0
+        ? null
+        : snapshot.usedPercent,
     totals,
     modelUsage: buildModelUsageRowsForEvents(inWindowEvents),
     eventCount: totals.eventCount

@@ -44,6 +44,12 @@ export type LimitWindowRow = {
   lastSeenUtcIso: string;
   minUsedPercent: number;
   maxUsedPercent: number;
+  /**
+   * Percentage represented by `totals`/`modelUsage`, rather than the provider's
+   * cumulative percentage at the time it was sampled. `null` means that the
+   * local token data could not be paired with a percentage interval.
+   */
+  measuredUsedPercent?: number | null;
   totals: UsageTotals;
   modelUsage: ModelUsageRow[];
   eventCount: number;

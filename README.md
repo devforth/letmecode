@@ -1,8 +1,10 @@
 # LetMeCode
 
-Terminal AI real-money value usage dashboard for Codex, Claude, Copilot, and Antigravity.
+Terminal AI token-usage and API-equivalent value dashboard for Codex, Claude, Copilot, and Antigravity.
 
-See your real $ usage data, inspect limits, see daily activity, and model-level token totals in a terminal UI.
+Inspect provider limits, locally recorded token usage, daily activity, and model-level API-equivalent cost estimates in a terminal UI. Subscription quota percentages come from the providers; dollar values are estimates at public API rates, not subscription invoices.
+
+Only complete current-format usage events are counted. Incomplete legacy Codex and Claude events are silently ignored instead of being priced with guessed defaults.
 
 ## Quick start
 

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LimitWindowRow, ModelUsageRow, ProviderStats } from "./providers/index.js";
+import { resolveMeasuredUsedPercent } from "./providers/limits.js";
 
 const REPORTING_ENDPOINT = "https://devforth.io/admin/api/report_ussage_anonymous";
 const CREDIT_TO_DOLLARS = 0.01;
@@ -162,15 +163,14 @@ function buildUsageRaw(modelUsage: ModelUsageRow[]): UsageRawByModel {
 }
 
 function resolveReportedUsedPercents(window: LimitWindowRow): number {
-  if (window.minUsedPercent === window.maxUsedPercent) {
-    return clampPercent(window.maxUsedPercent);
-  }
-
-  return clampPercent(window.maxUsedPercent - window.minUsedPercent);
+  return clampPercent(resolveMeasuredUsedPercent(window) ?? 0);
 }
 
 function shouldReportUsageWindow(window: LimitWindowRow): boolean {
-  return resolveReportedUsedPercents(window) > SKIP_REPORT_USED_PERCENTS;
+  return (
+    window.totals.estimatedCreditsStatus !== "unavailable" &&
+    resolveReportedUsedPercents(window) > SKIP_REPORT_USED_PERCENTS
+  );
 }
 
 function clampPercent(value: number): number {

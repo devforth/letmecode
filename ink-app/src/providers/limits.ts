@@ -162,6 +162,7 @@ export function buildWindowLists(windows: LimitWindowAggregates): [LimitWindowRo
         lastSeenUtcIso: formatIsoFromMilliseconds(window.lastSeenMs),
         minUsedPercent: window.minUsedPercent,
         maxUsedPercent: window.maxUsedPercent,
+        measuredUsedPercent: usage.measuredUsedPercent,
         totals: usage.totals,
         modelUsage: usage.modelUsage,
         eventCount: 0
@@ -274,6 +275,10 @@ function collapseNearbyWindows(rows: LimitWindowRow[]): LimitWindowRow[] {
       existing.lastSeenUtcIso > row.lastSeenUtcIso ? existing.lastSeenUtcIso : row.lastSeenUtcIso;
     existing.minUsedPercent = Math.min(existing.minUsedPercent, row.minUsedPercent);
     existing.maxUsedPercent = Math.max(existing.maxUsedPercent, row.maxUsedPercent);
+    existing.measuredUsedPercent =
+      existing.minUsedPercent === existing.maxUsedPercent
+        ? 0
+        : clampUsedPercent(existing.maxUsedPercent - existing.minUsedPercent);
     addUsageTotals(existing.totals, row.totals);
     existing.modelUsage = mergeModelUsageRows(existing.modelUsage, row.modelUsage);
     existing.eventCount = existing.totals.eventCount;
@@ -289,19 +294,28 @@ function computeWindowUsage(
     usedPercent: number;
     totals: UsageTotals;
   }>
-): { totals: UsageTotals; modelUsage: ModelUsageRow[] } {
+): { totals: UsageTotals; modelUsage: ModelUsageRow[]; measuredUsedPercent: number } {
   // Session files are not guaranteed to be parsed in timestamp order, so
   // saturation has to be applied after we sort the captured window events.
   const totals = createEmptyUsageTotals();
   const byModel = new Map<string, UsageTotals>();
-  let sawBelowCap = false;
-  let isExhausted = false;
+  const sortedEvents = [...events].sort((left, right) => left.eventTimeMs - right.eventTimeMs);
+  const baselinePercent = clampUsedPercent(sortedEvents[0]?.usedPercent ?? 0);
+  // Each rate-limit snapshot is recorded after the usage event on the same
+  // line. The first event therefore has no matching "before" percentage, even
+  // when its post-event value rounds to zero. Keep its percentage only as the
+  // baseline and aggregate requests from the next snapshot onward.
+  const firstIncludedIndex = sortedEvents.length > 0 ? 1 : 0;
+  let highestIncludedPercent = baselinePercent;
+  let sawBelowCap = baselinePercent < 100;
+  let isExhausted = baselinePercent >= 100;
 
-  for (const event of [...events].sort((left, right) => left.eventTimeMs - right.eventTimeMs)) {
+  for (const [index, event] of sortedEvents.entries()) {
     sawBelowCap ||= event.usedPercent < 100;
-    if (!isExhausted) {
+    if (index >= firstIncludedIndex && !isExhausted) {
       addUsageTotals(totals, event.totals);
       addWindowModelUsage(byModel, event.modelId, event.totals);
+      highestIncludedPercent = Math.max(highestIncludedPercent, clampUsedPercent(event.usedPercent));
       if (sawBelowCap && event.usedPercent >= 100) {
         isExhausted = true;
       }
@@ -310,8 +324,33 @@ function computeWindowUsage(
 
   return {
     totals,
-    modelUsage: buildModelUsageRows(byModel)
+    modelUsage: buildModelUsageRows(byModel),
+    measuredUsedPercent: clampUsedPercent(highestIncludedPercent - baselinePercent)
   };
+}
+
+/**
+ * Return the provider percentage represented by a window's token totals.
+ * Older/injected rows without the explicit field retain the legacy derivation.
+ */
+export function resolveMeasuredUsedPercent(window: LimitWindowRow): number | null {
+  if (window.measuredUsedPercent === null) {
+    return null;
+  }
+  if (typeof window.measuredUsedPercent === "number" && Number.isFinite(window.measuredUsedPercent)) {
+    return clampUsedPercent(window.measuredUsedPercent);
+  }
+  if (window.minUsedPercent === window.maxUsedPercent) {
+    return clampUsedPercent(window.maxUsedPercent);
+  }
+  return clampUsedPercent(window.maxUsedPercent - window.minUsedPercent);
+}
+
+function clampUsedPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, value));
 }
 
 function upsertWindow(

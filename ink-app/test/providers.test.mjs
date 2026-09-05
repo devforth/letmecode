@@ -38,10 +38,22 @@ async function withTempRoot(run) {
   }
 }
 
-async function writeSession(root, relativePath, lines) {
+async function writeSession(root, relativePath, lines, serviceTier = "default") {
   const target = path.join(root, ".codex", "sessions", relativePath);
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, lines.join("\n"), "utf8");
+  const currentFormatLines = serviceTier
+    ? [codexThreadSettings(serviceTier), ...lines]
+    : lines;
+  await fs.writeFile(target, currentFormatLines.join("\n"), "utf8");
+}
+
+async function writeArchivedCodexSession(root, relativePath, lines, serviceTier = "default") {
+  const target = path.join(root, ".codex", "archived_sessions", relativePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const currentFormatLines = serviceTier
+    ? [codexThreadSettings(serviceTier), ...lines]
+    : lines;
+  await fs.writeFile(target, currentFormatLines.join("\n"), "utf8");
 }
 
 async function writeCodexModelsCache(root, models) {
@@ -120,7 +132,39 @@ function turnContext(model, cwd = "/tmp/project") {
   });
 }
 
+function turnContextWithId(model, turnId, cwd = "/tmp/project") {
+  return JSON.stringify({
+    timestamp: "2026-09-05T12:00:00.000Z",
+    type: "turn_context",
+    payload: {
+      model,
+      turn_id: turnId,
+      cwd
+    }
+  });
+}
+
 function tokenEvent({
+  timestamp,
+  total,
+  last,
+  planType = "team",
+  primary,
+  secondary
+}) {
+  const usage = last ?? total;
+  const usageRecord = JSON.stringify({
+    timestamp,
+    type: "token_usage_record",
+    payload: {
+      response_id: `response-${timestamp}`,
+      usage
+    }
+  });
+  return [usageRecord, tokenCountEvent({ timestamp, total, last, planType, primary, secondary })].join("\n");
+}
+
+function tokenCountEvent({
   timestamp,
   total,
   last,
@@ -143,6 +187,17 @@ function tokenEvent({
         primary,
         secondary
       }
+    }
+  });
+}
+
+function codexThreadSettings(serviceTier) {
+  return JSON.stringify({
+    timestamp: "2026-09-05T12:00:00.000Z",
+    type: "event_msg",
+    payload: {
+      type: "thread_settings_applied",
+      thread_settings: { service_tier: serviceTier }
     }
   });
 }
@@ -172,7 +227,11 @@ function claudeAssistantEvent({
   cacheCreation5mInputTokens = 0,
   cacheCreation1hInputTokens = 0,
   outputTokens,
-  inferenceGeo,
+  inferenceGeo = "global",
+  speed = "standard",
+  webSearchRequests = 0,
+  serviceTier = "standard",
+  version = "2.1.260",
   rateLimits
 }) {
   return JSON.stringify({
@@ -181,6 +240,7 @@ function claudeAssistantEvent({
     requestId,
     timestamp,
     entrypoint,
+    version,
     ...(rateLimits ? { rate_limits: rateLimits } : {}),
     message: {
       id: messageId,
@@ -191,7 +251,10 @@ function claudeAssistantEvent({
         cache_read_input_tokens: cacheReadInputTokens,
         cache_creation_input_tokens: cacheCreation5mInputTokens + cacheCreation1hInputTokens,
         output_tokens: outputTokens,
-        ...(inferenceGeo !== undefined ? { inference_geo: inferenceGeo } : {}),
+        inference_geo: inferenceGeo,
+        speed,
+        service_tier: serviceTier,
+        server_tool_use: { web_search_requests: webSearchRequests },
         cache_creation: {
           ephemeral_5m_input_tokens: cacheCreation5mInputTokens,
           ephemeral_1h_input_tokens: cacheCreation1hInputTokens
@@ -1768,10 +1831,13 @@ test("CodexUsageProvider returns valid ProviderStats", async () => {
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.primaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 80);
-    assert.equal(stats.primaryLimitWindows[0].totals.cacheReadInputTokens, 20);
-    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 10);
-    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
+    // A lone 1% post-request snapshot has no before-percent baseline. The
+    // all-time/day totals retain the tokens, while the paired window is empty.
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.cacheReadInputTokens, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 0);
     assert.equal(stats.dayUsage.length, 1);
     assert.equal(stats.dayUsage[0].dayKey, "2026-06-18");
     assert.equal(stats.dayUsage[0].totals.inputTokens, 80);
@@ -1840,7 +1906,7 @@ test("CodexUsageProvider groups usage into descending day buckets", async () => 
   });
 });
 
-test("parser handles cumulative fallback, multiple models, unknown model warnings, and window caps", async () => {
+test("parser handles canonical usage records, multiple models, unknown model warnings, and window caps", async () => {
   await withTempRoot(async (root) => {
     const lines = [turnContext("gpt-5.5")];
 
@@ -1868,6 +1934,13 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
           output_tokens: 35,
           reasoning_output_tokens: 5,
           total_tokens: 215
+        },
+        last: {
+          input_tokens: 80,
+          cached_input_tokens: 20,
+          output_tokens: 15,
+          reasoning_output_tokens: 2,
+          total_tokens: 95
         },
         primary: { used_percent: 11, window_minutes: 300, resets_at: 1780589753 },
         secondary: { used_percent: 2, window_minutes: 10080, resets_at: 1781176553 }
@@ -1928,7 +2001,8 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
 
     const stats = await new CodexUsageProvider({ root }).getStats();
     assert.equal(stats.summary.filesScanned, 1);
-    assert.equal(stats.summary.linesRead, lines.length);
+    const expectedLineCount = [codexThreadSettings("default"), ...lines].join("\n").split("\n").length;
+    assert.equal(stats.summary.linesRead, expectedLineCount);
     assert.equal(stats.summary.tokenEvents, 9);
     assert.equal(stats.summary.totals.eventCount, 9);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 100);
@@ -1946,7 +2020,8 @@ test("parser handles cumulative fallback, multiple models, unknown model warning
     assert.equal(stats.secondaryLimitWindows[0].endTimeUtcIso.endsWith("Z"), true);
     assert.equal(stats.primaryLimitWindows[0].eventCount, stats.primaryLimitWindows[0].totals.eventCount);
     assert.equal(stats.secondaryLimitWindows[0].eventCount, stats.secondaryLimitWindows[0].totals.eventCount);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens > 0, true);
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 0);
     assert.equal(stats.warnings.some((warning) => warning.includes("malformed")), true);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-9")), true);
     assert.equal(stats.modelUsage.find((row) => row.modelId === "gpt-9")?.totals.estimatedCreditsStatus, "unavailable");
@@ -2019,11 +2094,12 @@ test("CodexUsageProvider coalesces monthly reset jitter into logical cycles", as
     assert.equal(jitteredWindow.windowMinutes, 43800);
     assert.equal(jitteredWindow.minUsedPercent, 0);
     assert.equal(jitteredWindow.maxUsedPercent, 2);
-    assert.equal(jitteredWindow.eventCount, 3);
-    assert.equal(jitteredWindow.totals.inputTokens, 270);
-    assert.equal(jitteredWindow.totals.cacheReadInputTokens, 90);
-    assert.equal(jitteredWindow.totals.outputTokens, 45);
-    assert.equal(jitteredWindow.totals.totalTokens, 405);
+    assert.equal(jitteredWindow.measuredUsedPercent, 2);
+    assert.equal(jitteredWindow.eventCount, 2);
+    assert.equal(jitteredWindow.totals.inputTokens, 190);
+    assert.equal(jitteredWindow.totals.cacheReadInputTokens, 70);
+    assert.equal(jitteredWindow.totals.outputTokens, 35);
+    assert.equal(jitteredWindow.totals.totalTokens, 295);
   });
 });
 
@@ -2071,17 +2147,252 @@ test("CodexUsageProvider prices the GPT-5.6 family, alias, snapshots, and long c
     const stats = await new CodexUsageProvider({ root }).getStats();
     const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
-    assert.ok(Math.abs((byModel.get("gpt-5.6-sol")?.estimatedCredits ?? 0) - 75.5) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-5.6-terra")?.estimatedCredits ?? 0) - 37.75) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-5.6-luna")?.estimatedCredits ?? 0) - 15.1) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-5.6")?.estimatedCredits ?? 0) - 75.5) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 660) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol")?.estimatedCredits ?? 0) - 56.4) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-terra")?.estimatedCredits ?? 0) - 30.2) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-luna")?.estimatedCredits ?? 0) - 3.02) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6")?.estimatedCredits ?? 0) - 56.4) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 468) < 1e-9);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-5.6")), false);
     assert.notEqual(stats.summary.totals.estimatedCreditsStatus, "unavailable");
   });
 });
 
-test("CodexUsageProvider suppresses missing-rate warnings for hidden internal Codex models", async () => {
+test("CodexUsageProvider prices GPT-6 Astra cache writes, snapshots, and long context", async () => {
+  await withTempRoot(async (root) => {
+    const standardUsage = {
+      input_tokens: 100_000,
+      cached_input_tokens: 20_000,
+      cache_write_input_tokens: 10_000,
+      output_tokens: 5_000,
+      total_tokens: 105_000
+    };
+    const longUsage = {
+      input_tokens: 300_000,
+      cached_input_tokens: 100_000,
+      cache_write_input_tokens: 0,
+      output_tokens: 100_000,
+      total_tokens: 400_000
+    };
+
+    await writeSession(root, "2026/09/05/gpt-6-astra.jsonl", [
+      turnContext("gpt-6-astra"),
+      tokenEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        total: standardUsage,
+        last: standardUsage
+      }),
+      turnContext("gpt-6-astra-2026-09-04"),
+      tokenEvent({
+        timestamp: "2026-09-05T12:01:01.000Z",
+        total: longUsage,
+        last: longUsage
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+    const standardTotals = byModel.get("gpt-6-astra");
+
+    assert.equal(standardTotals?.inputTokens, 70_000);
+    assert.equal(standardTotals?.cacheReadInputTokens, 20_000);
+    assert.equal(standardTotals?.cacheWriteInputTokens, 10_000);
+    assert.equal(standardTotals?.cacheWrite5mInputTokens, 10_000);
+    assert.equal(standardTotals?.totalTokens, 105_000);
+    assert.ok(Math.abs((standardTotals?.estimatedCredits ?? 0) - 109.5) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-6-astra-2026-09-04")?.estimatedCredits ?? 0) - 1170) < 1e-9);
+    assert.equal(stats.warnings.some((warning) => warning.includes("gpt-6-astra")), false);
+  });
+});
+
+test("CodexUsageProvider applies recorded processing tiers and web-search call cost", async () => {
+  await withTempRoot(async (root) => {
+    const usage = {
+      input_tokens: 100_000,
+      cached_input_tokens: 10_000,
+      output_tokens: 10_000,
+      total_tokens: 110_000
+    };
+
+    await writeSession(root, "2026/09/05/processing-tiers.jsonl", [
+      turnContext("gpt-5.6-sol"),
+      codexThreadSettings("priority"),
+      tokenEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        total: usage,
+        last: usage
+      }),
+      turnContext("gpt-5.6-terra"),
+      codexThreadSettings("default"),
+      JSON.stringify({
+        timestamp: "2026-09-05T12:00:02.000Z",
+        type: "event_msg",
+        payload: { type: "web_search_end", call_id: "search-1", action: { type: "search" } }
+      }),
+      tokenEvent({
+        timestamp: "2026-09-05T12:00:03.000Z",
+        total: usage,
+        last: usage
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+
+    // Sol Standard is 56.4 credits for this request; priority/Fast is 2x.
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol")?.estimatedCredits ?? 0) - 112.8) < 1e-9);
+    // Terra Standard is 30.2 credits plus one $0.01 web-search call (= 1 credit).
+    assert.ok(Math.abs((byModel.get("gpt-5.6-terra")?.estimatedCredits ?? 0) - 31.2) < 1e-9);
+    assert.equal(stats.warnings.some((warning) => warning.includes("processing tier")), false);
+  });
+});
+
+test("CodexUsageProvider consumes canonical usage records without double-counting token_count mirrors", async () => {
+  await withTempRoot(async (root) => {
+    const recoveredUsage = {
+      input_tokens: 100_000,
+      cached_input_tokens: 20_000,
+      cache_write_input_tokens: 10_000,
+      output_tokens: 5_000,
+      total_tokens: 105_000
+    };
+    const mirroredUsage = {
+      input_tokens: 10_000,
+      cached_input_tokens: 1_000,
+      cache_write_input_tokens: 0,
+      output_tokens: 1_000,
+      total_tokens: 11_000
+    };
+
+    await writeSession(root, "2026/09/05/canonical-usage.jsonl", [
+      turnContext("gpt-6-astra"),
+      JSON.stringify({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        type: "token_usage_record",
+        payload: { response_id: "resp-recovered", usage: recoveredUsage }
+      }),
+      tokenCountEvent({
+        timestamp: "2026-09-05T12:00:01.100Z",
+        total: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 15_000 },
+        last: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 15_000 },
+        primary: { used_percent: 1, window_minutes: 300, resets_at: 1_788_633_001 }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-05T12:01:01.000Z",
+        type: "token_usage_record",
+        payload: { response_id: "resp-mirrored", usage: mirroredUsage }
+      }),
+      tokenCountEvent({
+        timestamp: "2026-09-05T12:01:01.100Z",
+        total: mirroredUsage,
+        last: mirroredUsage,
+        primary: { used_percent: 2, window_minutes: 300, resets_at: 1_788_633_001 }
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.tokenEvents, 2);
+    assert.equal(stats.summary.totals.inputTokens, 79_000);
+    assert.equal(stats.summary.totals.cacheReadInputTokens, 21_000);
+    assert.equal(stats.summary.totals.cacheWriteInputTokens, 10_000);
+    assert.equal(stats.summary.totals.outputTokens, 6_000);
+    assert.equal(stats.summary.totals.totalTokens, 116_000);
+    assert.equal(stats.primaryLimitWindows[0]?.measuredUsedPercent, 1);
+    assert.equal(stats.primaryLimitWindows[0]?.totals.eventCount, 1);
+    assert.equal(stats.primaryLimitWindows[0]?.totals.inputTokens, 9_000);
+    assert.equal(stats.primaryLimitWindows[0]?.totals.cacheReadInputTokens, 1_000);
+    assert.equal(stats.primaryLimitWindows[0]?.totals.outputTokens, 1_000);
+  });
+});
+
+test("CodexUsageProvider silently ignores legacy token-only and tier-less usage events", async () => {
+  await withTempRoot(async (root) => {
+    const usage = {
+      input_tokens: 100_000,
+      cached_input_tokens: 20_000,
+      output_tokens: 5_000,
+      total_tokens: 105_000
+    };
+
+    await writeSession(root, "2026/09/05/token-count-only.jsonl", [
+      turnContext("gpt-5.6-sol"),
+      tokenCountEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        total: usage,
+        last: usage,
+        primary: { used_percent: 1, window_minutes: 300, resets_at: 1_788_633_001 }
+      })
+    ]);
+    await writeSession(root, "2026/09/05/tier-less.jsonl", [
+      turnContext("gpt-5.6-sol"),
+      tokenEvent({
+        timestamp: "2026-09-05T12:01:01.000Z",
+        total: usage,
+        last: usage,
+        primary: { used_percent: 2, window_minutes: 300, resets_at: 1_788_633_001 }
+      })
+    ], null);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.filesScanned, 2);
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(stats.summary.totals.totalTokens, 0);
+    assert.deepEqual(stats.modelUsage, []);
+    assert.deepEqual(stats.primaryLimitWindows, []);
+    assert.equal(stats.warnings.some((warning) => warning.includes("processing tier")), false);
+  });
+});
+
+test("CodexUsageProvider reads archived rollouts and skips inherited fork history", async () => {
+  await withTempRoot(async (root) => {
+    const inheritedUsage = { input_tokens: 50_000, cached_input_tokens: 10_000, output_tokens: 5_000, total_tokens: 55_000 };
+    const ownUsage = { input_tokens: 20_000, cached_input_tokens: 5_000, output_tokens: 2_000, total_tokens: 22_000 };
+    const archivedUsage = { input_tokens: 30_000, cached_input_tokens: 0, output_tokens: 3_000, total_tokens: 33_000 };
+
+    await writeSession(root, "2026/09/05/rollout-child.jsonl", [
+      JSON.stringify({
+        timestamp: "2026-09-05T12:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: "01a04345-ec97-7000-8000-000000000001",
+          forked_from_id: "01a04340-0000-7000-8000-000000000001"
+        }
+      }),
+      codexThreadSettings("priority"),
+      turnContextWithId("gpt-5.6-sol", "01a04345-c005-7000-8000-000000000001"),
+      tokenEvent({
+        timestamp: "2026-09-05T11:59:01.000Z",
+        total: inheritedUsage,
+        last: inheritedUsage
+      }),
+      turnContextWithId("gpt-6-astra", "01a04345-ed06-7000-8000-000000000001"),
+      tokenEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        total: ownUsage,
+        last: ownUsage
+      })
+    ]);
+    await writeArchivedCodexSession(root, "rollout-archived.jsonl", [
+      turnContext("gpt-6-astra"),
+      tokenEvent({
+        timestamp: "2026-09-04T12:00:01.000Z",
+        total: archivedUsage,
+        last: archivedUsage
+      })
+    ]);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.filesScanned, 2);
+    assert.equal(stats.summary.tokenEvents, 2);
+    assert.equal(stats.summary.totals.inputTokens, 45_000);
+    assert.equal(stats.summary.totals.cacheReadInputTokens, 5_000);
+    assert.equal(stats.summary.totals.outputTokens, 5_000);
+    assert.deepEqual(stats.summary.distinctModels, ["gpt-6-astra"]);
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 96) < 1e-9);
+    assert.equal(stats.summary.rootPath, path.join(root, ".codex"));
+  });
+});
+
+test("CodexUsageProvider prices hidden auto-review usage as GPT-5.4", async () => {
   await withTempRoot(async (root) => {
     await writeCodexModelsCache(root, [
       { slug: "codex-auto-review", visibility: "hide" }
@@ -2112,7 +2423,7 @@ test("CodexUsageProvider suppresses missing-rate warnings for hidden internal Co
     const stats = await new CodexUsageProvider({ root }).getStats();
     const autoReviewTotals = stats.modelUsage.find((row) => row.modelId === "codex-auto-review")?.totals;
 
-    assert.equal(autoReviewTotals?.estimatedCredits, 0);
+    assert.ok(Math.abs((autoReviewTotals?.estimatedCredits ?? 0) - 0.0355) < 1e-12);
     assert.notEqual(autoReviewTotals?.estimatedCreditsStatus, "unavailable");
     assert.notEqual(stats.summary.totals.estimatedCreditsStatus, "unavailable");
     assert.equal(stats.warnings.some((warning) => warning.includes("codex-auto-review")), false);
@@ -2184,10 +2495,11 @@ test("limit window totals stop accumulating after a seen window first reaches 10
     assert.equal(stats.primaryLimitWindows.length, 1);
     assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 99);
     assert.equal(stats.primaryLimitWindows[0].maxUsedPercent, 100);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 180);
-    assert.equal(stats.primaryLimitWindows[0].totals.cacheReadInputTokens, 40);
-    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 25);
-    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 2);
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
+    assert.equal(stats.primaryLimitWindows[0].totals.cacheReadInputTokens, 20);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 15);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
     assert.equal(stats.summary.totals.inputTokens, 290);
     assert.equal(stats.summary.totals.cacheReadInputTokens, 70);
     assert.equal(stats.summary.totals.outputTokens, 40);
@@ -2257,10 +2569,11 @@ test("limit window saturation is based on event timestamps, not parse order", as
 
     const stats = await new CodexUsageProvider({ root }).getStats();
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 180);
-    assert.equal(stats.primaryLimitWindows[0].totals.cacheReadInputTokens, 40);
-    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 25);
-    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 2);
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 1);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
+    assert.equal(stats.primaryLimitWindows[0].totals.cacheReadInputTokens, 20);
+    assert.equal(stats.primaryLimitWindows[0].totals.outputTokens, 15);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
   });
 });
 
@@ -2391,14 +2704,97 @@ test("ClaudeUsageProvider dedupes repeated assistant transcript entries and pars
       ["claude-opus-4-8", "claude-sonnet-4-6"]
     );
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.eventCount, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 0);
     assert.equal(stats.summary.distinctPlanTypes.includes("max"), true);
     assert.deepEqual(stats.secondaryLimitWindows, []);
     assert.equal(stats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), false);
 
     const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
     assert.equal(verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")), true);
+  });
+});
+
+test("ClaudeUsageProvider prices Fable 5.1 and permanent Sonnet 5 rates", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/current-pricing.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        requestId: "req-fable-5-1",
+        messageId: "msg-fable-5-1",
+        model: "claude-fable-5-1",
+        inputTokens: 100_000,
+        cacheReadInputTokens: 40_000,
+        cacheCreation5mInputTokens: 10_000,
+        cacheCreation1hInputTokens: 5_000,
+        outputTokens: 10_000
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-09-05T12:01:01.000Z",
+        requestId: "req-sonnet-5",
+        messageId: "msg-sonnet-5",
+        model: "claude-sonnet-5",
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () => null,
+      readAuthStatusOutput: async () => null,
+      readOauthCredentials: async () => null
+    }).getStats();
+    const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
+    const fableTotals = byModel.get("claude-fable-5-1");
+
+    assert.equal(fableTotals?.cacheReadInputTokens, 40_000);
+    assert.equal(fableTotals?.cacheWrite5mInputTokens, 10_000);
+    assert.equal(fableTotals?.cacheWrite1hInputTokens, 5_000);
+    assert.ok(Math.abs((fableTotals?.estimatedCredits ?? 0) - 173.5) < 1e-9);
+    assert.ok(Math.abs((byModel.get("claude-sonnet-5")?.estimatedCredits ?? 0) - 1200) < 1e-9);
+    assert.equal(stats.warnings.some((warning) => warning.includes("claude-fable-5-1")), false);
+  });
+});
+
+test("ClaudeUsageProvider prices fast mode and metered web searches", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/fast-and-tools.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        requestId: "req-fast",
+        messageId: "msg-fast",
+        model: "claude-opus-5",
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        speed: "fast",
+        webSearchRequests: 2
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    // ($5 input + $25 output) * 2 fast + 2 * $0.01 search = $60.02.
+    assert.ok(Math.abs(stats.summary.totals.estimatedCredits - 6_002) < 1e-9);
+  });
+});
+
+test("ClaudeUsageProvider marks unknown model cost unavailable", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/unknown-price.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-09-05T12:00:01.000Z",
+        requestId: "req-unknown",
+        messageId: "msg-unknown",
+        model: "claude-future-9",
+        inputTokens: 100,
+        outputTokens: 10
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({ root }).getStats();
+    assert.equal(stats.summary.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(stats.warnings.some((warning) => warning.includes("claude-future-9")), true);
   });
 });
 
@@ -2473,7 +2869,8 @@ test("ClaudeUsageProvider keeps the most complete keyed usage snapshot instead o
     assert.equal(stats.summary.totals.cacheReadInputTokens, 50);
     assert.equal(stats.summary.totals.outputTokens, 10);
     assert.equal(stats.primaryLimitWindows.length, 1);
-    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 100);
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 0);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 0);
     assert.equal(
       stats.warnings.some((warning) => warning.includes("kept the most complete same-key snapshot")),
       false
@@ -2522,42 +2919,6 @@ test("ClaudeUsageProvider does not fabricate cache-write tokens when same-key sn
     );
     assert.equal(stats.summary.totals.inputTokens, 100);
     assert.equal(stats.summary.totals.outputTokens, 10);
-  });
-});
-
-test("ClaudeUsageProvider dedupes keyed usage rows even when duplicate copies expose different ID subsets", async () => {
-  await withTempRoot(async (root) => {
-    await writeClaudeSession(root, "sample-project/mixed-key-aliases.jsonl", [
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:01.000Z",
-        requestId: "req-mixed-ids",
-        messageId: "msg-mixed-ids",
-        model: "claude-sonnet-4-6",
-        inputTokens: 100,
-        cacheReadInputTokens: 50,
-        outputTokens: 10
-      }),
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:02.000Z",
-        messageId: "msg-mixed-ids",
-        model: "claude-sonnet-4-6",
-        inputTokens: 100,
-        cacheReadInputTokens: 50,
-        outputTokens: 10
-      })
-    ]);
-
-    const stats = await new ClaudeUsageProvider({ root }).getStats();
-    assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 100);
-    assert.equal(stats.summary.totals.cacheReadInputTokens, 50);
-    assert.equal(stats.summary.totals.outputTokens, 10);
-
-    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
-    assert.equal(
-      verboseStats.warnings.some((warning) => warning.includes("Collapsed 1 duplicate Claude usage event")),
-      true
-    );
   });
 });
 
@@ -2999,6 +3360,40 @@ test("ClaudeUsageProvider captures the Sonnet-only weekly window when its reset 
     // The Sonnet-only week inherits the weekly reset printed on the all-models week.
     assert.equal(sonnetOnlyWeek.endTimeUtcIso, allModelsWeek.endTimeUtcIso);
     assert.equal(sonnetOnlyWeek.totals.inputTokens, 40);
+  });
+});
+
+test("ClaudeUsageProvider keeps zero-percent live windows when Claude omits all reset times", async () => {
+  await withTempRoot(async (root) => {
+    const nowIso = "2026-09-05T12:00:00.000Z";
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 0% used",
+          "Current week (all models): 0% used",
+          "Current week (Fable): 0% used"
+        ].join("\n"),
+      readOauthCredentials: async () =>
+        JSON.stringify({
+          claudeAiOauth: {
+            subscriptionType: "team",
+            rateLimitTier: "default_claude_max_5x"
+          }
+        }),
+      now: () => new Date(nowIso)
+    }).getStats();
+
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].minUsedPercent, 0);
+    assert.equal(stats.primaryLimitWindows[0].measuredUsedPercent, 0);
+    assert.equal(stats.primaryLimitWindows[0].startTimeUtcIso, nowIso.replace(".000Z", "Z"));
+    assert.equal(stats.secondaryLimitWindows.length, 2);
+    assert.deepEqual(
+      stats.secondaryLimitWindows.map((row) => row.limitId).sort(),
+      ["current-week", "current-week-fable-only"]
+    );
+    assert.equal(stats.secondaryLimitWindows.every((row) => row.measuredUsedPercent === 0), true);
   });
 });
 
@@ -3490,85 +3885,28 @@ test("ClaudeUsageProvider aggregates generic cli Linux sessions regardless of ID
   });
 });
 
-test("ClaudeUsageProvider dedupes identical unkeyed usage rows by signature", async () => {
+test("ClaudeUsageProvider silently ignores legacy incomplete usage events", async () => {
   await withTempRoot(async (root) => {
-    await writeClaudeSession(root, "sample-project/unkeyed-duplicates.jsonl", [
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:01.000Z",
-        model: "claude-opus-4-8",
-        inputTokens: 40,
-        cacheReadInputTokens: 30,
-        cacheCreation1hInputTokens: 10,
-        outputTokens: 5
-      }),
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:03.000Z",
-        model: "claude-opus-4-8",
-        inputTokens: 40,
-        cacheReadInputTokens: 30,
-        cacheCreation1hInputTokens: 10,
-        outputTokens: 5
-      })
+    const legacyEvent = JSON.parse(claudeAssistantEvent({
+      timestamp: "2026-06-18T20:00:01.000Z",
+      requestId: "req-legacy",
+      messageId: "msg-legacy",
+      model: "claude-opus-5",
+      inputTokens: 40,
+      outputTokens: 5
+    }));
+    delete legacyEvent.version;
+    delete legacyEvent.message.usage.speed;
+
+    await writeClaudeSession(root, "sample-project/legacy.jsonl", [
+      JSON.stringify(legacyEvent)
     ]);
 
     const stats = await new ClaudeUsageProvider({ root }).getStats();
-    assert.equal(stats.summary.tokenEvents, 1);
-    assert.equal(stats.summary.totals.inputTokens, 40);
-    assert.equal(stats.summary.totals.cacheWrite5mInputTokens, 0);
-    assert.equal(stats.summary.totals.cacheWrite1hInputTokens, 10);
-    assert.equal(stats.summary.totals.cacheReadInputTokens, 30);
-    assert.equal(stats.summary.totals.outputTokens, 5);
-    assert.equal(
-      stats.warnings.some((warning) => warning.includes("adjacent duplicate unkeyed Claude usage event")),
-      false
-    );
-
-    const verboseStats = await new ClaudeUsageProvider({ root }).getStats({ verbose: true });
-    assert.equal(
-      verboseStats.warnings.some((warning) => warning.includes("adjacent duplicate unkeyed Claude usage event")),
-      true
-    );
-  });
-});
-
-test("ClaudeUsageProvider keeps non-adjacent unkeyed usage rows with identical signatures as separate events", async () => {
-  await withTempRoot(async (root) => {
-    await writeClaudeSession(root, "sample-project/unkeyed-separated.jsonl", [
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:01.000Z",
-        model: "claude-opus-4-8",
-        inputTokens: 40,
-        cacheReadInputTokens: 30,
-        cacheCreation1hInputTokens: 10,
-        outputTokens: 5
-      }),
-      JSON.stringify({
-        type: "user",
-        sessionId: "claude-session-1",
-        timestamp: "2026-06-18T20:00:02.000Z",
-        message: { role: "user", content: "run again" }
-      }),
-      claudeAssistantEvent({
-        timestamp: "2026-06-18T20:00:03.000Z",
-        model: "claude-opus-4-8",
-        inputTokens: 40,
-        cacheReadInputTokens: 30,
-        cacheCreation1hInputTokens: 10,
-        outputTokens: 5
-      })
-    ]);
-
-    const stats = await new ClaudeUsageProvider({ root }).getStats();
-    assert.equal(stats.summary.tokenEvents, 2);
-    assert.equal(stats.summary.totals.inputTokens, 80);
-    assert.equal(stats.summary.totals.cacheWrite5mInputTokens, 0);
-    assert.equal(stats.summary.totals.cacheWrite1hInputTokens, 20);
-    assert.equal(stats.summary.totals.cacheReadInputTokens, 60);
-    assert.equal(stats.summary.totals.outputTokens, 10);
-    assert.equal(
-      stats.warnings.some((warning) => warning.includes("adjacent duplicate unkeyed Claude usage event")),
-      false
-    );
+    assert.equal(stats.summary.tokenEvents, 0);
+    assert.equal(stats.summary.totals.totalTokens, 0);
+    assert.deepEqual(stats.modelUsage, []);
+    assert.equal(stats.warnings.some((warning) => warning.includes("legacy")), false);
   });
 });
 
@@ -3958,6 +4296,9 @@ test("buildAnonymousUsagePayload skips windows at or below three percent usage",
     ],
     eventCount: 1
   });
+  const unavailableWindow = window("unavailable-cost-window", 0, 10);
+  unavailableWindow.measuredUsedPercent = 10;
+  unavailableWindow.totals.estimatedCreditsStatus = "unavailable";
 
   const payload = await buildAnonymousUsagePayload([
     {
@@ -3979,6 +4320,7 @@ test("buildAnonymousUsagePayload skips windows at or below three percent usage",
         window("zero-usage", 0, 0),
         window("tiny-live-window", 99.5, 100),
         window("at-threshold-window", 97, 100),
+        unavailableWindow,
         window("reportable-window", 96, 100)
       ],
       secondaryLimitWindows: [],

@@ -13,7 +13,12 @@ import {
   type UsageTotals
 } from "./providers/index.js";
 import { reportAnonymousUsage } from "./reporting.js";
-import { estimateLimitFullValue, selectLatestActiveLimitWindows, type LimitFullValueEstimate } from "./providers/limits.js";
+import {
+  estimateLimitFullValue,
+  resolveMeasuredUsedPercent,
+  selectLatestActiveLimitWindows,
+  type LimitFullValueEstimate
+} from "./providers/limits.js";
 
 type DetailViewId = "limit-windows" | "summary" | "day-to-day-analyses" | "usage-by-model";
 type ControlSectionId = "provider" | "view" | "table";
@@ -621,7 +626,7 @@ function SummaryPanel(props: { stats: ProviderStats }): React.JSX.Element {
             return <DetailRow label={label} value={value} padLength={Math.max(14, label.length + 1)} noSlice />
           })()}
           <DetailRow label="Avg/event" value={`${formatOverviewTokenCount(averageTokensPerEvent)} tokens`} />
-          <DetailRow label="Cost/event" value={formatUnitUsd(costPerEvent)} />
+          <DetailRow label="API eq/event" value={formatUnitUsd(costPerEvent)} />
           <Text> </Text>
           <Text color="cyan">Data source</Text>
           <DetailRow label="Files" value={formatInteger(summary.filesScanned)} />
@@ -971,7 +976,7 @@ function buildLimitWindowTableRow(window: LimitWindowRow, isActive: boolean): Te
       formatUsageUsd(window.totals),
       // Extrapolated full value of the limit, rounded to a single figure here;
       // the details panel shows the unrounded ±1% range.
-      formatLimitFullValueCompact(window.totals, window.maxUsedPercent)
+      formatLimitFullValueCompact(window.totals, resolveMeasuredUsedPercent(window))
     ]
   };
 }
@@ -1040,6 +1045,7 @@ function SelectionDetailsPanel(props: {
             <DetailRow label="Models" value={formatLimitWindowModels(row)} />
             <DetailRow label="Window" value={formatCompactWindowMinutes(row.windowMinutes)} />
             <DetailRow label="Usage" value={formatUsedPercentRange(row.minUsedPercent, row.maxUsedPercent)} />
+            <DetailRow label="Measured" value={formatMeasuredUsedPercent(row)} />
             <DetailRow label="Events" value={formatInteger(row.eventCount)} />
           </Box>
           <Box flexDirection="column">
@@ -1057,8 +1063,8 @@ function SelectionDetailsPanel(props: {
         <DetailRow label="API eq." value={formatUsageUsd(row.totals)} note="API equivalent cost" />
         <DetailRow
           label="Full value"
-          value={formatLimitFullValueRange(row.totals, row.maxUsedPercent)}
-          note="API equivalent cost if 100% will be used"
+          value={formatLimitFullValueRange(row.totals, resolveMeasuredUsedPercent(row))}
+          note="API equivalent cost extrapolated from the paired token/usage interval"
         />
       </DetailsPanelFrame>
     );
@@ -1200,7 +1206,7 @@ function formatUsageUsd(totals: UsageTotals, modelId?: string): string {
 }
 
 function isInternalUsageModel(modelId?: string): boolean {
-  return modelId === "codex-auto-review" || modelId === "<synthetic>";
+  return modelId === "<synthetic>";
 }
 
 function formatUsd(value: number): string {
@@ -1224,11 +1230,10 @@ function formatUsdWhole(value: number): string {
 }
 
 // Extrapolate the limit's full USD value from the observed API-equivalent cost
-// and how much of the limit it represents. Uses the highest reported percent
-// (the latest cumulative usage) and returns "-" when the cost is unknown or the
-// percent is missing.
-function limitFullValueUsd(totals: UsageTotals, usedPercent: number): LimitFullValueEstimate | null {
-  if (totals.estimatedCreditsStatus === "unavailable") {
+// and how much of the limit it represents. The percentage must cover the same
+// paired interval as the token totals; returns "-" when either value is unknown.
+function limitFullValueUsd(totals: UsageTotals, usedPercent: number | null): LimitFullValueEstimate | null {
+  if (totals.estimatedCreditsStatus === "unavailable" || usedPercent === null) {
     return null;
   }
 
@@ -1236,12 +1241,12 @@ function limitFullValueUsd(totals: UsageTotals, usedPercent: number): LimitFullV
   return estimateLimitFullValue(usedUsd, usedPercent);
 }
 
-function formatLimitFullValueCompact(totals: UsageTotals, usedPercent: number): string {
+function formatLimitFullValueCompact(totals: UsageTotals, usedPercent: number | null): string {
   const estimate = limitFullValueUsd(totals, usedPercent);
   return estimate ? formatUsdWhole(estimate.point) : "-";
 }
 
-function formatLimitFullValueRange(totals: UsageTotals, usedPercent: number): string {
+function formatLimitFullValueRange(totals: UsageTotals, usedPercent: number | null): string {
   const estimate = limitFullValueUsd(totals, usedPercent);
   if (!estimate) {
     return "-";
@@ -1324,6 +1329,11 @@ function formatUsedPercentRange(minUsedPercent: number, maxUsedPercent: number):
   return minUsedPercent === maxUsedPercent
     ? fmt(minUsedPercent)
     : `${fmt(minUsedPercent)}–${fmt(maxUsedPercent)}`;
+}
+
+function formatMeasuredUsedPercent(window: LimitWindowRow): string {
+  const measuredUsedPercent = resolveMeasuredUsedPercent(window);
+  return measuredUsedPercent === null ? "-" : formatPercent(measuredUsedPercent);
 }
 
 function formatCompactWindowMinutes(value: number): string {
