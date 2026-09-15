@@ -513,7 +513,8 @@ test("Copilot pricing is loaded from the public model-pricing API", async () => 
       inputCacheRead: 1,
       inputCacheWrite5m: 12.5,
       inputCacheWrite1h: 20,
-      output: 50
+      output: 50,
+      longContext: null
     }
   );
   assert.equal(modelPricingSlug("gpt-6-astra-2026-09-04"), "gpt-6-astra");
@@ -525,8 +526,27 @@ test("Copilot pricing is loaded from the public model-pricing API", async () => 
       cacheWrite5mInputTokens: 0,
       cacheWrite1hInputTokens: 0
     }),
-    1000
+    2000
   );
+  assert.equal(
+    modelCostCredits(pricing.get("gpt-6-astra"), {
+      inputTokens: 272_000,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWrite5mInputTokens: 0,
+      cacheWrite1hInputTokens: 0
+    }),
+    272
+  );
+  assert.ok(Math.abs(
+    modelCostCredits(pricing.get("gpt-6-astra"), {
+      inputTokens: 100_000,
+      outputTokens: 10_000,
+      cacheReadInputTokens: 100_000,
+      cacheWrite5mInputTokens: 72_001,
+      cacheWrite1hInputTokens: 0
+    }) - 475.0025
+  ) < 1e-9);
   assert.equal(
     modelCostCredits(
       {
@@ -534,7 +554,8 @@ test("Copilot pricing is loaded from the public model-pricing API", async () => 
         output: 1,
         inputCacheRead: 1,
         inputCacheWrite5m: null,
-        inputCacheWrite1h: null
+        inputCacheWrite1h: null,
+        longContext: null
       },
       {
         inputTokens: 0,

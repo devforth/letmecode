@@ -1395,7 +1395,7 @@ test("CopilotUsageProvider uses API rates for large GPT-5.4 and GPT-5.5 chat cal
 
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCredits, 0);
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCreditsStatus, "unavailable");
-    assert.ok(Math.abs((byModel.get("gpt-5.5-2026-06-01")?.estimatedCredits ?? 0) - 106.60005) < 0.0000001);
+    assert.ok(Math.abs((byModel.get("gpt-5.5-2026-06-01")?.estimatedCredits ?? 0) - 211.7001) < 0.0000001);
   });
 });
 
@@ -2165,7 +2165,7 @@ test("CodexUsageProvider prices the GPT-5.6 family, alias, and dated slugs from 
     assert.ok(Math.abs((byModel.get("gpt-5.6-terra")?.estimatedCredits ?? 0) - 30.2) < 1e-9);
     assert.ok(Math.abs((byModel.get("gpt-5.6-luna")?.estimatedCredits ?? 0) - 3.02) < 1e-9);
     assert.ok(Math.abs((byModel.get("gpt-5.6")?.estimatedCredits ?? 0) - 56.4) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 284) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 468) < 1e-9);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-5.6")), false);
     assert.notEqual(stats.summary.totals.estimatedCreditsStatus, "unavailable");
   });
@@ -2213,7 +2213,7 @@ test("CodexUsageProvider prices GPT-6 Astra cache writes and dated slugs from AP
     assert.equal(standardTotals?.cacheWrite5mInputTokens, 10_000);
     assert.equal(standardTotals?.totalTokens, 105_000);
     assert.ok(Math.abs((standardTotals?.estimatedCredits ?? 0) - 109.5) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-6-astra-2026-09-04")?.estimatedCredits ?? 0) - 710) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-6-astra-2026-09-04")?.estimatedCredits ?? 0) - 1170) < 1e-9);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-6-astra")), false);
   });
 });

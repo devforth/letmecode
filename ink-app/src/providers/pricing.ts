@@ -18,12 +18,20 @@ export type ModelPricingSource =
   | "github_copilot"
   | "antigravity";
 
-export type ModelPricing = {
+type ModelPricingRates = {
   input: number;
   output: number;
   inputCacheRead: number;
   inputCacheWrite5m: number | null;
   inputCacheWrite1h: number | null;
+};
+
+export type ModelLongContextPricing = ModelPricingRates & {
+  inputTokensThreshold: number;
+};
+
+export type ModelPricing = ModelPricingRates & {
+  longContext: ModelLongContextPricing | null;
 };
 
 export type ModelPricingRequest = {
@@ -41,6 +49,14 @@ type ModelPricingResponseRow = {
   input_cache_read: number;
   input_cache_w5m: number | null;
   input_cache_w1h: number | null;
+  long_context: {
+    input_tokens_threshold: number;
+    input: number;
+    output: number;
+    input_cache_read: number;
+    input_cache_w5m: number | null;
+    input_cache_w1h: number | null;
+  } | null;
 };
 
 export type ModelPricingResponse = {
@@ -104,7 +120,17 @@ export async function fetchModelPricing(
         output: model.output,
         inputCacheRead: model.input_cache_read,
         inputCacheWrite5m: model.input_cache_w5m,
-        inputCacheWrite1h: model.input_cache_w1h
+        inputCacheWrite1h: model.input_cache_w1h,
+        longContext: model.long_context
+          ? {
+              inputTokensThreshold: model.long_context.input_tokens_threshold,
+              input: model.long_context.input,
+              output: model.long_context.output,
+              inputCacheRead: model.long_context.input_cache_read,
+              inputCacheWrite5m: model.long_context.input_cache_w5m,
+              inputCacheWrite1h: model.long_context.input_cache_w1h
+            }
+          : null
       }
     ] satisfies [string, ModelPricing])
   );
@@ -130,19 +156,29 @@ export function modelCostCredits(
   if (!pricing) {
     return undefined;
   }
-  if (usage.cacheWrite5mInputTokens > 0 && pricing.inputCacheWrite5m === null) {
+  const totalInputTokens =
+    usage.inputTokens +
+    usage.cacheReadInputTokens +
+    usage.cacheWrite5mInputTokens +
+    usage.cacheWrite1hInputTokens;
+  const rates =
+    pricing.longContext && totalInputTokens > pricing.longContext.inputTokensThreshold
+      ? pricing.longContext
+      : pricing;
+
+  if (usage.cacheWrite5mInputTokens > 0 && rates.inputCacheWrite5m === null) {
     return undefined;
   }
-  if (usage.cacheWrite1hInputTokens > 0 && pricing.inputCacheWrite1h === null) {
+  if (usage.cacheWrite1hInputTokens > 0 && rates.inputCacheWrite1h === null) {
     return undefined;
   }
 
   return (
-    (usage.inputTokens / 1_000_000) * pricing.input +
-    (usage.cacheReadInputTokens / 1_000_000) * pricing.inputCacheRead +
-    (usage.cacheWrite5mInputTokens / 1_000_000) * (pricing.inputCacheWrite5m ?? 0) +
-    (usage.cacheWrite1hInputTokens / 1_000_000) * (pricing.inputCacheWrite1h ?? 0) +
-    (usage.outputTokens / 1_000_000) * pricing.output
+    (usage.inputTokens / 1_000_000) * rates.input +
+    (usage.cacheReadInputTokens / 1_000_000) * rates.inputCacheRead +
+    (usage.cacheWrite5mInputTokens / 1_000_000) * (rates.inputCacheWrite5m ?? 0) +
+    (usage.cacheWrite1hInputTokens / 1_000_000) * (rates.inputCacheWrite1h ?? 0) +
+    (usage.outputTokens / 1_000_000) * rates.output
   ) * USD_TO_CREDITS;
 }
 

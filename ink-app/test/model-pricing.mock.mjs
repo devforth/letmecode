@@ -49,6 +49,29 @@ const prices = {
   "raptor-mini": [0.25, 0.025, 0, 0, 2]
 };
 
+const longContextPrices = {
+  "gpt-5-4": [272_000, 5, 0.5, 0, 0, 22.5],
+  "gpt-5-5": [272_000, 10, 1, 0, 0, 45],
+  "gpt-5-6-luna": [272_000, 0.4, 0.04, 0.5, 0.5, 1.8],
+  "gpt-5-6-sol": [272_000, 8, 0.8, 10, 10, 30],
+  "gpt-5-6-terra": [272_000, 4, 0.4, 5, 5, 18],
+  "gpt-6-astra": [272_000, 20, 2, 25, 25, 75]
+};
+
+function longContextPricingFor(slug) {
+  const price = longContextPrices[slug];
+  if (!price) return null;
+  const [inputTokensThreshold, input, inputCacheRead, inputCacheWrite5m, inputCacheWrite1h, output] = price;
+  return {
+    inputTokensThreshold,
+    input,
+    output,
+    inputCacheRead,
+    inputCacheWrite5m,
+    inputCacheWrite1h
+  };
+}
+
 export const modelPricingRequests = [];
 
 export function pricingFor(modelIds) {
@@ -61,7 +84,8 @@ export function pricingFor(modelIds) {
       output,
       inputCacheRead,
       inputCacheWrite5m,
-      inputCacheWrite1h
+      inputCacheWrite1h,
+      longContext: longContextPricingFor(modelPricingSlug(modelId))
     }]];
   }));
 }
@@ -78,13 +102,24 @@ export function installModelPricingMock(overrides = {}) {
         const price = overrides[slug] ?? prices[slug];
         if (!price) return [];
         const [input, input_cache_read, input_cache_w5m, input_cache_w1h, output] = price;
+        const longContext = longContextPricingFor(slug);
         return [{
           slug,
           input,
           output,
           input_cache_read,
           input_cache_w5m,
-          input_cache_w1h
+          input_cache_w1h,
+          long_context: longContext
+            ? {
+                input_tokens_threshold: longContext.inputTokensThreshold,
+                input: longContext.input,
+                output: longContext.output,
+                input_cache_read: longContext.inputCacheRead,
+                input_cache_w5m: longContext.inputCacheWrite5m,
+                input_cache_w1h: longContext.inputCacheWrite1h
+              }
+            : null
         }];
       })
     };
