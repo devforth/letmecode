@@ -13,9 +13,12 @@ import {
 } from "../../daily.js";
 import {
   isNonBillableCopilotModel,
-  normalizeCopilotModelId,
-  rateForCopilotModel
+  normalizeCopilotModelId
 } from "../models.js";
+import {
+  modelCostCredits,
+  type ModelPricing
+} from "../../pricing.js";
 import type { CopilotUsageEvent } from "../otel/parse.js";
 
 export type CopilotAggregatedUsage = {
@@ -48,7 +51,10 @@ export function filterCopilotUsageEvents(
  * reported input already INCLUDES cache-read tokens but NOT cache-write tokens.
  * Pure and deterministic: independent of input ordering.
  */
-export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggregatedUsage {
+export function aggregateCopilotUsage(
+  events: CopilotUsageEvent[],
+  pricing: ReadonlyMap<string, ModelPricing> = new Map()
+): CopilotAggregatedUsage {
   const byModel = new Map<string, UsageTotals>();
   const byDay = createDailyUsageAggregates();
 
@@ -71,17 +77,17 @@ export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggre
     const reasoning = Math.min(event.reasoningOutputTokens, output);
 
     const nonBillable = isNonBillableCopilotModel(modelId);
-    const rate = nonBillable ? undefined : rateForCopilotModel(modelId, event.inputTokens);
-
-    const creditsKnown = nonBillable || (hasCacheInfo && rate !== undefined);
+    const estimatedCredits = hasCacheInfo
+      ? modelCostCredits(pricing.get(modelId), {
+          inputTokens: uncachedInput,
+          outputTokens: output,
+          cacheReadInputTokens: cacheRead,
+          cacheWrite5mInputTokens: cacheWrite,
+          cacheWrite1hInputTokens: 0
+        })
+      : undefined;
+    const creditsKnown = nonBillable || estimatedCredits !== undefined;
     const estimatedCreditsStatus: UsageValueStatus = creditsKnown ? "known" : "unavailable";
-    const estimatedCredits =
-      rate !== undefined && hasCacheInfo
-        ? (uncachedInput / 1_000_000) * rate.input +
-          (cacheRead / 1_000_000) * rate.cacheRead +
-          (cacheWrite / 1_000_000) * rate.cacheWrite +
-          (output / 1_000_000) * rate.output
-        : 0;
 
     const totals: UsageTotals = {
       inputTokens: uncachedInput,
@@ -92,7 +98,7 @@ export function aggregateCopilotUsage(events: CopilotUsageEvent[]): CopilotAggre
       cacheWrite1hInputTokens: 0,
       reasoningOutputTokens: reasoning,
       totalTokens: uncachedInput + cacheRead + cacheWrite + output,
-      estimatedCredits,
+      estimatedCredits: nonBillable ? 0 : (estimatedCredits ?? 0),
       eventCount: 1,
       cacheReadStatus: event.cacheReadStatus,
       cacheWriteStatus: event.cacheWriteStatus,

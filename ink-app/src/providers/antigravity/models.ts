@@ -27,7 +27,23 @@ const MODEL_IDS: Record<string, string> = {
 };
 
 export function normalizeAntigravityModelId(modelId: string): string {
-  return MODEL_IDS[modelId] ?? (modelId || "unknown");
+  const exactModelId = MODEL_IDS[modelId];
+  if (exactModelId) {
+    return exactModelId;
+  }
+
+  const currentGeminiModel = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-pro"
+  ].find((candidate) =>
+    modelId === candidate ||
+    modelId === `${candidate}-preview` ||
+    ["low", "medium", "high"].some((level) => modelId === `${candidate}-${level}`)
+  );
+
+  return currentGeminiModel ?? (modelId || "unknown");
 }
 
 export function antigravityModelScope(rawModelId: string): AntigravityModelScope {

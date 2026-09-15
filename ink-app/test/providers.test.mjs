@@ -5,6 +5,7 @@ import { parse as parseJsonc } from "jsonc-parser";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import "./model-pricing.mock.mjs";
 import {
   AntigravityUsageProvider,
   parseAntigravityQuotaEntries
@@ -481,7 +482,7 @@ test("AntigravityUsageProvider sums multiple per-response records without deltas
   assert.equal(stats.warnings.some((warning) => warning.includes("unknown-model")), true);
 });
 
-test("AntigravityUsageProvider prices expanded rate card models and suppresses unpriced models", async () => {
+test("AntigravityUsageProvider uses API pricing and reports unpriced models", async () => {
   const stats = await new AntigravityUsageProvider({
     collectUsage: async () => [
       {
@@ -519,16 +520,29 @@ test("AntigravityUsageProvider prices expanded rate card models and suppresses u
         cacheWrite: 0,
         output: 100,
         reasoning: 0
+      },
+      {
+        type: "usage",
+        sessionId: "s4",
+        responseId: "r4",
+        timestamp: 1782304784564,
+        modelId: "gemini-3.8-flash-medium",
+        input: 1_000_000,
+        cacheRead: 1_000_000,
+        cacheWrite: 0,
+        output: 1_000_000,
+        reasoning: 0
       }
     ]
   }).getStats();
   const byModel = new Map(stats.modelUsage.map((row) => [row.modelId, row.totals]));
 
-  assert.ok(Math.abs((byModel.get("gemini-3.1-pro")?.estimatedCredits ?? 0) - 125.8) < 0.0000001);
+  assert.ok(Math.abs((byModel.get("gemini-3.1-pro")?.estimatedCredits ?? 0) - 63.2) < 0.0000001);
   assert.ok(Math.abs((byModel.get("claude-sonnet-4-6")?.estimatedCredits ?? 0) - 0.54) < 0.0000001);
+  assert.ok(Math.abs((byModel.get("gemini-3.8-flash")?.estimatedCredits ?? 0) - 457.5) < 0.0000001);
   assert.equal(byModel.get("gpt-oss-120b")?.estimatedCredits, 0);
   assert.equal(byModel.get("gpt-oss-120b")?.estimatedCreditsStatus, "unavailable");
-  assert.equal(stats.warnings.some((warning) => warning.includes("gpt-oss-120b")), false);
+  assert.equal(stats.warnings.some((warning) => warning.includes("gpt-oss-120b")), true);
 });
 
 test("AntigravityUsageProvider keeps same timestamp responses with different response IDs", async () => {
@@ -1352,7 +1366,7 @@ test("CopilotUsageProvider treats Copilot NES and suggestion models as non-billa
   });
 });
 
-test("CopilotUsageProvider applies long-context rates for large GPT-5.4 and GPT-5.5 chat calls", async () => {
+test("CopilotUsageProvider uses API rates for large GPT-5.4 and GPT-5.5 chat calls", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
@@ -1381,11 +1395,11 @@ test("CopilotUsageProvider applies long-context rates for large GPT-5.4 and GPT-
 
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCredits, 0);
     assert.equal(byModel.get("gpt-5.4-2026-03-01")?.estimatedCreditsStatus, "unavailable");
-    assert.ok(Math.abs((byModel.get("gpt-5.5-2026-06-01")?.estimatedCredits ?? 0) - 211.7001) < 0.0000001);
+    assert.ok(Math.abs((byModel.get("gpt-5.5-2026-06-01")?.estimatedCredits ?? 0) - 106.60005) < 0.0000001);
   });
 });
 
-test("CopilotUsageProvider applies model-specific long-context thresholds", async () => {
+test("CopilotUsageProvider does not infer missing cache telemetry for large calls", async () => {
   await withTempRoot(async (root) => {
     await writeCopilotOtel(root, [
       JSON.stringify({
@@ -2103,7 +2117,7 @@ test("CodexUsageProvider coalesces monthly reset jitter into logical cycles", as
   });
 });
 
-test("CodexUsageProvider prices the GPT-5.6 family, alias, snapshots, and long context", async () => {
+test("CodexUsageProvider prices the GPT-5.6 family, alias, and dated slugs from API rates", async () => {
   await withTempRoot(async (root) => {
     const standardUsage = {
       input_tokens: 100_000,
@@ -2151,13 +2165,13 @@ test("CodexUsageProvider prices the GPT-5.6 family, alias, snapshots, and long c
     assert.ok(Math.abs((byModel.get("gpt-5.6-terra")?.estimatedCredits ?? 0) - 30.2) < 1e-9);
     assert.ok(Math.abs((byModel.get("gpt-5.6-luna")?.estimatedCredits ?? 0) - 3.02) < 1e-9);
     assert.ok(Math.abs((byModel.get("gpt-5.6")?.estimatedCredits ?? 0) - 56.4) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 468) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-5.6-sol-2026-07-09")?.estimatedCredits ?? 0) - 284) < 1e-9);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-5.6")), false);
     assert.notEqual(stats.summary.totals.estimatedCreditsStatus, "unavailable");
   });
 });
 
-test("CodexUsageProvider prices GPT-6 Astra cache writes, snapshots, and long context", async () => {
+test("CodexUsageProvider prices GPT-6 Astra cache writes and dated slugs from API rates", async () => {
   await withTempRoot(async (root) => {
     const standardUsage = {
       input_tokens: 100_000,
@@ -2199,7 +2213,7 @@ test("CodexUsageProvider prices GPT-6 Astra cache writes, snapshots, and long co
     assert.equal(standardTotals?.cacheWrite5mInputTokens, 10_000);
     assert.equal(standardTotals?.totalTokens, 105_000);
     assert.ok(Math.abs((standardTotals?.estimatedCredits ?? 0) - 109.5) < 1e-9);
-    assert.ok(Math.abs((byModel.get("gpt-6-astra-2026-09-04")?.estimatedCredits ?? 0) - 1170) < 1e-9);
+    assert.ok(Math.abs((byModel.get("gpt-6-astra-2026-09-04")?.estimatedCredits ?? 0) - 710) < 1e-9);
     assert.equal(stats.warnings.some((warning) => warning.includes("gpt-6-astra")), false);
   });
 });
@@ -2301,6 +2315,78 @@ test("CodexUsageProvider consumes canonical usage records without double-countin
     assert.equal(stats.primaryLimitWindows[0]?.totals.inputTokens, 9_000);
     assert.equal(stats.primaryLimitWindows[0]?.totals.cacheReadInputTokens, 1_000);
     assert.equal(stats.primaryLimitWindows[0]?.totals.outputTokens, 1_000);
+  });
+});
+
+test("CodexUsageProvider ignores an unscoped compaction snapshot before current thread settings", async () => {
+  await withTempRoot(async (root) => {
+    const inheritedSnapshot = {
+      input_tokens: 249_218,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 895,
+      total_tokens: 250_113
+    };
+    const currentUsage = {
+      input_tokens: 100_000,
+      cached_input_tokens: 20_000,
+      cache_write_input_tokens: 10_000,
+      output_tokens: 5_000,
+      total_tokens: 105_000
+    };
+
+    await writeSession(root, "2026/09/12/compacted-auto-review.jsonl", [
+      JSON.stringify({
+        timestamp: "2026-09-12T14:31:18.123Z",
+        type: "session_meta",
+        payload: { id: "01a09607-a322-7d60-975c-bcf0040e8fca" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-12T14:31:18.123Z",
+        type: "event_msg",
+        payload: { type: "task_started" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-12T14:31:18.123Z",
+        type: "token_usage_record",
+        payload: { response_id: "inherited-snapshot", usage: inheritedSnapshot }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-12T14:31:18.123Z",
+        type: "compacted",
+        payload: { replacement_history: [] }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-12T14:31:18.123Z",
+        type: "event_msg",
+        payload: {
+          type: "thread_settings_applied",
+          thread_settings: { model: "codex-auto-review", service_tier: "default" }
+        }
+      }),
+      tokenCountEvent({
+        timestamp: "2026-09-12T14:31:18.123Z",
+        total: inheritedSnapshot,
+        last: inheritedSnapshot,
+        primary: { used_percent: 70, window_minutes: 10080, resets_at: 1_789_815_481 }
+      }),
+      turnContext("codex-auto-review"),
+      tokenEvent({
+        timestamp: "2026-09-12T14:32:18.123Z",
+        total: currentUsage,
+        last: currentUsage,
+        primary: { used_percent: 71, window_minutes: 10080, resets_at: 1_789_815_481 }
+      })
+    ], null);
+
+    const stats = await new CodexUsageProvider({ root }).getStats();
+
+    assert.deepEqual(stats.summary.distinctModels, ["codex-auto-review"]);
+    assert.equal(stats.summary.tokenEvents, 1);
+    assert.equal(stats.summary.totals.totalTokens, 105_000);
+    assert.notEqual(stats.primaryLimitWindows[0]?.totals.estimatedCreditsStatus, "unavailable");
+    assert.equal(stats.primaryLimitWindows[0]?.modelUsage.some((row) => row.modelId === "unknown"), false);
+    assert.equal(stats.warnings.some((warning) => warning.includes("unknown")), false);
   });
 });
 
@@ -2737,6 +2823,15 @@ test("ClaudeUsageProvider prices Fable 5.1 and permanent Sonnet 5 rates", async 
         model: "claude-sonnet-5",
         inputTokens: 1_000_000,
         outputTokens: 1_000_000
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-09-05T12:02:01.000Z",
+        requestId: "req-mythos-5-1",
+        messageId: "msg-mythos-5-1",
+        model: "claude-mythos-5-1",
+        inputTokens: 1_000_000,
+        cacheReadInputTokens: 1_000_000,
+        outputTokens: 1_000_000
       })
     ]);
 
@@ -2754,6 +2849,7 @@ test("ClaudeUsageProvider prices Fable 5.1 and permanent Sonnet 5 rates", async 
     assert.equal(fableTotals?.cacheWrite1hInputTokens, 5_000);
     assert.ok(Math.abs((fableTotals?.estimatedCredits ?? 0) - 173.5) < 1e-9);
     assert.ok(Math.abs((byModel.get("claude-sonnet-5")?.estimatedCredits ?? 0) - 1200) < 1e-9);
+    assert.ok(Math.abs((byModel.get("claude-mythos-5-1")?.estimatedCredits ?? 0) - 6025) < 1e-9);
     assert.equal(stats.warnings.some((warning) => warning.includes("claude-fable-5-1")), false);
   });
 });

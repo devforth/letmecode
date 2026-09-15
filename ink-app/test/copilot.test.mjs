@@ -3,6 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {
+  modelPricingRequests,
+  pricingFor
+} from "./model-pricing.mock.mjs";
 
 import {
   parseCopilotQuota,
@@ -12,9 +16,17 @@ import {
 import { parseCopilotOtelFiles } from "../dist/providers/copilot/otel/parse.js";
 import { discoverCopilotOtelFiles } from "../dist/providers/copilot/otel/discover.js";
 import {
-  aggregateCopilotUsage,
+  aggregateCopilotUsage as aggregateCopilotUsageRaw,
   filterCopilotUsageEvents
 } from "../dist/providers/copilot/usage/aggregate.js";
+import {
+  fetchModelPricing,
+  modelCostCredits,
+  modelPricingSlug
+} from "../dist/providers/pricing.js";
+
+const aggregateCopilotUsage = (events) =>
+  aggregateCopilotUsageRaw(events, pricingFor(events.map((event) => event.modelId)));
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -455,6 +467,85 @@ test("aggregate derives uncached input and treats cache-write as additive", () =
   assert.equal(totals.totalTokens, 111000);
   assert.ok(Math.abs(totals.estimatedCredits - 9.95) < 1e-9);
   assert.equal(totals.estimatedCreditsStatus, "known");
+});
+
+test("Copilot pricing is loaded from the public model-pricing API", async () => {
+  const expectedDefaultRates = new Map([
+    ["gpt-5.6-luna", [0.2, 0.02, 0.25, 1.2]],
+    ["gpt-5.6-sol", [4, 0.4, 5, 20]],
+    ["gpt-5.6-terra", [2, 0.2, 2.5, 12]],
+    ["gpt-6-astra", [10, 1, 12.5, 50]],
+    ["claude-fable-5-1", [10, 0.25, 12.5, 50]],
+    ["claude-opus-5", [5, 0.5, 6.25, 25]],
+    ["claude-sonnet-5", [2, 0.2, 2.5, 10]],
+    ["gemini-3.6-flash", [0.75, 0.075, 0.75, 3.75]],
+    ["gemini-3.7-flash", [0.75, 0.075, 0.75, 3.75]],
+    ["gemini-3.8-flash", [0.75, 0.075, 0.75, 3.75]],
+    ["mai-code-1.1-flash", [0.2, 0.02, 0, 1.2]],
+    ["grok-4.5", [2, 0.5, 0, 6]],
+    ["grok-4.6", [2, 0.5, 0, 6]],
+    ["kimi-k2.7-code", [0.95, 0.19, 0, 4]],
+    ["kimi-k3", [3, 0.3, 0, 15]]
+  ]);
+
+  const pricing = await fetchModelPricing(
+    [...expectedDefaultRates.keys(), "claude-opus-4-8-fast"],
+    "github_copilot"
+  );
+  assert.deepEqual(modelPricingRequests.at(-1)?.available_in, {
+    main: ["github_copilot"],
+    other: []
+  });
+
+  for (const [modelId, expected] of expectedDefaultRates) {
+    const rate = pricing.get(modelId);
+    assert.deepEqual(
+      [rate?.input, rate?.inputCacheRead, rate?.inputCacheWrite5m, rate?.output],
+      expected,
+      modelId
+    );
+  }
+
+  assert.deepEqual(
+    pricing.get("claude-opus-4-8-fast"),
+    {
+      input: 10,
+      inputCacheRead: 1,
+      inputCacheWrite5m: 12.5,
+      inputCacheWrite1h: 20,
+      output: 50
+    }
+  );
+  assert.equal(modelPricingSlug("gpt-6-astra-2026-09-04"), "gpt-6-astra");
+  assert.equal(
+    modelCostCredits(pricing.get("gpt-6-astra"), {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWrite5mInputTokens: 0,
+      cacheWrite1hInputTokens: 0
+    }),
+    1000
+  );
+  assert.equal(
+    modelCostCredits(
+      {
+        input: 1,
+        output: 1,
+        inputCacheRead: 1,
+        inputCacheWrite5m: null,
+        inputCacheWrite1h: null
+      },
+      {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheWrite5mInputTokens: 1,
+        cacheWrite1hInputTokens: 0
+      }
+    ),
+    undefined
+  );
 });
 
 test("aggregate preserves the full cache-read bucket for cache-only events", () => {

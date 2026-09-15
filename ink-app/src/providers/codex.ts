@@ -18,108 +18,32 @@ import {
   asRecord,
   buildWindowLists,
   createLimitWindowAggregates,
-  numberOrZero,
-  type LimitWindowAggregates
+  numberOrZero
 } from "./limits.js";
 import {
   addDailyUsage,
   buildDailyUsageRows,
-  createDailyUsageAggregates,
-  type DailyUsageAggregates
+  createDailyUsageAggregates
 } from "./daily.js";
-import { resolveUsageRate, type UsageRate } from "./pricing.js";
+import {
+  fetchModelPricing,
+  modelCostCredits,
+  type ModelPricing
+} from "./pricing.js";
 
-// One credit equals $0.01 (see CODEX_CREDIT_COST_USD in index.tsx), so credits
-// equal USD * 100. Rate cards are expressed in the model's actual API price in
-// USD per 1M tokens and scaled to credits in creditsFor, matching the Claude
-// provider. These are the real OpenAI API prices, not the (4x cheaper) Codex
-// subscription credit prices.
-// Source: https://developers.openai.com/api/docs/pricing (checked 2026-09-05).
-// GPT-5.6 Sol's current promotional rate is guaranteed only through at least
-// 2026-11-21, so it must be rechecked after that date.
-const USD_TO_CREDITS = 100;
-
-const GPT_6_ASTRA_RATE: UsageRate = {
-  input: 10,
-  cacheRead: 1,
-  cacheWrite: 12.5,
-  cacheWrite5m: 12.5,
-  cacheWrite1h: 12.5,
-  output: 50,
-  longContext: {
-    thresholdTokens: 272_000,
-    rate: { input: 20, cacheRead: 2, cacheWrite: 25, cacheWrite5m: 25, cacheWrite1h: 25, output: 75 }
-  }
-};
-
-const GPT_5_6_SOL_RATE: UsageRate = {
-  input: 4,
-  cacheRead: 0.4,
-  cacheWrite: 5,
-  cacheWrite5m: 5,
-  cacheWrite1h: 5,
-  output: 20,
-  longContext: {
-    thresholdTokens: 272_000,
-    rate: { input: 8, cacheRead: 0.8, cacheWrite: 10, cacheWrite5m: 10, cacheWrite1h: 10, output: 30 }
-  }
-};
-
-const RATE_CARD: Record<string, UsageRate> = {
-  "gpt-6-astra": GPT_6_ASTRA_RATE,
-  "gpt-5.6-sol": GPT_5_6_SOL_RATE,
-  "gpt-5.6-terra": {
-    input: 2,
-    cacheRead: 0.2,
-    cacheWrite: 2.5,
-    cacheWrite5m: 2.5,
-    cacheWrite1h: 2.5,
-    output: 12,
-    longContext: {
-      thresholdTokens: 272_000,
-      rate: { input: 4, cacheRead: 0.4, cacheWrite: 5, cacheWrite5m: 5, cacheWrite1h: 5, output: 18 }
-    }
-  },
-  "gpt-5.6-luna": {
-    input: 0.2,
-    cacheRead: 0.02,
-    cacheWrite: 0.25,
-    cacheWrite5m: 0.25,
-    cacheWrite1h: 0.25,
-    output: 1.2,
-    longContext: {
-      thresholdTokens: 272_000,
-      rate: { input: 0.4, cacheRead: 0.04, cacheWrite: 0.5, cacheWrite5m: 0.5, cacheWrite1h: 0.5, output: 1.8 }
-    }
-  },
-  "gpt-5.5": {
-    input: 5,
-    cacheRead: 0.5,
-    cacheWrite: 0,
-    cacheWrite5m: 0,
-    cacheWrite1h: 0,
-    output: 30,
-    longContext: {
-      thresholdTokens: 272_000,
-      rate: { input: 10, cacheRead: 1, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 45 }
-    }
-  },
-  "gpt-5.4": {
-    input: 2.5,
-    cacheRead: 0.25,
-    cacheWrite: 0,
-    cacheWrite5m: 0,
-    cacheWrite1h: 0,
-    output: 15,
-    longContext: {
-      thresholdTokens: 272_000,
-      rate: { input: 5, cacheRead: 0.5, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 22.5 }
-    }
-  },
-  "gpt-5.4-mini": { input: 0.75, cacheRead: 0.075, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 4.5 },
-  "gpt-5.3-codex": { input: 1.75, cacheRead: 0.175, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 14 },
-  "gpt-5.2": { input: 1.75, cacheRead: 0.175, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 14 }
-};
+/*
+Previous local prices in USD per 1M tokens, kept temporarily as requested:
+gpt-6-astra 10 / 1 / 12.5 / 50; >272k 20 / 2 / 25 / 75
+gpt-5.6-sol 4 / 0.4 / 5 / 20; >272k 8 / 0.8 / 10 / 30
+gpt-5.6-terra 2 / 0.2 / 2.5 / 12; >272k 4 / 0.4 / 5 / 18
+gpt-5.6-luna 0.2 / 0.02 / 0.25 / 1.2; >272k 0.4 / 0.04 / 0.5 / 1.8
+gpt-5.5 5 / 0.5 / 0 / 30; >272k 10 / 1 / 0 / 45
+gpt-5.4 2.5 / 0.25 / 0 / 15; >272k 5 / 0.5 / 0 / 22.5
+gpt-5.4-mini 0.75 / 0.075 / 0 / 4.5
+gpt-5.3-codex 1.75 / 0.175 / 0 / 14
+gpt-5.2 1.75 / 0.175 / 0 / 14
+Columns: input / cache read / cache write / output.
+*/
 
 type RawUsage = {
   inputTokens: number;
@@ -135,6 +59,15 @@ type ParseTotals = {
   linesRead: number;
   tokenEvents: number;
   malformedLines: number;
+};
+
+type CodexUsageEvent = {
+  modelId: string;
+  usage: RawUsage;
+  eventTimeMs: number;
+  rateLimits: Record<string, unknown> | null;
+  serviceTier?: string;
+  webSearchCalls: number;
 };
 
 type CodexUsageProviderOptions = {
@@ -165,6 +98,7 @@ export class CodexUsageProvider extends UsageProviderBase {
     const byDay = createDailyUsageAggregates();
     const windows = createLimitWindowAggregates();
     const planTypes = new Set<string>();
+    const events: CodexUsageEvent[] = [];
     const warnings: string[] = [];
     const parseTotals: ParseTotals = {
       filesScanned: 0,
@@ -185,11 +119,53 @@ export class CodexUsageProvider extends UsageProviderBase {
         seenSessionFiles.add(sessionFileId);
 
         parseTotals.filesScanned += 1;
-        const fileStats = await parseSessionFile(file, byModel, byDay, windows, planTypes, knownModels);
+        const fileStats = await parseSessionFile(file, events);
         parseTotals.linesRead += fileStats.linesRead;
         parseTotals.tokenEvents += fileStats.tokenEvents;
         parseTotals.malformedLines += fileStats.malformedLines;
       }
+    }
+
+    let pricing = new Map<string, ModelPricing>();
+    try {
+      pricing = await fetchModelPricing(
+        events
+          .map((event) => pricingModelId(event.modelId))
+          .filter((modelId) => !isAssumedZeroRatedCodexModel(modelId, knownModels)),
+        "codex"
+      );
+    } catch {
+      warnings.push("Model pricing API is unavailable.");
+    }
+
+    for (const event of events) {
+      const deltaTotals = createUsageTotalsForModel(
+        event.modelId,
+        event.usage,
+        knownModels,
+        pricing,
+        event.serviceTier
+      );
+      deltaTotals.estimatedCredits += event.webSearchCalls;
+      if (!hasCountedRawUsage(event.usage) && event.webSearchCalls > 0) {
+        deltaTotals.estimatedCreditsStatus = "known";
+      }
+      const planType =
+        typeof event.rateLimits?.plan_type === "string"
+          ? event.rateLimits.plan_type
+          : undefined;
+      const safeEventTimeMs = Number.isFinite(event.eventTimeMs) ? event.eventTimeMs : 0;
+
+      addModelUsage(byModel, event.modelId, deltaTotals);
+      addDailyUsage(byDay, event.eventTimeMs, event.modelId, planType, deltaTotals);
+      applyRateLimits(
+        windows,
+        event.rateLimits,
+        safeEventTimeMs,
+        event.modelId,
+        deltaTotals,
+        planTypes
+      );
     }
 
     if (parseTotals.malformedLines > 0) {
@@ -201,10 +177,10 @@ export class CodexUsageProvider extends UsageProviderBase {
 
     const unknownPricedModels = modelUsage
       .filter((row) => row.totals.totalTokens > 0)
-      .map((row) => row.modelId)
-      .filter((modelId) => !rateForCodexModel(modelId) && !isAssumedZeroRatedCodexModel(modelId, knownModels));
+      .filter((row) => row.totals.estimatedCreditsStatus === "unavailable")
+      .map((row) => row.modelId);
     if (unknownPricedModels.length > 0) {
-      warnings.push(`No API-equivalent rate configured for: ${unknownPricedModels.join(", ")}.`);
+      warnings.push(`No complete API-equivalent pricing returned for: ${unknownPricedModels.join(", ")}.`);
     }
 
     if (parseTotals.filesScanned === 0) {
@@ -401,22 +377,26 @@ function normalizeRawUsage(value: unknown): RawUsage {
   };
 }
 
-function creditsFor(modelId: string, usage: RawUsage, serviceTier?: string): number {
-  const rate = rateForCodexModel(modelId, usage.inputTokens);
-  if (!rate) {
-    return 0;
-  }
-
+function creditsFor(
+  modelId: string,
+  usage: RawUsage,
+  pricing: Map<string, ModelPricing>,
+  serviceTier?: string
+): number | undefined {
   const { inputTokens, cacheReadInputTokens, cacheWriteInputTokens } = resolveCodexInputBreakdown(usage);
-
-  return (
-    ((inputTokens / 1_000_000) * rate.input +
-      (cacheReadInputTokens / 1_000_000) * rate.cacheRead +
-      (cacheWriteInputTokens / 1_000_000) * rate.cacheWrite +
-      (usage.outputTokens / 1_000_000) * rate.output) *
-    serviceTierPriceMultiplier(serviceTier) *
-    USD_TO_CREDITS
+  const credits = modelCostCredits(
+    pricing.get(pricingModelId(modelId)),
+    {
+      inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadInputTokens,
+      cacheWrite5mInputTokens: cacheWriteInputTokens,
+      cacheWrite1hInputTokens: 0
+    }
   );
+  return credits === undefined
+    ? undefined
+    : credits * serviceTierPriceMultiplier(serviceTier);
 }
 
 function serviceTierPriceMultiplier(serviceTier?: string): number {
@@ -437,16 +417,14 @@ function isSupportedServiceTier(serviceTier?: string): boolean {
   );
 }
 
-function rateForCodexModel(modelId: string, inputTokens = 0) {
-  // The unsuffixed API alias routes to Sol. Normalize only the exact alias so
-  // an unknown future gpt-5.6-* tier is not accidentally charged at Sol rates.
-  const pricedModelId =
+function pricingModelId(modelId: string): string {
+  return (
     modelId === "gpt-5.6"
       ? "gpt-5.6-sol"
       : modelId === "codex-auto-review"
         ? "gpt-5.4"
-        : modelId;
-  return resolveUsageRate(RATE_CARD, pricedModelId, inputTokens, { prefixMatch: true });
+        : modelId
+  );
 }
 
 function rawUsageToTotals(usage: RawUsage): UsageTotals {
@@ -485,13 +463,15 @@ function createUsageTotalsForModel(
   modelId: string,
   usage: RawUsage,
   knownModels: Map<string, CodexModelMetadata>,
+  pricing: Map<string, ModelPricing>,
   serviceTier?: string
 ): UsageTotals {
   const resolvedModelId = modelId || "unknown";
   const deltaTotals = rawUsageToTotals(usage);
-  deltaTotals.estimatedCredits = creditsFor(resolvedModelId, usage, serviceTier);
+  const estimatedCredits = creditsFor(resolvedModelId, usage, pricing, serviceTier);
+  deltaTotals.estimatedCredits = estimatedCredits ?? 0;
   deltaTotals.eventCount = 1;
-  if (!rateForCodexModel(resolvedModelId, usage.inputTokens) && !isAssumedZeroRatedCodexModel(resolvedModelId, knownModels)) {
+  if (estimatedCredits === undefined && !isAssumedZeroRatedCodexModel(resolvedModelId, knownModels)) {
     deltaTotals.estimatedCreditsStatus = "unavailable";
   }
   return deltaTotals;
@@ -539,11 +519,7 @@ async function* walkSessionFiles(directory: string): AsyncGenerator<string> {
 
 async function parseSessionFile(
   filePath: string,
-  byModel: Map<string, UsageTotals>,
-  byDay: DailyUsageAggregates,
-  windows: LimitWindowAggregates,
-  planTypes: Set<string>,
-  knownModels: Map<string, CodexModelMetadata>
+  events: CodexUsageEvent[]
 ): Promise<{ linesRead: number; tokenEvents: number; malformedLines: number }> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -568,7 +544,7 @@ async function parseSessionFile(
     rateLimits: Record<string, unknown> | null = null,
     serviceTier = currentServiceTier
   ): void => {
-    const webSearchCostCredits = pendingWebSearchCalls;
+    const webSearchCalls = pendingWebSearchCalls;
     pendingWebSearchCalls = 0;
     // Current-format-only policy: without the applied tier the exact cost is
     // unknowable. Silently ignore the event instead of guessing Standard or
@@ -576,26 +552,20 @@ async function parseSessionFile(
     if (!isSupportedServiceTier(serviceTier)) {
       return;
     }
-    if (!hasCountedRawUsage(usage) && webSearchCostCredits === 0) {
+    if (!hasCountedRawUsage(usage) && webSearchCalls === 0) {
       return;
     }
 
     const resolvedModelId = modelId || "unknown";
-    const deltaTotals = createUsageTotalsForModel(resolvedModelId, usage, knownModels, serviceTier);
-    // OpenAI API web search is $10 / 1k calls: $0.01, or one dashboard
-    // credit, per completed call. Search-content tokens are already present in
-    // the model usage record and are priced normally above.
-    deltaTotals.estimatedCredits += webSearchCostCredits;
-    if (!hasCountedRawUsage(usage) && webSearchCostCredits > 0) {
-      deltaTotals.estimatedCreditsStatus = "known";
-    }
-    const planType = typeof rateLimits?.plan_type === "string" ? rateLimits.plan_type : undefined;
-    const safeEventTimeMs = Number.isFinite(eventTimeMs) ? eventTimeMs : 0;
-
     tokenEvents += 1;
-    addModelUsage(byModel, resolvedModelId, deltaTotals);
-    addDailyUsage(byDay, eventTimeMs, resolvedModelId, planType, deltaTotals);
-    applyRateLimits(windows, rateLimits, safeEventTimeMs, resolvedModelId, deltaTotals, planTypes);
+    events.push({
+      modelId: resolvedModelId,
+      usage,
+      eventTimeMs,
+      rateLimits,
+      serviceTier,
+      webSearchCalls
+    });
   };
 
   const flushPendingUsageRecord = (): void => {
@@ -667,6 +637,12 @@ async function parseSessionFile(
     if (payloadObject.type === "event_msg") {
       const payload = asRecord(payloadObject.payload);
       if (payload?.type === "thread_settings_applied") {
+        // Compacted/background sessions can begin with a cumulative usage
+        // snapshot before their first model and tier settings. Flush it while
+        // the captured settings are still incomplete so the current-contract
+        // guard below ignores it instead of attributing it to "unknown" with
+        // settings that arrived later.
+        flushPendingUsageRecord();
         const threadSettings = asRecord(payload.thread_settings);
         if (typeof threadSettings?.model === "string" && threadSettings.model.trim()) {
           currentModel = threadSettings.model;

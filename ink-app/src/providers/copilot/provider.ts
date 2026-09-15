@@ -26,6 +26,11 @@ import {
   filterCopilotUsageEvents,
   type CopilotAggregatedUsage
 } from "./usage/aggregate.js";
+import { isNonBillableCopilotModel } from "./models.js";
+import {
+  fetchModelPricing,
+  type ModelPricing
+} from "../pricing.js";
 
 // The token-metered bucket that maps to the "AI Credits" window.
 const AI_CREDITS_QUOTA_ID = "premium_interactions";
@@ -54,6 +59,7 @@ type UsageLoad = {
   linesRead: number;
   events: CopilotUsageEvent[];
   aggregated: CopilotAggregatedUsage;
+  pricing: ReadonlyMap<string, ModelPricing>;
   warnings: string[];
 };
 
@@ -98,12 +104,13 @@ export class CopilotUsageProvider extends UsageProviderBase {
             linesRead: 0,
             events: [],
             aggregated: aggregateCopilotUsage([]),
+            pricing: new Map(),
             warnings: ["Copilot OTEL usage is unavailable."]
           };
     warnings.push(...usage.warnings);
 
     const { windows, unknownLabels, windowWarnings } = quotaInfo
-      ? buildLimitWindows(quotaInfo, usage.events)
+      ? buildLimitWindows(quotaInfo, usage.events, usage.pricing)
       : { windows: [], unknownLabels: [], windowWarnings: [] };
     if (unknownLabels.length > 0) {
       warnings.push(`Copilot quota usage is unknown for: ${unknownLabels.join(", ")}.`);
@@ -136,9 +143,34 @@ export class CopilotUsageProvider extends UsageProviderBase {
   private async loadUsage(): Promise<UsageLoad> {
     const discovery = await discoverCopilotOtelFiles({ root: this.root, env: this.env });
     const parsed = await parseCopilotOtelFiles(discovery.files);
-    const aggregated = aggregateCopilotUsage(parsed.events);
-
     const warnings = [...discovery.warnings, ...parsed.warnings];
+    let pricing = new Map<string, ModelPricing>();
+    try {
+      pricing = await fetchModelPricing(
+        parsed.events
+          .map((event) => event.modelId)
+          .filter((modelId) => !isNonBillableCopilotModel(modelId)),
+        "github_copilot"
+      );
+    } catch {
+      warnings.push("Model pricing API is unavailable.");
+    }
+    const aggregated = aggregateCopilotUsage(parsed.events, pricing);
+    const unpricedModels = [
+      ...new Set(
+        parsed.events
+          .map((event) => event.modelId)
+          .filter(
+            (modelId) =>
+              !isNonBillableCopilotModel(modelId) && !pricing.has(modelId)
+          )
+      )
+    ];
+    if (unpricedModels.length > 0) {
+      warnings.push(
+        `No Copilot API-equivalent pricing returned for: ${unpricedModels.join(", ")}.`
+      );
+    }
     if (parsed.malformedLines > 0) {
       warnings.push(`Skipped ${parsed.malformedLines} malformed Copilot JSONL line(s).`);
     }
@@ -153,6 +185,7 @@ export class CopilotUsageProvider extends UsageProviderBase {
       linesRead: parsed.linesRead,
       events: parsed.events,
       aggregated,
+      pricing,
       warnings
     };
   }
@@ -185,7 +218,8 @@ type BillingWindow = {
 
 function buildLimitWindows(
   quotaInfo: CopilotQuotaInfo,
-  events: CopilotUsageEvent[]
+  events: CopilotUsageEvent[],
+  pricing: ReadonlyMap<string, ModelPricing>
 ): { windows: LimitWindowRow[]; unknownLabels: string[]; windowWarnings: string[] } {
   const planType = quotaInfo.plan ?? "unknown";
   const billing = deriveBillingWindow(quotaInfo.resetAt);
@@ -224,7 +258,7 @@ function buildLimitWindows(
     // local OTEL token usage that falls inside this billing window.
     if (isAiCredits && billing) {
       const windowEvents = filterCopilotUsageEvents(events, billing.startMs, billing.endMs);
-      const windowUsage = aggregateCopilotUsage(windowEvents);
+      const windowUsage = aggregateCopilotUsage(windowEvents, pricing);
       totals = windowUsage.summaryTotals;
       modelUsage = windowUsage.modelUsage;
       eventCount = windowUsage.tokenEvents;

@@ -1,55 +1,208 @@
-export type UsageRate = {
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+
+const MODEL_PRICING_ENDPOINT =
+  process.env.LETMECODE_MODEL_PRICING_ENDPOINT ??
+  "https://devforth.io/admin/adminapi/v1/get_model_pricing";
+const PRICE_CACHE_TTL_MS = 5 * 60_000;
+const USD_TO_CREDITS = 100;
+const MODEL_SLUG_ALIASES: Record<string, string> = {
+  "claude-haiku-4-5": "claude-4-5-haiku-reasoning",
+  "claude-sonnet-4-5": "claude-4-5-sonnet-thinking",
+  "gemini-3-1-pro": "gemini-3-1-pro-preview"
+};
+
+export type ModelPricingSource =
+  | "codex"
+  | "claude_code"
+  | "github_copilot"
+  | "antigravity";
+
+export type ModelPricing = {
   input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cacheWrite5m: number;
-  cacheWrite1h: number;
   output: number;
-  longContext?: {
-    thresholdTokens: number;
-    rate: UsageRateValue;
-  };
-  introOffer?: {
-    // Usage timestamped before this (ms epoch) bills at the discounted `rate`.
-    effectiveUntilMs: number;
-    rate: UsageRateValue;
+  inputCacheRead: number;
+  inputCacheWrite5m: number | null;
+  inputCacheWrite1h: number | null;
+};
+
+export type ModelPricingRequest = {
+  slugs: string[];
+  available_in: {
+    main: ModelPricingSource[];
+    other: ModelPricingSource[];
   };
 };
 
-export type UsageRateValue = Omit<UsageRate, "longContext" | "introOffer">;
+type ModelPricingResponseRow = {
+  slug: string;
+  input: number;
+  output: number;
+  input_cache_read: number;
+  input_cache_w5m: number | null;
+  input_cache_w1h: number | null;
+};
 
-export function resolveUsageRate(
-  rateCard: Record<string, UsageRate>,
-  modelId: string,
-  inputTokens = 0,
-  options: { prefixMatch?: boolean; timestampMs?: number } = {}
-): UsageRateValue | undefined {
-  const model = options.prefixMatch
-    ? Object.keys(rateCard)
-        .sort((left, right) => right.length - left.length)
-        .find((candidate) => modelId === candidate || modelId.startsWith(`${candidate}-`))
-    : modelId;
+export type ModelPricingResponse = {
+  ok: boolean;
+  currency: "USD";
+  unit: "per_1M_tokens";
+  models: ModelPricingResponseRow[];
+};
 
-  if (!model) {
+export type ModelPricingTransport = (
+  request: ModelPricingRequest
+) => Promise<ModelPricingResponse>;
+
+type CachedResponse = {
+  expiresAt: number;
+  response: Promise<ModelPricingResponse>;
+};
+
+const responseCache = new Map<string, CachedResponse>();
+let pricingTransport: ModelPricingTransport = postModelPricingRequest;
+
+export function configureModelPricingTransport(transport: ModelPricingTransport): void {
+  pricingTransport = transport;
+  responseCache.clear();
+}
+
+export function modelPricingSlug(modelId: string): string {
+  const slug = modelId
+    .trim()
+    .toLowerCase()
+    .replace(/[._\s]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "");
+  return MODEL_SLUG_ALIASES[slug] ?? slug;
+}
+
+export async function fetchModelPricing(
+  modelIds: string[],
+  source: ModelPricingSource
+): Promise<Map<string, ModelPricing>> {
+  const slugByModelId = new Map(
+    [...new Set(modelIds)]
+      .filter((modelId) => modelId !== "unknown" && modelId !== "<synthetic>")
+      .map((modelId) => [modelId, modelPricingSlug(modelId)])
+  );
+  const slugs = [...new Set(slugByModelId.values())].sort();
+  if (slugs.length === 0) {
+    return new Map();
+  }
+
+  const request: ModelPricingRequest = {
+    slugs,
+    available_in: { main: [source], other: [] }
+  };
+  const response = await fetchCached(request);
+  const pricingBySlug = new Map(
+    response.models.map((model) => [
+      model.slug,
+      {
+        input: model.input,
+        output: model.output,
+        inputCacheRead: model.input_cache_read,
+        inputCacheWrite5m: model.input_cache_w5m,
+        inputCacheWrite1h: model.input_cache_w1h
+      }
+    ] satisfies [string, ModelPricing])
+  );
+
+  return new Map(
+    [...slugByModelId.entries()].flatMap(([modelId, slug]) => {
+      const pricing = pricingBySlug.get(slug);
+      return pricing ? [[modelId, pricing]] : [];
+    })
+  );
+}
+
+export function modelCostCredits(
+  pricing: ModelPricing | undefined,
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheWrite5mInputTokens: number;
+    cacheWrite1hInputTokens: number;
+  }
+): number | undefined {
+  if (!pricing) {
+    return undefined;
+  }
+  if (usage.cacheWrite5mInputTokens > 0 && pricing.inputCacheWrite5m === null) {
+    return undefined;
+  }
+  if (usage.cacheWrite1hInputTokens > 0 && pricing.inputCacheWrite1h === null) {
     return undefined;
   }
 
-  const rate = rateCard[model];
-  if (!rate) {
-    return undefined;
+  return (
+    (usage.inputTokens / 1_000_000) * pricing.input +
+    (usage.cacheReadInputTokens / 1_000_000) * pricing.inputCacheRead +
+    (usage.cacheWrite5mInputTokens / 1_000_000) * (pricing.inputCacheWrite5m ?? 0) +
+    (usage.cacheWrite1hInputTokens / 1_000_000) * (pricing.inputCacheWrite1h ?? 0) +
+    (usage.outputTokens / 1_000_000) * pricing.output
+  ) * USD_TO_CREDITS;
+}
+
+async function fetchCached(request: ModelPricingRequest): Promise<ModelPricingResponse> {
+  const key = JSON.stringify(request);
+  const cached = responseCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.response;
   }
 
-  if (rate.longContext && inputTokens > rate.longContext.thresholdTokens) {
-    return rate.longContext.rate;
+  const response = pricingTransport(request);
+  responseCache.set(key, {
+    expiresAt: Date.now() + PRICE_CACHE_TTL_MS,
+    response
+  });
+  try {
+    return await response;
+  } catch (error) {
+    responseCache.delete(key);
+    throw error;
   }
+}
 
-  if (
-    rate.introOffer &&
-    Number.isFinite(options.timestampMs) &&
-    (options.timestampMs as number) < rate.introOffer.effectiveUntilMs
-  ) {
-    return rate.introOffer.rate;
-  }
+async function postModelPricingRequest(
+  body: ModelPricingRequest
+): Promise<ModelPricingResponse> {
+  return new Promise((resolve, reject) => {
+    const encodedBody = Buffer.from(JSON.stringify(body), "utf8");
+    const target = new URL(MODEL_PRICING_ENDPOINT);
+    const request = target.protocol === "http:" ? httpRequest : httpsRequest;
+    const req = request(
+      {
+        method: "POST",
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        headers: {
+          "content-type": "application/json",
+          "content-length": encodedBody.byteLength
+        }
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on("end", () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`Model pricing request failed with status ${res.statusCode ?? "unknown"}`));
+            return;
+          }
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")) as ModelPricingResponse);
+        });
+      }
+    );
 
-  return rate;
+    req.on("error", reject);
+    req.setTimeout(5_000, () => {
+      req.destroy(new Error("Model pricing request timed out"));
+    });
+    req.write(encodedBody);
+    req.end();
+  });
 }

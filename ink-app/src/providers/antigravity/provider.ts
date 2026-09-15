@@ -15,7 +15,11 @@ import {
   buildDailyUsageRows,
   createDailyUsageAggregates
 } from "../daily.js";
-import { resolveUsageRate, type UsageRate, type UsageRateValue } from "../pricing.js";
+import {
+  fetchModelPricing,
+  modelCostCredits,
+  type ModelPricing
+} from "../pricing.js";
 import {
   modelScopeLabel,
   modelScopeMatches,
@@ -41,63 +45,16 @@ export type {
   AntigravityUsageRecord
 } from "./types.js";
 
-const RATE_CARD: Record<string, UsageRate> = {
-  "gemini-3.5-flash": {
-    input: 150,
-    cacheRead: 15,
-    cacheWrite: 150,
-    cacheWrite5m: 150,
-    cacheWrite1h: 150,
-    output: 900
-  },
-  "gemini-3.1-pro": {
-    input: 200,
-    cacheRead: 20,
-    cacheWrite: 200,
-    cacheWrite5m: 200,
-    cacheWrite1h: 200,
-    output: 1200,
-    longContext: {
-      thresholdTokens: 200_000,
-      rate: {
-        input: 400,
-        cacheRead: 40,
-        cacheWrite: 400,
-        cacheWrite5m: 400,
-        cacheWrite1h: 400,
-        output: 1800
-      }
-    }
-  },
-  "gemini-3-flash": {
-    input: 50,
-    cacheRead: 5,
-    cacheWrite: 50,
-    cacheWrite5m: 50,
-    cacheWrite1h: 50,
-    output: 300
-  },
-  "claude-sonnet-4-6": {
-    input: 300,
-    cacheRead: 30,
-    cacheWrite: 375,
-    cacheWrite5m: 375,
-    cacheWrite1h: 600,
-    output: 1500
-  },
-  "claude-opus-4-6": {
-    input: 500,
-    cacheRead: 50,
-    cacheWrite: 625,
-    cacheWrite5m: 625,
-    cacheWrite1h: 1000,
-    output: 2500
-  }
-};
-
-const UNPRICED_MODELS = new Set([
-  "gpt-oss-120b"
-]);
+/*
+Previous local prices in credits per 1M tokens, kept temporarily as requested:
+gemini-3.8-flash, 3.7-flash, 3.6-flash 75 / 7.5 / 75 / 375
+gemini-3.5-flash 150 / 15 / 150 / 900
+gemini-3.1-pro 200 / 20 / 200 / 1200; >200k 400 / 40 / 400 / 1800
+gemini-3-flash 50 / 5 / 50 / 300
+claude-sonnet-4-6 300 / 30 / 375 / 1500
+claude-opus-4-6 500 / 50 / 625 / 2500
+Columns: input / cache read / cache write / output.
+*/
 
 export type AntigravityUsageProviderOptions = {
   collectUsage?: (
@@ -172,12 +129,22 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       );
     }
 
+    let pricing = new Map<string, ModelPricing>();
+    try {
+      pricing = await fetchModelPricing(
+        selectedRecords.map((record) => normalizeAntigravityModelId(record.modelId)),
+        "antigravity"
+      );
+    } catch {
+      warnings.push("Model pricing API is unavailable.");
+    }
+
     const byModel = new Map<string, UsageTotals>();
     const byDay = createDailyUsageAggregates();
 
     for (const record of selectedRecords) {
       const modelId = normalizeAntigravityModelId(record.modelId);
-      const totals = usageRecordToTotals(modelId, record);
+      const totals = usageRecordToTotals(modelId, record, pricing);
       addModelUsage(byModel, modelId, totals);
       addDailyUsage(
         byDay,
@@ -200,11 +167,11 @@ export class AntigravityUsageProvider extends UsageProviderBase {
       );
 
     const unknownPricedModels = modelUsage
-      .filter((row) => !rateForModel(row.modelId, rowInputTokens(row)) && !UNPRICED_MODELS.has(row.modelId))
+      .filter((row) => row.totals.estimatedCreditsStatus === "unavailable")
       .map((row) => row.modelId);
     if (unknownPricedModels.length > 0) {
       warnings.push(
-        `No Antigravity estimated API-equivalent rate configured for: ${unknownPricedModels.join(", ")}.`
+        `No complete Antigravity API-equivalent pricing returned for: ${unknownPricedModels.join(", ")}.`
       );
     }
 
@@ -214,7 +181,8 @@ export class AntigravityUsageProvider extends UsageProviderBase {
           quota,
           quotaSnapshot.planType,
           selectedRecords,
-          quotaSnapshot.fetchedAt
+          quotaSnapshot.fetchedAt,
+          pricing
         )
       ) ?? [];
 
@@ -293,7 +261,8 @@ function buildAntigravityLimitWindow(
   quota: AntigravityQuotaEntry,
   planType: string,
   records: AntigravityUsageRecord[],
-  fetchedAt: number
+  fetchedAt: number,
+  pricing: ReadonlyMap<string, ModelPricing>
 ): LimitWindowRow {
   const startAt = quota.resetAt - quota.windowMinutes * 60_000;
   const byModel = new Map<string, UsageTotals>();
@@ -313,7 +282,7 @@ function buildAntigravityLimitWindow(
     addModelUsage(
       byModel,
       modelId,
-      usageRecordToTotals(modelId, record)
+      usageRecordToTotals(modelId, record, pricing)
     );
   }
 
@@ -392,8 +361,10 @@ function recordTokenTotal(record: AntigravityUsageRecord): number {
 
 function usageRecordToTotals(
   modelId: string,
-  record: AntigravityUsageRecord
+  record: AntigravityUsageRecord,
+  pricing: ReadonlyMap<string, ModelPricing>
 ): UsageTotals {
+  const estimatedCredits = creditsFor(modelId, record, pricing);
   return {
     inputTokens: record.input,
     outputTokens: record.output,
@@ -410,7 +381,7 @@ function usageRecordToTotals(
       record.cacheRead +
       record.cacheWrite +
       record.output,
-    estimatedCredits: creditsFor(modelId, record),
+    estimatedCredits: estimatedCredits ?? 0,
     eventCount: 1,
     // The local RPC reports cache reads but never cache writes, so a zero cache
     // write is genuinely unknown (not a confirmed zero) and is surfaced as "-".
@@ -418,39 +389,22 @@ function usageRecordToTotals(
     // which case it is both billed (see creditsFor) and shown as known.
     cacheReadStatus: "known",
     cacheWriteStatus: record.cacheWrite > 0 ? "known" : "unavailable",
-    estimatedCreditsStatus: rateForModel(modelId, record.input)
-      ? "known"
-      : "unavailable"
+    estimatedCreditsStatus: estimatedCredits === undefined ? "unavailable" : "known"
   };
 }
 
 function creditsFor(
   modelId: string,
-  record: AntigravityUsageRecord
-): number {
-  const rate = rateForModel(modelId, record.input);
-
-  if (!rate) {
-    return 0;
-  }
-
-  return (
-    (record.input / 1_000_000) * rate.input +
-    (record.cacheRead / 1_000_000) * rate.cacheRead +
-    (record.cacheWrite / 1_000_000) * rate.cacheWrite +
-    (record.output / 1_000_000) * rate.output
-  );
-}
-
-function rateForModel(
-  modelId: string,
-  inputTokens: number
-): UsageRateValue | undefined {
-  return resolveUsageRate(RATE_CARD, modelId, inputTokens);
-}
-
-function rowInputTokens(row: ModelUsageRow): number {
-  return row.totals.inputTokens + row.totals.cacheReadInputTokens + row.totals.cacheWriteInputTokens;
+  record: AntigravityUsageRecord,
+  pricing: ReadonlyMap<string, ModelPricing>
+): number | undefined {
+  return modelCostCredits(pricing.get(modelId), {
+    inputTokens: record.input,
+    outputTokens: record.output,
+    cacheReadInputTokens: record.cacheRead,
+    cacheWrite5mInputTokens: record.cacheWrite,
+    cacheWrite1hInputTokens: 0
+  });
 }
 
 function addModelUsage(

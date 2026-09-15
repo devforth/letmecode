@@ -29,30 +29,27 @@ import {
   buildDailyUsageRows,
   createDailyUsageAggregates
 } from "./daily.js";
-import { resolveUsageRate, type UsageRate } from "./pricing.js";
+import {
+  fetchModelPricing,
+  modelCostCredits,
+  type ModelPricing
+} from "./pricing.js";
 
-// Source: https://platform.claude.com/docs/en/about-claude/pricing
-// (checked 2026-09-05).
-const RATE_CARD: Record<string, UsageRate> = {
-  "claude-fable-5-1": { input: 10, cacheRead: 0.25, cacheWrite: 12.5, cacheWrite5m: 12.5, cacheWrite1h: 20, output: 50 },
-  "claude-fable-5": { input: 10, cacheRead: 1, cacheWrite: 12.5, cacheWrite5m: 12.5, cacheWrite1h: 20, output: 50 },
-  "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
-  "claude-opus-4-8": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
-  "claude-opus-4-7": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
-  "claude-opus-4-6": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
-  "claude-opus-4-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite5m: 6.25, cacheWrite1h: 10, output: 25 },
-  "claude-opus-4-1": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
-  "claude-opus-4": { input: 15, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite5m: 18.75, cacheWrite1h: 30, output: 75 },
-  "claude-sonnet-5": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite5m: 2.5, cacheWrite1h: 4, output: 10 },
-  "claude-sonnet-4-6": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
-  "claude-sonnet-4-5": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
-  "claude-sonnet-4": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite5m: 3.75, cacheWrite1h: 6, output: 15 },
-  "claude-haiku-4-5": { input: 1, cacheRead: 0.1, cacheWrite: 1.25, cacheWrite5m: 1.25, cacheWrite1h: 2, output: 5 },
-  "claude-haiku-3-5": { input: 0.8, cacheRead: 0.08, cacheWrite: 1, cacheWrite5m: 1, cacheWrite1h: 1.6, output: 4 }
-};
+/*
+Previous local prices in USD per 1M tokens, kept temporarily as requested:
+claude-fable-5-1 and claude-mythos-5-1 10 / 0.25 / 12.5 / 20 / 50
+claude-fable-5 and claude-mythos-5 10 / 1 / 12.5 / 20 / 50
+claude-opus-5, 4-8, 4-7, 4-6, 4-5 5 / 0.5 / 6.25 / 10 / 25
+claude-opus-4-1 and 4 15 / 1.5 / 18.75 / 30 / 75
+claude-sonnet-5 2 / 0.2 / 2.5 / 4 / 10
+claude-sonnet-4-6, 4-5, 4 3 / 0.3 / 3.75 / 6 / 15
+claude-haiku-4-5 1 / 0.1 / 1.25 / 2 / 5
+claude-haiku-3-5 0.8 / 0.08 / 1 / 1.6 / 4
+Columns: input / cache read / cache write 5m / cache write 1h / output.
+*/
 
 const execFileAsync = promisify(execFile);
-const USD_TO_CREDITS = 100;
+const EMPTY_MODEL_PRICING: ReadonlyMap<string, ModelPricing> = new Map();
 const VSCODE_CLAUDE_EXTENSION_PREFIX = "anthropic.claude-code-";
 const CLAUDE_SESSION_WINDOW_MINUTES = 5 * 60;
 const CLAUDE_WEEK_WINDOW_MINUTES = 7 * 24 * 60;
@@ -254,7 +251,25 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       );
     }
 
+    let pricing = new Map<string, ModelPricing>();
+    try {
+      pricing = await fetchModelPricing(
+        selectedEvents
+          .map((event) => event.modelId)
+          .filter((modelId) => !isInternalClaudeModel(modelId)),
+        "claude_code"
+      );
+    } catch {
+      warnings.push("Model pricing API is unavailable.");
+    }
+
     for (const event of selectedEvents) {
+      event.totals = usageToTotals(
+        event.modelId,
+        event.usage,
+        event.timestampMs,
+        pricing
+      );
       addModelUsage(byModel, event.modelId, event.totals);
       const planType = typeof event.rateLimits?.plan_type === "string" ? event.rateLimits.plan_type : undefined;
       const safeEventTimeMs = Number.isFinite(event.timestampMs) ? event.timestampMs : 0;
@@ -284,10 +299,10 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       .sort((left, right) => right.totals.estimatedCredits - left.totals.estimatedCredits);
 
     const unknownPricedModels = modelUsage
-      .map((row) => row.modelId)
-      .filter((modelId) => !resolveRate(modelId) && !isInternalClaudeModel(modelId));
+      .filter((row) => row.totals.estimatedCreditsStatus === "unavailable")
+      .map((row) => row.modelId);
     if (unknownPricedModels.length > 0) {
-      warnings.push(`No API-equivalent rate configured for: ${unknownPricedModels.join(", ")}.`);
+      warnings.push(`No complete API-equivalent pricing returned for: ${unknownPricedModels.join(", ")}.`);
     }
 
     if (parsedSessionFiles.length === 0) {
@@ -376,20 +391,15 @@ function normalizeUsage(value: unknown): ClaudeUsage {
   };
 }
 
-function resolveRate(modelId: string, timestampMs?: number): UsageRate | undefined {
-  return resolveUsageRate(RATE_CARD, modelId, 0, { prefixMatch: true, timestampMs });
-}
-
 function isInternalClaudeModel(modelId: string): boolean {
   return modelId === "<synthetic>";
 }
 
-function creditsFor(modelId: string, usage: ClaudeUsage, timestampMs?: number): number {
-  const rate = resolveRate(modelId, timestampMs);
-  if (!rate) {
-    return 0;
-  }
-
+function creditsFor(
+  modelId: string,
+  usage: ClaudeUsage,
+  pricing: ReadonlyMap<string, ModelPricing>
+): number | undefined {
   const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
   // The US inference surcharge must match regardless of the casing the source
   // reports (e.g. "us", "US"), so compare case-insensitively.
@@ -399,15 +409,21 @@ function creditsFor(modelId: string, usage: ClaudeUsage, timestampMs?: number): 
     usage.speed.trim().toLowerCase() === "fast" && isClaudeFastPricedModel(modelId)
       ? 2
       : 1;
-  const tokenCostUsd =
-    (usage.inputTokens / 1_000_000) * rate.input +
-    (usage.cacheReadInputTokens / 1_000_000) * rate.cacheRead +
-    (cacheWriteBreakdown.cacheWrite5mInputTokens / 1_000_000) * rate.cacheWrite5m +
-    (cacheWriteBreakdown.cacheWrite1hInputTokens / 1_000_000) * rate.cacheWrite1h +
-    (usage.outputTokens / 1_000_000) * rate.output;
-  const webSearchCostUsd = usage.webSearchRequests * 0.01;
+  const tokenCostCredits = modelCostCredits(pricing.get(modelId), {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    cacheWrite5mInputTokens: cacheWriteBreakdown.cacheWrite5mInputTokens,
+    cacheWrite1hInputTokens: cacheWriteBreakdown.cacheWrite1hInputTokens
+  });
+  if (tokenCostCredits === undefined) {
+    return undefined;
+  }
 
-  return (tokenCostUsd * speedMultiplier * inferenceMultiplier + webSearchCostUsd) * USD_TO_CREDITS;
+  return (
+    tokenCostCredits * speedMultiplier * inferenceMultiplier +
+    usage.webSearchRequests
+  );
 }
 
 function isClaudeFastPricedModel(modelId: string): boolean {
@@ -416,13 +432,19 @@ function isClaudeFastPricedModel(modelId: string): boolean {
   );
 }
 
-function usageToTotals(modelId: string, usage: ClaudeUsage, timestampMs?: number): UsageTotals {
+function usageToTotals(
+  modelId: string,
+  usage: ClaudeUsage,
+  _timestampMs?: number,
+  pricing: ReadonlyMap<string, ModelPricing> = EMPTY_MODEL_PRICING
+): UsageTotals {
   const cacheWriteBreakdown = resolveClaudeCacheWriteBreakdown(usage);
   const cacheWriteInputTokens =
     cacheWriteBreakdown.cacheWrite5mInputTokens +
     cacheWriteBreakdown.cacheWrite1hInputTokens;
 
-  const rateKnown = Boolean(resolveRate(modelId, timestampMs)) || isInternalClaudeModel(modelId);
+  const estimatedCredits = creditsFor(modelId, usage, pricing);
+  const rateKnown = estimatedCredits !== undefined || isInternalClaudeModel(modelId);
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
@@ -436,7 +458,7 @@ function usageToTotals(modelId: string, usage: ClaudeUsage, timestampMs?: number
       usage.cacheReadInputTokens +
       cacheWriteInputTokens +
       usage.outputTokens,
-    estimatedCredits: creditsFor(modelId, usage, timestampMs),
+    estimatedCredits: estimatedCredits ?? 0,
     eventCount: 1,
     estimatedCreditsStatus: rateKnown ? "known" : "unavailable"
   };
