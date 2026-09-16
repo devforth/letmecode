@@ -10,6 +10,11 @@ const CREDIT_TO_DOLLARS = 0.01;
 // Limit windows at or below this used-percent carry too little signal to be
 // worth reporting, so they are dropped from the anonymous usage payload.
 const SKIP_REPORT_USED_PERCENTS = 3;
+// Name of the catch-all limit class: the window meters every model the plan
+// offers, rather than one carved-out family.
+const ALL_LIMIT_CLASS = "All";
+// Mirrors the reporting endpoint's schema, which caps `limit_class` at 64.
+const LIMIT_CLASS_MAX_LENGTH = 64;
 
 let versionCache: Promise<string> | null = null;
 
@@ -28,6 +33,13 @@ export type UsageRawByModel = {
 export type AnonymousUsageReport = {
   agent: string;
   model_type: string;
+  /**
+   * Display-ready name of the limit class this window belongs to, e.g. "All",
+   * "Fable", "Main" or "Other". letmecode owns this vocabulary: consumers key
+   * off it directly instead of re-deriving classes from provider-specific
+   * `model_type` strings.
+   */
+  limit_class: string;
   userid_hash: string;
   plan_id: string;
   window_duration_seconds: number;
@@ -81,6 +93,7 @@ function buildAnonymousUsageReport(
   return {
     agent: stats.analytics?.agentName ?? stats.providerLabel.replace(/\s+/g, ""),
     model_type: resolveReportModelType(stats, window),
+    limit_class: resolveReportLimitClass(stats, window),
     userid_hash: stats.analytics?.userIdHash ?? "",
     plan_id: window.planType,
     window_duration_seconds: window.windowMinutes * 60,
@@ -92,6 +105,58 @@ function buildAnonymousUsageReport(
     usage_raw: buildUsageRaw(window.modelUsage),
     letmecode_version: letmecodeVersion
   };
+}
+
+/**
+ * Canonical, display-ready name of the limit class a window belongs to.
+ * Every provider words the same idea differently - Antigravity separates Gemini
+ * from third-party models, Claude carves a model family out of the weekly
+ * window - so letmecode folds them onto one vocabulary and consumers never have
+ * to learn the provider-specific spellings in `model_type`.
+ *
+ * The vocabulary is open: a class nobody has seen before is reported under its
+ * own name rather than forced into an existing bucket.
+ */
+function resolveReportLimitClass(stats: ProviderStats, window: LimitWindowRow): string {
+  if (stats.providerId === "claude") {
+    const modelFamily = window.modelType?.toLowerCase().replace(/\s+only$/, "").trim();
+    return modelFamily ? toLimitClassName(modelFamily) : ALL_LIMIT_CLASS;
+  }
+
+  if (stats.providerId === "antigravity") {
+    const limitId = window.limitId.toLowerCase();
+    if (limitId.includes("gemini")) {
+      return "Main";
+    }
+    if (limitId.startsWith("3p") || limitId.includes("third-party")) {
+      return "Other";
+    }
+    return toLimitClassName(window.limitId);
+  }
+
+  if (stats.providerId === "copilot") {
+    // Copilot quota labels ("AI Credits", "Premium requests") are already the
+    // name of the bucket they meter.
+    return window.modelType ? toLimitClassName(window.modelType) : ALL_LIMIT_CLASS;
+  }
+
+  // Codex, and anything else, meters every model against one shared allowance.
+  return ALL_LIMIT_CLASS;
+}
+
+/**
+ * Title-case a provider string into a class name, leaving words that already
+ * carry capitals alone so acronyms such as "AI Credits" survive intact.
+ */
+function toLimitClassName(value: string): string {
+  const name = value
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => (/[A-Z]/.test(word) ? word : word.charAt(0).toUpperCase() + word.slice(1)))
+    .join(" ");
+
+  return name ? truncateSchemaString(name, LIMIT_CLASS_MAX_LENGTH) : ALL_LIMIT_CLASS;
 }
 
 function resolveReportModelType(stats: ProviderStats, window: LimitWindowRow): string {

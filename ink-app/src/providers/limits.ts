@@ -49,7 +49,10 @@ export function isLimitWindowActive(
 }
 
 export function selectLatestActiveLimitWindows<
-  T extends Pick<LimitWindowRow, "planType" | "windowMinutes" | "startTimeUtcIso" | "endTimeUtcIso">
+  T extends Pick<
+    LimitWindowRow,
+    "planType" | "limitId" | "windowMinutes" | "startTimeUtcIso" | "endTimeUtcIso"
+  >
 >(windows: T[], nowMs = Date.now()): Set<T> {
   const latestByPlanAndWindow = new Map<string, { window: T; startMs: number }>();
 
@@ -59,7 +62,12 @@ export function selectLatestActiveLimitWindows<
     }
 
     const startMs = Date.parse(window.startTimeUtcIso);
-    const groupKey = JSON.stringify([window.planType, window.windowMinutes]);
+    // `limitId` is part of the key because a plan can run several limits of the
+    // same duration side by side: Claude meters an all-models week and a
+    // model-family week that share a plan, a length and a reset instant. Keyed
+    // on plan and duration alone they collapse into one group and the family
+    // window loses the tie, so it never counts as active.
+    const groupKey = JSON.stringify([window.planType, window.limitId, window.windowMinutes]);
     const current = latestByPlanAndWindow.get(groupKey);
     if (!current || startMs > current.startMs) {
       latestByPlanAndWindow.set(groupKey, { window, startMs });

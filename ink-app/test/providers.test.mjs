@@ -379,6 +379,25 @@ test("selectLatestActiveLimitWindows picks one latest-start row per plan and dur
   assert.deepEqual([...selected], [latestMonthly, weeklyTeam, monthlyPlus]);
 });
 
+test("selectLatestActiveLimitWindows keeps same-duration limits of one plan apart", () => {
+  // Claude runs an all-models week and a model-family week that share a plan, a
+  // duration and a reset instant. Both are active limits, so both must survive.
+  const nowMs = Date.parse("2026-09-15T12:00:00.000Z");
+  const week = (limitId) => ({
+    planType: "team|default_claude_max_5x",
+    limitId,
+    windowMinutes: 10080,
+    startTimeUtcIso: "2026-09-10T12:00:00.000Z",
+    endTimeUtcIso: "2026-09-17T12:00:00.000Z"
+  });
+  const allModelsWeek = week("current-week");
+  const fableOnlyWeek = week("current-week-fable-only");
+
+  const selected = selectLatestActiveLimitWindows([allModelsWeek, fableOnlyWeek], nowMs);
+
+  assert.deepEqual([...selected], [allModelsWeek, fableOnlyWeek]);
+});
+
 test("estimateLimitFullValue extrapolates a point estimate and a ±1% range", () => {
   // $29 used at 1.9% of the limit implies a ~$1526 full value; the ±1% band
   // spans [1.9%+1% => low, 1.9%-1% => high].
@@ -4595,4 +4614,73 @@ test("buildAnonymousUsageReports prefers explicit limit-window model types", asy
   assert.equal(reports.length, 1);
   assert.equal(reports[0].plan_id, "team_premium");
   assert.equal(reports[0].model_type, "sonnet-only");
+  assert.equal(reports[0].limit_class, "Sonnet");
+});
+
+test("buildAnonymousUsageReports names each limit class in one shared vocabulary", async () => {
+  const emptyTotals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    cacheWrite5mInputTokens: 0,
+    cacheWrite1hInputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+    estimatedCredits: 10,
+    eventCount: 1
+  };
+  const statsFor = (providerId, window) => ({
+    providerId,
+    providerLabel: providerId,
+    summary: {
+      filesScanned: 1,
+      linesRead: 1,
+      tokenEvents: 1,
+      totals: { ...emptyTotals },
+      distinctModels: [],
+      distinctPlanTypes: ["plan"],
+      rootLabel: "root",
+      rootPath: "/tmp/root"
+    },
+    modelUsage: [],
+    dayUsage: [],
+    primaryLimitWindows: [],
+    secondaryLimitWindows: [
+      {
+        scope: "secondary",
+        planType: "plan",
+        windowMinutes: 10080,
+        startTimeUtcIso: "2026-09-08T12:00:00Z",
+        endTimeUtcIso: "2026-09-15T12:00:00Z",
+        firstSeenUtcIso: "2026-09-09T10:00:00Z",
+        lastSeenUtcIso: "2026-09-14T08:00:00Z",
+        minUsedPercent: 0,
+        maxUsedPercent: 20,
+        totals: { ...emptyTotals },
+        modelUsage: [],
+        eventCount: 1,
+        ...window
+      }
+    ],
+    warnings: [],
+    analytics: { agentName: providerId, userIdHash: "user" }
+  });
+
+  const classOf = async (providerId, window) =>
+    (await buildAnonymousUsageReports([statsFor(providerId, window)]))[0].limit_class;
+
+  // A window with no carved-out family meters everything the plan offers.
+  assert.equal(await classOf("claude", { limitId: "current-week" }), "All");
+  assert.equal(
+    await classOf("claude", { limitId: "current-week-fable-only", modelType: "fable only" }),
+    "Fable"
+  );
+  // Antigravity words the same split as Gemini vs third-party models.
+  assert.equal(await classOf("antigravity", { limitId: "gemini-weekly" }), "Main");
+  assert.equal(await classOf("antigravity", { limitId: "3p-weekly" }), "Other");
+  // Codex meters every model against one allowance, whatever it calls the limit.
+  assert.equal(await classOf("codex", { limitId: "secondary", modelType: "gpt-5.2-codex" }), "All");
+  // Copilot quota labels already name their bucket, acronyms included.
+  assert.equal(await classOf("copilot", { limitId: "ai-credits", modelType: "AI Credits" }), "AI Credits");
 });
