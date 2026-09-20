@@ -265,6 +265,37 @@ function claudeAssistantEvent({
   });
 }
 
+function claudeQuotaRejectionEvent({
+  timestamp,
+  rateLimitType,
+  resetsAtUtcIso,
+  sessionId = "claude-session-1",
+  entrypoint = "claude-vscode",
+  version = "2.1.260"
+}) {
+  return JSON.stringify({
+    type: "assistant",
+    sessionId,
+    timestamp,
+    entrypoint,
+    version,
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+    error: "rate_limit",
+    quotaLimits: {
+      status: "rejected",
+      rateLimitType,
+      resetsAt: Date.parse(resetsAtUtcIso) / 1000,
+      overageStatus: "rejected",
+      isUsingOverage: false
+    },
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Weekly limit reached" }]
+    }
+  });
+}
+
 function claudeOpenedFileInIdeAttachment({
   timestamp,
   entrypoint = "cli",
@@ -3428,6 +3459,197 @@ test("ClaudeUsageProvider falls back to a live plan when OAuth credentials are a
   });
 });
 
+test("ClaudeUsageProvider stops pairing weekly usage that belongs to a previous quota cycle", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/quota-cycle-change.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-24T09:00:00.000Z",
+        requestId: "req-previous-cycle",
+        messageId: "msg-previous-cycle",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 1000,
+        outputTokens: 100
+      }),
+      // The old cycle resets at an instant the live weekly window never mentions,
+      // so everything up to this rejection was metered somewhere else.
+      claudeQuotaRejectionEvent({
+        timestamp: "2026-06-24T12:00:00.000Z",
+        rateLimitType: "seven_day",
+        resetsAtUtcIso: "2026-06-26T12:00:00.000Z"
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T09:00:00.000Z",
+        requestId: "req-current-cycle",
+        messageId: "msg-current-cycle",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 40,
+        outputTokens: 4
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 5% used · resets Jun 25, 1:30pm (UTC)",
+          "Current week (all models): 10% used · resets Jun 30, 1pm (UTC)"
+        ].join("\n"),
+      readOauthCredentials: async () =>
+        JSON.stringify({
+          claudeAiOauth: {
+            subscriptionType: "pro",
+            rateLimitTier: "default_claude_ai"
+          }
+        }),
+      now: () => new Date("2026-06-25T10:00:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.secondaryLimitWindows.length, 1);
+    const week = stats.secondaryLimitWindows[0];
+    assert.equal(week.startTimeUtcIso, "2026-06-23T13:00:00Z");
+    assert.equal(week.pairedUsageStartUtcIso, "2026-06-24T12:00:00.001Z");
+    assert.equal(week.eventCount, 1);
+    assert.equal(week.totals.inputTokens, 40);
+    assert.equal(week.totals.outputTokens, 4);
+    assert.equal(
+      stats.warnings.some(
+        (warning) =>
+          warning.includes("7d pro|default_claude_ai limit restarted its percentage mid-window") &&
+          warning.includes("2026-06-24T12:00:00.001Z")
+      ),
+      true
+    );
+
+    // The five-hour window opened after the rejection, so it keeps its full span.
+    assert.equal(stats.primaryLimitWindows.length, 1);
+    assert.equal(stats.primaryLimitWindows[0].pairedUsageStartUtcIso, undefined);
+    assert.equal(stats.primaryLimitWindows[0].totals.inputTokens, 40);
+  });
+});
+
+test("ClaudeUsageProvider ignores quota rejections from the cycle the live window reports", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/same-quota-cycle.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-24T09:00:00.000Z",
+        requestId: "req-same-cycle",
+        messageId: "msg-same-cycle",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 1000,
+        outputTokens: 100
+      }),
+      claudeQuotaRejectionEvent({
+        timestamp: "2026-06-24T12:00:00.000Z",
+        rateLimitType: "seven_day",
+        resetsAtUtcIso: "2026-06-30T13:00:00.000Z"
+      })
+    ]);
+
+    const stats = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput: async () =>
+        [
+          "Current session: 5% used · resets Jun 25, 11:30pm (UTC)",
+          "Current week (all models): 90% used · resets Jun 30, 1pm (UTC)"
+        ].join("\n"),
+      readOauthCredentials: async () =>
+        JSON.stringify({
+          claudeAiOauth: {
+            subscriptionType: "pro",
+            rateLimitTier: "default_claude_ai"
+          }
+        }),
+      now: () => new Date("2026-06-25T10:00:00.000Z")
+    }).getStats();
+
+    assert.equal(stats.secondaryLimitWindows.length, 1);
+    assert.equal(stats.secondaryLimitWindows[0].pairedUsageStartUtcIso, undefined);
+    assert.equal(stats.secondaryLimitWindows[0].totals.inputTokens, 1000);
+    assert.equal(
+      stats.warnings.some((warning) => warning.includes("restarted its percentage mid-window")),
+      false
+    );
+  });
+});
+
+test("ClaudeUsageProvider pairs only post-switch usage once it has seen the account change plan", async () => {
+  await withTempRoot(async (root) => {
+    await writeClaudeSession(root, "sample-project/plan-switch.jsonl", [
+      claudeAssistantEvent({
+        timestamp: "2026-06-24T09:00:00.000Z",
+        requestId: "req-old-plan",
+        messageId: "msg-old-plan",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 1000,
+        outputTokens: 100
+      }),
+      claudeAssistantEvent({
+        timestamp: "2026-06-25T18:00:00.000Z",
+        requestId: "req-new-plan",
+        messageId: "msg-new-plan",
+        entrypoint: "claude-vscode",
+        model: "claude-sonnet-5",
+        inputTokens: 40,
+        outputTokens: 4
+      })
+    ]);
+
+    const readUsageCommandOutput = async () =>
+      [
+        "Current session: 5% used · resets Jun 25, 11:30pm (UTC)",
+        "Current week (all models): 10% used · resets Jun 30, 1pm (UTC)"
+      ].join("\n");
+    const statsOnOldPlan = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput,
+      readOauthCredentials: async () =>
+        JSON.stringify({
+          claudeAiOauth: {
+            subscriptionType: "team",
+            rateLimitTier: "default_claude_max_5x"
+          }
+        }),
+      now: () => new Date("2026-06-25T10:00:00.000Z")
+    }).getStats();
+
+    // Nothing else was ever recorded, so the first sighting of a plan proves nothing.
+    assert.equal(statsOnOldPlan.secondaryLimitWindows[0].pairedUsageStartUtcIso, undefined);
+    assert.equal(statsOnOldPlan.secondaryLimitWindows[0].totals.inputTokens, 1040);
+
+    const statsAfterSwitch = await new ClaudeUsageProvider({
+      root,
+      readUsageCommandOutput,
+      readOauthCredentials: async () =>
+        JSON.stringify({
+          claudeAiOauth: {
+            subscriptionType: "pro",
+            rateLimitTier: "default_claude_ai"
+          }
+        }),
+      now: () => new Date("2026-06-25T18:00:00.000Z")
+    }).getStats();
+
+    const week = statsAfterSwitch.secondaryLimitWindows[0];
+    assert.equal(week.planType, "pro|default_claude_ai");
+    assert.equal(week.pairedUsageStartUtcIso, "2026-06-25T18:00:00Z");
+    assert.equal(week.eventCount, 1);
+    assert.equal(week.totals.inputTokens, 40);
+
+    const state = JSON.parse(
+      await fs.readFile(path.join(root, ".letmecode", "claude-plan-state.json"), "utf8")
+    );
+    assert.deepEqual(
+      state.observations.map((observation) => observation.planType),
+      ["team|default_claude_max_5x", "pro|default_claude_ai"]
+    );
+    assert.equal(state.observations[1].switchedFromPlanType, "team|default_claude_max_5x");
+  });
+});
+
 test("ClaudeUsageProvider captures the Sonnet-only weekly window when its reset is omitted", async () => {
   await withTempRoot(async (root) => {
     await writeClaudeSession(root, "sample-project/sonnet-only.jsonl", [
@@ -4375,6 +4597,73 @@ test("buildAnonymousUsagePayload wraps reports in a data array", async () => {
   });
   assert.equal("input_cache_w5m" in payload.data[0].usage_raw["gpt-5.5"], true);
   assert.equal("input_cache_w1h" in payload.data[0].usage_raw["gpt-5.5"], true);
+});
+
+test("buildAnonymousUsagePayload skips windows whose percentage restarted mid-window", async () => {
+  const totals = (overrides = {}) => ({
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    cacheWrite5mInputTokens: 0,
+    cacheWrite1hInputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+    estimatedCredits: 0,
+    eventCount: 0,
+    ...overrides
+  });
+  const week = (overrides = {}) => ({
+    scope: "secondary",
+    planType: "pro|default_claude_ai",
+    limitId: "current-week",
+    windowMinutes: 10080,
+    startTimeUtcIso: "2026-06-23T13:00:00Z",
+    endTimeUtcIso: "2026-06-30T13:00:00Z",
+    firstSeenUtcIso: "2026-06-25T18:00:00Z",
+    lastSeenUtcIso: "2026-06-25T19:00:00Z",
+    minUsedPercent: 40,
+    maxUsedPercent: 40,
+    measuredUsedPercent: 40,
+    totals: totals({ inputTokens: 40, estimatedCredits: 5, eventCount: 1 }),
+    modelUsage: [],
+    eventCount: 1,
+    ...overrides
+  });
+
+  const reports = await buildAnonymousUsageReports([
+    {
+      providerId: "claude",
+      providerLabel: "Claude",
+      summary: {
+        filesScanned: 1,
+        linesRead: 1,
+        tokenEvents: 1,
+        totals: totals(),
+        distinctModels: [],
+        distinctPlanTypes: [],
+        rootLabel: "~/.claude/projects",
+        rootPath: "/tmp/.claude/projects"
+      },
+      modelUsage: [],
+      dayUsage: [],
+      primaryLimitWindows: [],
+      secondaryLimitWindows: [
+        week({ limitId: "restarted-week", pairedUsageStartUtcIso: "2026-06-25T18:00:00Z" }),
+        week({ limitId: "intact-week" })
+      ],
+      warnings: [],
+      analytics: { agentName: "Claude", userIdHash: "hash" }
+    }
+  ]);
+
+  // The percentage of the restarted week covers usage the report cannot carry.
+  assert.deepEqual(
+    reports.map((report) => report.limit_class),
+    ["All"]
+  );
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].value_dollars > 0, true);
 });
 
 test("buildAnonymousUsagePayload skips windows at or below three percent usage", async () => {

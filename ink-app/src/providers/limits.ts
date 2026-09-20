@@ -354,6 +354,22 @@ export function resolveMeasuredUsedPercent(window: LimitWindowRow): number | nul
   return clampUsedPercent(window.maxUsedPercent - window.minUsedPercent);
 }
 
+/**
+ * True when a window's token totals cover only part of the window, so anything
+ * extrapolated from them (e.g. the limit's full value) is approximate.
+ */
+export function isPartialUsagePairing(
+  window: Pick<LimitWindowRow, "startTimeUtcIso" | "pairedUsageStartUtcIso">
+): boolean {
+  if (!window.pairedUsageStartUtcIso) {
+    return false;
+  }
+
+  const pairedStartMs = Date.parse(window.pairedUsageStartUtcIso);
+  const startMs = Date.parse(window.startTimeUtcIso);
+  return Number.isFinite(pairedStartMs) && Number.isFinite(startMs) && pairedStartMs > startMs;
+}
+
 function clampUsedPercent(value: number): number {
   if (!Number.isFinite(value)) {
     return 0;

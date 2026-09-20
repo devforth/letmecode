@@ -15,6 +15,7 @@ import {
 import { reportAnonymousUsage } from "./reporting.js";
 import {
   estimateLimitFullValue,
+  isPartialUsagePairing,
   resolveMeasuredUsedPercent,
   selectLatestActiveLimitWindows,
   type LimitFullValueEstimate
@@ -976,7 +977,7 @@ function buildLimitWindowTableRow(window: LimitWindowRow, isActive: boolean): Te
       formatUsageUsd(window.totals),
       // Extrapolated full value of the limit, rounded to a single figure here;
       // the details panel shows the unrounded ±1% range.
-      formatLimitFullValueCompact(window.totals, resolveMeasuredUsedPercent(window))
+      formatLimitFullValueCompact(window)
     ]
   };
 }
@@ -1053,6 +1054,13 @@ function SelectionDetailsPanel(props: {
               label="Period"
               value={`${formatCompactLocalDateTime(row.startTimeUtcIso)} → ${formatCompactLocalDateTime(row.endTimeUtcIso)}`}
             />
+            {isPartialUsagePairing(row) ? (
+              <DetailRow
+                label="Paired from"
+                value={formatCompactLocalDateTime(row.pairedUsageStartUtcIso ?? row.startTimeUtcIso)}
+                note="percentage restarted mid-window"
+              />
+            ) : null}
             <DetailRow label="Input" value={formatInteger(row.totals.inputTokens)} />
             <DetailRow label="Cache read" value={formatCacheTokens(row.totals.cacheReadStatus, row.totals.cacheReadInputTokens)} />
             <DetailRow label="Cache write" value={formatCacheTokens(row.totals.cacheWriteStatus, row.totals.cacheWriteInputTokens)} />
@@ -1063,8 +1071,12 @@ function SelectionDetailsPanel(props: {
         <DetailRow label="API eq." value={formatUsageUsd(row.totals)} note="API equivalent cost" />
         <DetailRow
           label="Full value"
-          value={formatLimitFullValueRange(row.totals, resolveMeasuredUsedPercent(row))}
-          note="API equivalent cost extrapolated from the paired token/usage interval"
+          value={formatLimitFullValueRange(row)}
+          note={
+            isPartialUsagePairing(row)
+              ? `approximate: this percentage restarted mid-window, usage paired from ${formatCompactLocalDateTime(row.pairedUsageStartUtcIso ?? row.startTimeUtcIso)}`
+              : "API equivalent cost extrapolated from the paired token/usage interval"
+          }
         />
       </DetailsPanelFrame>
     );
@@ -1241,19 +1253,27 @@ function limitFullValueUsd(totals: UsageTotals, usedPercent: number | null): Lim
   return estimateLimitFullValue(usedUsd, usedPercent);
 }
 
-function formatLimitFullValueCompact(totals: UsageTotals, usedPercent: number | null): string {
-  const estimate = limitFullValueUsd(totals, usedPercent);
-  return estimate ? formatUsdWhole(estimate.point) : "-";
+// A window whose paired usage covers only part of its span is paired across an
+// only approximately known interval, so the figures it yields carry a "~".
+function formatLimitFullValueCompact(window: LimitWindowRow): string {
+  const estimate = limitFullValueUsd(window.totals, resolveMeasuredUsedPercent(window));
+  if (!estimate) {
+    return "-";
+  }
+
+  const value = formatUsdWhole(estimate.point);
+  return isPartialUsagePairing(window) ? `~${value}` : value;
 }
 
-function formatLimitFullValueRange(totals: UsageTotals, usedPercent: number | null): string {
-  const estimate = limitFullValueUsd(totals, usedPercent);
+function formatLimitFullValueRange(window: LimitWindowRow): string {
+  const estimate = limitFullValueUsd(window.totals, resolveMeasuredUsedPercent(window));
   if (!estimate) {
     return "-";
   }
 
   const low = formatUsd(estimate.low);
-  return Number.isFinite(estimate.high) ? `${low} – ${formatUsd(estimate.high)}` : `≥ ${low}`;
+  const range = Number.isFinite(estimate.high) ? `${low} – ${formatUsd(estimate.high)}` : `≥ ${low}`;
+  return isPartialUsagePairing(window) ? `~ ${range}` : range;
 }
 
 function formatUnitUsd(value: number): string {

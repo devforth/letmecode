@@ -50,6 +50,15 @@ export type LimitWindowRow = {
    * local token data could not be paired with a percentage interval.
    */
   measuredUsedPercent?: number | null;
+  /**
+   * Start of the interval `totals`/`modelUsage` cover, when it is later than
+   * `startTimeUtcIso`. A provider sets it when the window's percentage restarted
+   * mid-window - e.g. the account changed plan - so the earlier usage no longer
+   * belongs to the reported percentage. The exact restart instant is rarely
+   * observable, so the pairing is only approximate and so is anything
+   * extrapolated from it.
+   */
+  pairedUsageStartUtcIso?: string;
   totals: UsageTotals;
   modelUsage: ModelUsageRow[];
   eventCount: number;

@@ -22,8 +22,10 @@ import {
   asRecord,
   buildWindowLists,
   createLimitWindowAggregates,
+  isPartialUsagePairing,
   numberOrZero
 } from "./limits.js";
+import { recordClaudePlanObservation } from "./claude-plan-state.js";
 import {
   addDailyUsage,
   buildDailyUsageRows,
@@ -54,6 +56,14 @@ const VSCODE_CLAUDE_EXTENSION_PREFIX = "anthropic.claude-code-";
 const CLAUDE_SESSION_WINDOW_MINUTES = 5 * 60;
 const CLAUDE_WEEK_WINDOW_MINUTES = 7 * 24 * 60;
 const ANSI_ESCAPE_SEQUENCE = /\u001B\[[0-9;]*[A-Za-z]/g;
+// Transcript `quotaLimits` entries name the quota cycle that rejected a request.
+// Their reset instant identifies the cycle, so a cycle that differs from the one
+// /usage reports now proves the account's quota accounting changed mid-window.
+const CLAUDE_QUOTA_WINDOW_MINUTES_BY_RATE_LIMIT_TYPE: Record<string, number> = {
+  five_hour: CLAUDE_SESSION_WINDOW_MINUTES,
+  seven_day: CLAUDE_WEEK_WINDOW_MINUTES
+};
+const CLAUDE_QUOTA_RESET_MATCH_TOLERANCE_MS = 60_000;
 
 const MONTH_INDEX_BY_LABEL: Record<string, number> = {
   jan: 0,
@@ -122,11 +132,18 @@ type ParsedUsageEvent = {
   rateLimits: Record<string, unknown> | null;
 };
 
+type ClaudeQuotaObservation = {
+  timestampMs: number;
+  rateLimitType: string;
+  resetsAtMs: number;
+};
+
 type ParsedClaudeSessionFile = {
   filePath: string;
   linesRead: number;
   malformedLines: number;
   events: ParsedUsageEvent[];
+  quotaObservations: ClaudeQuotaObservation[];
 };
 
 type ParsedUsageEventAccumulator = {
@@ -232,6 +249,8 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       }
     }
 
+    const quotaObservations = parsedSessionFiles.flatMap((file) => file.quotaObservations);
+
     const selectedEvents = [
       ...new Set(parsedEvents.keyedEvents.values())
     ];
@@ -318,7 +337,8 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       readOauthCredentials: this.readOauthCredentials,
       traceLogger: options.traceLogger,
       now: this.now(),
-      selectedEvents
+      selectedEvents,
+      quotaObservations
     });
 
     const primaryLimitWindows =
@@ -329,6 +349,14 @@ export class ClaudeUsageProvider extends UsageProviderBase {
       liveLimitWindows.secondaryLimitWindows.length > 0
         ? liveLimitWindows.secondaryLimitWindows
         : fallbackSecondaryLimitWindows;
+    for (const window of [...primaryLimitWindows, ...secondaryLimitWindows]) {
+      if (isPartialUsagePairing(window) && window.pairedUsageStartUtcIso) {
+        warnings.push(
+          `The ${formatWindowMinutesLabel(window.windowMinutes)} ${window.planType} limit restarted its percentage mid-window, so only usage from ${window.pairedUsageStartUtcIso} is paired with it and its full value is approximate.`
+        );
+      }
+    }
+
     traceClaude(
       options.traceLogger,
       [
@@ -650,6 +678,7 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
   let linesRead = 0;
   let malformedLines = 0;
   const events: ParsedUsageEvent[] = [];
+  const quotaObservations: ClaudeQuotaObservation[] = [];
 
   for await (const line of lineReader) {
     linesRead += 1;
@@ -667,6 +696,13 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
 
     if (payloadObject.type !== "assistant") {
       continue;
+    }
+
+    // Rejected requests carry the quota cycle that turned them down but no usage,
+    // so this has to be read before the usage gate below drops the line.
+    const quotaObservation = extractQuotaObservation(payloadObject);
+    if (quotaObservation) {
+      quotaObservations.push(quotaObservation);
     }
 
     const message = asRecord(payloadObject.message);
@@ -700,7 +736,30 @@ async function parseSessionFile(filePath: string): Promise<ParsedClaudeSessionFi
     filePath,
     linesRead,
     malformedLines,
-    events
+    events,
+    quotaObservations
+  };
+}
+
+function extractQuotaObservation(
+  payloadObject: Record<string, unknown>
+): ClaudeQuotaObservation | null {
+  const quotaLimits = asRecord(payloadObject.quotaLimits);
+  if (!quotaLimits) {
+    return null;
+  }
+
+  const rateLimitType = typeof quotaLimits.rateLimitType === "string" ? quotaLimits.rateLimitType : "";
+  const resetsAtSeconds = numberOrZero(quotaLimits.resetsAt);
+  const timestampMs = Date.parse(String(payloadObject.timestamp ?? ""));
+  if (!rateLimitType || !resetsAtSeconds || !Number.isFinite(timestampMs)) {
+    return null;
+  }
+
+  return {
+    timestampMs,
+    rateLimitType,
+    resetsAtMs: resetsAtSeconds * 1000
   };
 }
 
@@ -874,6 +933,17 @@ function extractRateLimits(
   return asRecord(payloadObject.rate_limits) ?? asRecord(message?.rate_limits);
 }
 
+function formatWindowMinutesLabel(windowMinutes: number): string {
+  if (windowMinutes % (24 * 60) === 0) {
+    return `${windowMinutes / (24 * 60)}d`;
+  }
+  if (windowMinutes % 60 === 0) {
+    return `${windowMinutes / 60}h`;
+  }
+
+  return `${windowMinutes}m`;
+}
+
 function traceClaude(traceLogger: ProviderTraceLogger | undefined, message: string): void {
   if (!traceLogger) {
     return;
@@ -957,6 +1027,7 @@ async function buildLiveLimitWindows(options: {
   traceLogger?: ProviderTraceLogger;
   now: Date;
   selectedEvents: ParsedUsageEvent[];
+  quotaObservations: ClaudeQuotaObservation[];
 }): Promise<{ primaryLimitWindows: LimitWindowRow[]; secondaryLimitWindows: LimitWindowRow[] }> {
   const [usageOutput, credentials] = await Promise.all([
     readClaudeUsageCommandOutput(options.root, options.readUsageCommandOutput, options.traceLogger),
@@ -970,12 +1041,40 @@ async function buildLiveLimitWindows(options: {
   const resolvedPlanType = resolveClaudeLivePlanType(credentials);
   traceClaude(options.traceLogger, `Resolved live plan type ${resolvedPlanType}.`);
 
+  // A percentage reported for the current plan cannot describe usage produced
+  // under the plan the account had before it, so remember when the switch became
+  // visible and stop pairing anything older with that percentage.
+  const planStartMs =
+    resolvedPlanType === "live"
+      ? null
+      : await recordClaudePlanObservation({
+          root: options.root,
+          planType: resolvedPlanType,
+          now: options.now,
+          traceLogger: options.traceLogger
+        });
+  if (planStartMs !== null) {
+    traceClaude(
+      options.traceLogger,
+      `Plan ${resolvedPlanType} first seen at ${toUtcIso(planStartMs)}; older usage is not paired with its percentages.`
+    );
+  }
+
+  const buildRow = (snapshot: LiveUsageWindowSnapshot) =>
+    buildLiveLimitWindowRow(
+      snapshot,
+      resolvedPlanType,
+      options.selectedEvents,
+      options.now,
+      resolvePairedUsageStartMs(snapshot, options.quotaObservations, planStartMs, options.traceLogger)
+    );
+
   const primaryLimitWindows = snapshots
     .filter((snapshot) => snapshot.scope === "primary")
-    .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now));
+    .map(buildRow);
   const secondaryLimitWindows = snapshots
     .filter((snapshot) => snapshot.scope === "secondary")
-    .map((snapshot) => buildLiveLimitWindowRow(snapshot, resolvedPlanType, options.selectedEvents, options.now));
+    .map(buildRow);
 
   for (let index = 0; index < snapshots.length; index += 1) {
     const snapshot = snapshots[index];
@@ -994,6 +1093,7 @@ async function buildLiveLimitWindows(options: {
         `used=${snapshot.usedPercent}%`,
         `limit=${snapshot.limitId}`,
         `range=${row.startTimeUtcIso}->${row.endTimeUtcIso}`,
+        `pairedFrom=${row.pairedUsageStartUtcIso ?? row.startTimeUtcIso}`,
         `matchedEvents=${row.eventCount}`,
         `input=${row.totals.inputTokens}`,
         `output=${row.totals.outputTokens}`,
@@ -1580,17 +1680,86 @@ function resolveHour24(hour12: number, meridiem: string): number {
   return meridiem === "pm" ? hour12 + 12 : hour12;
 }
 
+/**
+ * Start of the interval a snapshot's percentage can describe. Usage recorded
+ * before the account's current quota accounting began - a plan switch, or a
+ * rejection from a different quota cycle inside the same window - is no longer
+ * represented by the percentage /usage reports now, so pairing it would inflate
+ * everything extrapolated from the pair. Returns null when the whole window
+ * belongs to the current accounting.
+ *
+ * Both signals only bracket the switch: a foreign-cycle rejection happened at or
+ * before it, the first sighting of the current plan at or after it. The earliest
+ * candidate wins, so no usage that the current percentage does cover is dropped,
+ * and callers treat what they extrapolate as approximate rather than exact.
+ */
+function resolvePairedUsageStartMs(
+  snapshot: LiveUsageWindowSnapshot,
+  quotaObservations: ClaudeQuotaObservation[],
+  planStartMs: number | null,
+  traceLogger?: ProviderTraceLogger
+): number | null {
+  const windowStartMs = snapshot.resetsAtMs - snapshot.windowMinutes * 60_000;
+  const candidates: number[] = [];
+
+  if (planStartMs !== null && planStartMs > windowStartMs) {
+    candidates.push(planStartMs);
+  }
+
+  const foreignCycleEndMs = resolveForeignQuotaCycleEndMs(snapshot, quotaObservations, windowStartMs);
+  if (foreignCycleEndMs !== null) {
+    traceClaude(
+      traceLogger,
+      `Window ${snapshot.limitId} contains a ${snapshot.windowMinutes}m quota rejection from another cycle at ${toUtcIso(foreignCycleEndMs)}.`
+    );
+    // The rejection itself belongs to the previous cycle, so pairing resumes
+    // right after it.
+    candidates.push(foreignCycleEndMs + 1);
+  }
+
+  return candidates.length > 0 ? Math.min(...candidates) : null;
+}
+
+/**
+ * Latest moment inside the window at which a quota cycle other than the one the
+ * snapshot reports was still in force.
+ */
+function resolveForeignQuotaCycleEndMs(
+  snapshot: LiveUsageWindowSnapshot,
+  quotaObservations: ClaudeQuotaObservation[],
+  windowStartMs: number
+): number | null {
+  let latestMs: number | null = null;
+
+  for (const observation of quotaObservations) {
+    if (
+      CLAUDE_QUOTA_WINDOW_MINUTES_BY_RATE_LIMIT_TYPE[observation.rateLimitType] !== snapshot.windowMinutes ||
+      observation.timestampMs < windowStartMs ||
+      observation.timestampMs >= snapshot.resetsAtMs ||
+      Math.abs(observation.resetsAtMs - snapshot.resetsAtMs) <= CLAUDE_QUOTA_RESET_MATCH_TOLERANCE_MS
+    ) {
+      continue;
+    }
+
+    latestMs = latestMs === null ? observation.timestampMs : Math.max(latestMs, observation.timestampMs);
+  }
+
+  return latestMs;
+}
+
 function buildLiveLimitWindowRow(
   snapshot: LiveUsageWindowSnapshot,
   planType: string,
   selectedEvents: ParsedUsageEvent[],
-  now: Date
+  now: Date,
+  pairedUsageStartMs: number | null = null
 ): LimitWindowRow {
   const startTimeMs = snapshot.resetsAtMs - snapshot.windowMinutes * 60_000;
+  const usageStartMs = Math.max(startTimeMs, pairedUsageStartMs ?? startTimeMs);
   const inWindowEvents = selectedEvents.filter(
     (event) =>
       Number.isFinite(event.timestampMs) &&
-      event.timestampMs >= startTimeMs &&
+      event.timestampMs >= usageStartMs &&
       event.timestampMs < snapshot.resetsAtMs &&
       matchesClaudeLiveSnapshotModelScope(snapshot, event.modelId)
   );
@@ -1599,6 +1768,7 @@ function buildLiveLimitWindowRow(
     totals.estimatedCreditsStatus = "unavailable";
   }
   const fallbackLastSeenMs = Math.min(now.getTime(), snapshot.resetsAtMs);
+  const hasPartialPairing = usageStartMs > startTimeMs;
   const firstSeenMs =
     inWindowEvents.reduce(
       (minimum, event) => Math.min(minimum, event.timestampMs),
@@ -1618,7 +1788,8 @@ function buildLiveLimitWindowRow(
     windowMinutes: snapshot.windowMinutes,
     startTimeUtcIso: toUtcIso(startTimeMs),
     endTimeUtcIso: toUtcIso(snapshot.resetsAtMs),
-    firstSeenUtcIso: toUtcIso(Number.isFinite(firstSeenMs) ? firstSeenMs : startTimeMs),
+    ...(hasPartialPairing ? { pairedUsageStartUtcIso: toUtcIso(usageStartMs) } : {}),
+    firstSeenUtcIso: toUtcIso(Number.isFinite(firstSeenMs) ? firstSeenMs : usageStartMs),
     lastSeenUtcIso: toUtcIso(Number.isFinite(lastSeenMs) ? lastSeenMs : fallbackLastSeenMs),
     minUsedPercent: snapshot.usedPercent,
     maxUsedPercent: snapshot.usedPercent,

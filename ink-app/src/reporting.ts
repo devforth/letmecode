@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LimitWindowRow, ModelUsageRow, ProviderStats } from "./providers/index.js";
-import { resolveMeasuredUsedPercent } from "./providers/limits.js";
+import { isPartialUsagePairing, resolveMeasuredUsedPercent } from "./providers/limits.js";
 
 const REPORTING_ENDPOINT = "https://devforth.io/admin/api/report_ussage_anonymous";
 const CREDIT_TO_DOLLARS = 0.01;
@@ -234,6 +234,9 @@ function resolveReportedUsedPercents(window: LimitWindowRow): number {
 function shouldReportUsageWindow(window: LimitWindowRow): boolean {
   return (
     window.totals.estimatedCreditsStatus !== "unavailable" &&
+    // A window whose percentage restarted mid-window pairs a full percentage
+    // with partial dollars, which would skew every aggregate built from it.
+    !isPartialUsagePairing(window) &&
     resolveReportedUsedPercents(window) > SKIP_REPORT_USED_PERCENTS
   );
 }
